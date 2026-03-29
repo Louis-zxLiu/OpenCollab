@@ -61,11 +61,16 @@ class SandboxInterceptor:
             resolved = os.path.abspath(os.path.join(self.root, target_path))
         else:
             resolved = os.path.abspath(target_path)
+        resolved = os.path.realpath(resolved)
 
         # Check against all allowed roots
         for allowed in self.allowed_roots:
-            if resolved.startswith(allowed + os.sep) or resolved == allowed:
-                return resolved
+            allowed_real = os.path.realpath(allowed)
+            try:
+                if os.path.commonpath([resolved, allowed_real]) == allowed_real:
+                    return resolved
+            except ValueError:
+                continue
 
         raise PermissionError(
             f"Path escapes workspace: '{target_path}' resolved to '{resolved}' "

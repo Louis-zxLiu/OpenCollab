@@ -268,14 +268,19 @@ class Team:
             base_url=self.base_url,
         )
 
-        # Remaining budget for teammate
+        # Remaining budget for teammate; reserve room for Lead follow-up turns.
         remaining_budget = max(10_000, self._total_budget - self._used_tokens)
+        reserve_for_lead = min(
+            max(10_000, self._total_budget // 4),
+            max(0, remaining_budget - 10_000),
+        )
+        teammate_budget = max(10_000, remaining_budget - reserve_for_lead)
 
         teammate_session = Session(
             agent=teammate_agent,
             env=env,
             tracer=self.tracer,
-            max_budget_tokens=remaining_budget // 2,  # Reserve half for Lead
+            max_budget_tokens=teammate_budget,
             max_steps=50,
             on_event=self.on_event,
             confirm_fn=self.confirm_fn,

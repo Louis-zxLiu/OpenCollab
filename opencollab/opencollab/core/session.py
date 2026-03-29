@@ -59,6 +59,7 @@ COMPACTION_KEEP_RECENT = 8  # keep last N messages un-summarized
 
 # Loop detection (ref: opencode doom_loop detection — 3 identical calls)
 MAX_SIMILAR_CALLS = 3
+MAX_CALL_HASH_WINDOW = 200
 
 # Output truncation for tool results (ref: openclaw truncateOversizedToolResults)
 MAX_TOOL_OUTPUT_CHARS = 16_000
@@ -190,11 +191,21 @@ class Session:
         """Restore session from JSONL."""
         session = cls(agent=agent, **kwargs)
         session.messages = []
+        allowed_roles = {"system", "user", "assistant", "tool"}
         with open(path) as f:
-            for line in f:
+            for lineno, line in enumerate(f, 1):
                 line = line.strip()
                 if line:
-                    session.messages.append(json.loads(line))
+                    msg = json.loads(line)
+                    if not isinstance(msg, dict):
+                        raise ValueError(f"Invalid message at line {lineno}: expected object")
+                    role = msg.get("role")
+                    if role not in allowed_roles:
+                        raise ValueError(f"Invalid message role at line {lineno}: {role}")
+                    session.messages.append(msg)
+
+        if not session.messages:
+            session.messages = [{"role": "system", "content": agent.system_prompt}]
         return session
 
     # ---- Internal: single step ----
@@ -278,6 +289,8 @@ class Session:
             # Loop detection — hash the (tool_name, args) tuple
             call_hash = hashlib.md5(json.dumps({"name": tool_name, "args": args}, sort_keys=True).encode()).hexdigest()
             self._recent_call_hashes.append(call_hash)
+            if len(self._recent_call_hashes) > MAX_CALL_HASH_WINDOW:
+                self._recent_call_hashes = self._recent_call_hashes[-MAX_CALL_HASH_WINDOW:]
 
             # Check for repeated identical calls (ref: opencode doom_loop)
             recent_same = sum(1 for h in self._recent_call_hashes[-MAX_SIMILAR_CALLS * 2 :] if h == call_hash)
@@ -393,6 +406,10 @@ class Session:
 
     async def _emit(self, event: SessionEvent) -> None:
         if self.on_event:
-            result = self.on_event(event)
-            if asyncio.iscoroutine(result):
-                await result
+            try:
+                result = self.on_event(event)
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception:
+                # UI callback errors should not crash the agent loop.
+                return

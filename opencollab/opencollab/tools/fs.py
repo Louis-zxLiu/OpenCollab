@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 from typing import Any, Callable, Awaitable
 
 from filelock import FileLock
@@ -20,6 +21,20 @@ from filelock import FileLock
 from opencollab.tools.base import Tool
 from opencollab.tools.safety import SandboxInterceptor
 from opencollab.core.env import Environment
+
+
+def _resolve_env_scoped_path(path: str, env: Environment | None) -> str:
+    """Resolve path under env.workspace and reject workspace escapes."""
+    if not env:
+        return path
+
+    workspace = os.path.abspath(env.workspace)
+    resolved = path if os.path.isabs(path) else os.path.join(workspace, path)
+    resolved = os.path.abspath(resolved)
+
+    if resolved != workspace and not resolved.startswith(workspace + os.sep):
+        raise PermissionError(f"Path escapes workspace: {path}")
+    return resolved
 
 
 class FileReadTool(Tool):
@@ -56,7 +71,7 @@ class FileReadTool(Tool):
         if self._interceptor:
             path = self._interceptor.check_path(path)
         elif env:
-            path = os.path.join(env.workspace, path) if not os.path.isabs(path) else path
+            path = _resolve_env_scoped_path(path, env)
 
         try:
             if env:
@@ -139,7 +154,7 @@ class FileWriteTool(Tool):
         if self._interceptor:
             path = self._interceptor.check_path(path)
         elif env:
-            path = os.path.join(env.workspace, path) if not os.path.isabs(path) else path
+            path = _resolve_env_scoped_path(path, env)
 
         # File lock for concurrent safety (ref: design doc filelock)
         lock = FileLock(f"{path}.lock", timeout=10)
@@ -227,13 +242,15 @@ class GrepTool(Tool):
 
         # Try using ripgrep if available (faster), fallback to Python
         if env:
+            quoted_pattern = shlex.quote(pattern)
+            quoted_search_path = shlex.quote(search_path)
             rg_cmd = f"rg -n --max-count {max_results} "
             if glob_pattern:
-                rg_cmd += f"-g '{glob_pattern}' "
-            rg_cmd += f"'{pattern}' {search_path} 2>/dev/null || grep -rn "
+                rg_cmd += f"-g {shlex.quote(glob_pattern)} "
+            rg_cmd += f"{quoted_pattern} {quoted_search_path} 2>/dev/null || grep -rn "
             if glob_pattern:
-                rg_cmd += f"--include='{glob_pattern}' "
-            rg_cmd += f"'{pattern}' {search_path} 2>/dev/null | head -n {max_results}"
+                rg_cmd += f"--include={shlex.quote(glob_pattern)} "
+            rg_cmd += f"{quoted_pattern} {quoted_search_path} 2>/dev/null | head -n {max_results}"
 
             result = await env.exec_cmd(rg_cmd, timeout=30)
             if result.stdout.strip():

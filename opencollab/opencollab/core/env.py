@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -225,7 +226,8 @@ class DockerEnvironment(Environment):
             return ExecResult(returncode=-1, stdout="", stderr=f"Command timed out after {timeout}s")
 
     async def read_file(self, path: str) -> str:
-        result = await self.exec_cmd(f"cat {path}")
+        quoted_path = shlex.quote(path)
+        result = await self.exec_cmd(f"cat -- {quoted_path}")
         if result.returncode != 0:
             raise FileNotFoundError(result.stderr)
         return result.stdout
@@ -233,7 +235,12 @@ class DockerEnvironment(Environment):
     async def write_file(self, path: str, content: str) -> None:
         import base64
         encoded = base64.b64encode(content.encode()).decode()
-        await self.exec_cmd(f"echo '{encoded}' | base64 -d > {path}")
+        quoted_path = shlex.quote(path)
+        await self.exec_cmd(
+            f"base64 -d > {quoted_path} <<'__OPENCOLLAB_B64__'\n"
+            f"{encoded}\n"
+            "__OPENCOLLAB_B64__"
+        )
 
     async def cleanup(self) -> None:
         if self._container_id:
