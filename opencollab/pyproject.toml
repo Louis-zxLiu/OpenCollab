@@ -1,0 +1,38 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "opencollab"
+version = "0.1.0"
+description = "Minimal multi-agent software development framework — first principles, context isolation, tool-based delegation."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = [
+    "openai>=1.30",
+    "anthropic>=0.40",
+    "typer>=0.12",
+    "rich>=13.0",
+    "prompt-toolkit>=3.0",
+    "filelock>=3.15",
+    "pydantic>=2.0",
+]
+
+[project.optional-dependencies]
+mcp = ["mcp>=1.0"]
+docker = ["docker>=7.0"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.24", "ruff>=0.5"]
+
+[project.scripts]
+opencollab = "opencollab.cli.main:app"
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

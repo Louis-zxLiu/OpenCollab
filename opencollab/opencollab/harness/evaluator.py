@@ -1,0 +1,189 @@
+"""Headless Evaluation Runner — for SWE-bench and research benchmarks.
+
+Provides a pure, non-interactive entry point for batch evaluation.
+Each task runs in an isolated environment, produces a git patch, and
+records a full trajectory for analysis.
+
+Ref:
+- Design doc: run_eval_task with Environment + issue_desc → patch
+- Harness Engineering: standardized output, sandboxed execution, trajectory recording
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import time
+from dataclasses import dataclass, field
+from typing import Any
+
+from opencollab.core.agent import Agent
+from opencollab.core.session import Session
+from opencollab.core.env import Environment, LocalEnvironment, DockerEnvironment
+from opencollab.core.tracer import Tracer
+from opencollab.tools.bash import BashTool
+from opencollab.tools.fs import FileReadTool, FileWriteTool, GrepTool
+from opencollab.tools.safety import SandboxInterceptor
+
+
+@dataclass
+class EvalResult:
+    """Result of a single evaluation task."""
+
+    task_id: str
+    patch: str  # Git diff output
+    success: bool
+    tokens_used: int
+    steps: int
+    duration: float
+    error: str | None = None
+    trajectory_path: str | None = None
+
+
+@dataclass
+class EvalTask:
+    """A single evaluation task (e.g., one SWE-bench instance)."""
+
+    task_id: str
+    description: str  # Issue/problem description
+    repo_path: str | None = None  # Path to repo (for local env)
+    docker_image: str | None = None  # Docker image (for container env)
+    timeout: float = 600.0  # Max seconds per task
+    max_tokens: int = 100_000
+
+
+EVAL_AGENT_PROMPT = """\
+You are an autonomous coding agent. Complete the following task by modifying the code.
+
+Rules:
+- Read relevant files before making changes.
+- Make minimal, targeted changes to fix the issue.
+- After making changes, verify them (run tests if available).
+- When done, make sure all changes are saved. Do NOT commit.
+"""
+
+
+async def run_eval_task(
+    task: EvalTask,
+    model: str = "gpt-4o",
+    provider: str = "openai",
+    api_key: str | None = None,
+    base_url: str | None = None,
+    output_dir: str = "eval_results",
+) -> EvalResult:
+    """Run a single evaluation task.
+
+    Returns an EvalResult with the git patch of all changes made.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    start = time.monotonic()
+
+    # Create tracer
+    tracer = Tracer(run_id=task.task_id, output_dir=os.path.join(output_dir, "trajectories"))
+
+    # Create environment
+    if task.docker_image:
+        env = DockerEnvironment(image=task.docker_image)
+        await env.setup(mount_dir=task.repo_path)
+    else:
+        env = LocalEnvironment(workspace=task.repo_path or ".")
+
+    # Create agent with standard tools
+    interceptor = SandboxInterceptor(env.workspace) if isinstance(env, LocalEnvironment) else None
+    agent = Agent(
+        name="eval_agent",
+        system_prompt=EVAL_AGENT_PROMPT,
+        tools=[
+            BashTool(interceptor),
+            FileReadTool(interceptor),
+            FileWriteTool(interceptor),
+            GrepTool(interceptor),
+        ],
+        model=model,
+        provider=provider,
+        api_key=api_key,
+        base_url=base_url,
+    )
+
+    session = Session(
+        agent=agent,
+        env=env,
+        tracer=tracer,
+        max_budget_tokens=task.max_tokens,
+        max_steps=80,
+    )
+
+    # Run
+    error = None
+    try:
+        await session.add_user_message(task.description)
+        await asyncio.wait_for(
+            session.run_loop(),
+            timeout=task.timeout,
+        )
+    except asyncio.TimeoutError:
+        error = f"Task timed out after {task.timeout}s"
+    except Exception as e:
+        error = f"{type(e).__name__}: {e}"
+
+    # Extract git patch
+    patch_result = await env.exec_cmd("git diff")
+    patch = patch_result.stdout
+
+    # If no git diff, try git diff HEAD
+    if not patch.strip():
+        patch_result = await env.exec_cmd("git diff HEAD")
+        patch = patch_result.stdout
+
+    duration = time.monotonic() - start
+    tracer.close()
+
+    # Cleanup environment
+    await env.cleanup()
+
+    return EvalResult(
+        task_id=task.task_id,
+        patch=patch,
+        success=bool(patch.strip()) and error is None,
+        tokens_used=session.used_tokens,
+        steps=session.step_count,
+        duration=duration,
+        error=error,
+        trajectory_path=tracer.path,
+    )
+
+
+async def run_eval_batch(
+    tasks: list[EvalTask],
+    concurrency: int = 4,
+    **kwargs,
+) -> list[EvalResult]:
+    """Run multiple evaluation tasks with controlled concurrency."""
+    semaphore = asyncio.Semaphore(concurrency)
+    results: list[EvalResult] = []
+
+    async def run_one(task: EvalTask) -> EvalResult:
+        async with semaphore:
+            return await run_eval_task(task, **kwargs)
+
+    coros = [run_one(t) for t in tasks]
+    results = await asyncio.gather(*coros, return_exceptions=False)
+    return results
+
+
+def save_results(results: list[EvalResult], output_path: str) -> None:
+    """Save evaluation results as JSONL."""
+    with open(output_path, "w") as f:
+        for r in results:
+            record = {
+                "task_id": r.task_id,
+                "success": r.success,
+                "tokens_used": r.tokens_used,
+                "steps": r.steps,
+                "duration": round(r.duration, 2),
+                "error": r.error,
+                "patch_lines": len(r.patch.splitlines()),
+                "trajectory": r.trajectory_path,
+            }
+            f.write(json.dumps(record) + "\n")
