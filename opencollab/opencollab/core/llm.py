@@ -6,6 +6,7 @@ and Anthropic natively. No custom message format — uses standard dicts.
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from dataclasses import dataclass, field
@@ -147,18 +148,11 @@ class LLMClient:
         tools: list[dict] | None,
         temperature: float,
     ) -> LLMResponse:
-        # Extract system from messages
-        system_parts = []
-        conv_messages = []
-        for m in messages:
-            if m["role"] == "system":
-                system_parts.append(m["content"])
-            else:
-                conv_messages.append(m)
+        system_parts, anthropic_messages = _convert_to_anthropic_messages(messages)
 
         kwargs: dict[str, Any] = {
             "model": self.model,
-            "messages": conv_messages,
+            "messages": anthropic_messages,
             "max_tokens": 8192,
             "temperature": temperature,
         }
@@ -166,7 +160,6 @@ class LLMClient:
             kwargs["system"] = "\n\n".join(system_parts)
 
         if tools:
-            # Convert OpenAI tool format to Anthropic format
             anthropic_tools = []
             for t in tools:
                 func = t["function"]
@@ -185,8 +178,6 @@ class LLMClient:
             if block.type == "text":
                 content += block.text
             elif block.type == "tool_use":
-                import json
-
                 tool_calls.append({
                     "id": block.id,
                     "type": "function",
@@ -258,17 +249,11 @@ class LLMClient:
         tools: list[dict] | None,
         temperature: float,
     ) -> AsyncIterator[StreamDelta]:
-        system_parts = []
-        conv_messages = []
-        for m in messages:
-            if m["role"] == "system":
-                system_parts.append(m["content"])
-            else:
-                conv_messages.append(m)
+        system_parts, anthropic_messages = _convert_to_anthropic_messages(messages)
 
         kwargs: dict[str, Any] = {
             "model": self.model,
-            "messages": conv_messages,
+            "messages": anthropic_messages,
             "max_tokens": 8192,
             "temperature": temperature,
         }
@@ -302,6 +287,65 @@ class LLMClient:
                 elif event.type == "message_delta":
                     if hasattr(event.delta, "stop_reason") and event.delta.stop_reason:
                         yield StreamDelta(finish_reason=event.delta.stop_reason)
+
+
+def _convert_to_anthropic_messages(messages: list[dict]) -> tuple[list[str], list[dict]]:
+    """Convert OpenAI-format message history to Anthropic format.
+
+    Returns (system_parts, anthropic_messages).
+
+    Key conversions:
+    - role="system" → extracted to system_parts (Anthropic uses top-level system param)
+    - role="assistant" with tool_calls → assistant with tool_use content blocks
+    - role="tool" → role="user" with tool_result content blocks (merged if consecutive)
+    """
+    system_parts: list[str] = []
+    anthropic_messages: list[dict] = []
+
+    for m in messages:
+        role = m.get("role", "")
+
+        if role == "system":
+            system_parts.append(m.get("content", ""))
+
+        elif role == "user":
+            anthropic_messages.append({"role": "user", "content": m.get("content", "")})
+
+        elif role == "assistant":
+            content_blocks: list[dict] = []
+            if m.get("content"):
+                content_blocks.append({"type": "text", "text": m["content"]})
+            if m.get("tool_calls"):
+                for tc in m["tool_calls"]:
+                    func = tc["function"]
+                    try:
+                        tool_input = json.loads(func["arguments"]) if isinstance(func["arguments"], str) else func["arguments"]
+                    except (json.JSONDecodeError, TypeError):
+                        tool_input = {}
+                    content_blocks.append({
+                        "type": "tool_use",
+                        "id": tc["id"],
+                        "name": func["name"],
+                        "input": tool_input,
+                    })
+            if content_blocks:
+                anthropic_messages.append({"role": "assistant", "content": content_blocks})
+
+        elif role == "tool":
+            tool_result_block = {
+                "type": "tool_result",
+                "tool_use_id": m.get("tool_call_id", ""),
+                "content": m.get("content", ""),
+            }
+            # Merge consecutive tool results into a single user message
+            if (anthropic_messages
+                    and anthropic_messages[-1]["role"] == "user"
+                    and isinstance(anthropic_messages[-1]["content"], list)):
+                anthropic_messages[-1]["content"].append(tool_result_block)
+            else:
+                anthropic_messages.append({"role": "user", "content": [tool_result_block]})
+
+    return system_parts, anthropic_messages
 
 
 def estimate_tokens(text: str) -> int:

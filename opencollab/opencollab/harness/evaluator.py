@@ -78,76 +78,79 @@ async def run_eval_task(
     """
     os.makedirs(output_dir, exist_ok=True)
     start = time.monotonic()
-
-    # Create tracer
     tracer = Tracer(run_id=task.task_id, output_dir=os.path.join(output_dir, "trajectories"))
 
-    # Create environment
-    if task.docker_image:
-        env = DockerEnvironment(image=task.docker_image)
-        await env.setup(mount_dir=task.repo_path)
-    else:
-        env = LocalEnvironment(workspace=task.repo_path or ".")
+    env: Environment | None = None
+    session: Session | None = None
+    error: str | None = None
+    patch = ""
 
-    # Create agent with standard tools
-    interceptor = SandboxInterceptor(env.workspace) if isinstance(env, LocalEnvironment) else None
-    agent = Agent(
-        name="eval_agent",
-        system_prompt=EVAL_AGENT_PROMPT,
-        tools=[
-            BashTool(interceptor),
-            FileReadTool(interceptor),
-            FileWriteTool(interceptor),
-            GrepTool(interceptor),
-        ],
-        model=model,
-        provider=provider,
-        api_key=api_key,
-        base_url=base_url,
-    )
-
-    session = Session(
-        agent=agent,
-        env=env,
-        tracer=tracer,
-        max_budget_tokens=task.max_tokens,
-        max_steps=80,
-    )
-
-    # Run
-    error = None
     try:
-        await session.add_user_message(task.description)
-        await asyncio.wait_for(
-            session.run_loop(),
-            timeout=task.timeout,
+        # Create environment (inside try — docker setup can fail)
+        if task.docker_image:
+            env = DockerEnvironment(image=task.docker_image)
+            await env.setup(mount_dir=task.repo_path)
+        else:
+            env = LocalEnvironment(workspace=task.repo_path or ".")
+
+        interceptor = SandboxInterceptor(env.workspace) if isinstance(env, LocalEnvironment) else None
+        agent = Agent(
+            name="eval_agent",
+            system_prompt=EVAL_AGENT_PROMPT,
+            tools=[
+                BashTool(interceptor),
+                FileReadTool(interceptor),
+                FileWriteTool(interceptor),
+                GrepTool(interceptor),
+            ],
+            model=model,
+            provider=provider,
+            api_key=api_key,
+            base_url=base_url,
         )
+
+        session = Session(
+            agent=agent,
+            env=env,
+            tracer=tracer,
+            max_budget_tokens=task.max_tokens,
+            max_steps=80,
+        )
+
+        await session.add_user_message(task.description)
+        await asyncio.wait_for(session.run_loop(), timeout=task.timeout)
+
     except asyncio.TimeoutError:
         error = f"Task timed out after {task.timeout}s"
     except Exception as e:
         error = f"{type(e).__name__}: {e}"
 
-    # Extract git patch
-    patch_result = await env.exec_cmd("git diff")
-    patch = patch_result.stdout
-
-    # If no git diff, try git diff HEAD
-    if not patch.strip():
-        patch_result = await env.exec_cmd("git diff HEAD")
-        patch = patch_result.stdout
+    # Extract git patch (best-effort even after errors)
+    if env:
+        try:
+            patch_result = await env.exec_cmd("git diff")
+            patch = patch_result.stdout
+            if not patch.strip():
+                patch_result = await env.exec_cmd("git diff HEAD")
+                patch = patch_result.stdout
+        except Exception:
+            pass
 
     duration = time.monotonic() - start
     tracer.close()
 
-    # Cleanup environment
-    await env.cleanup()
+    if env:
+        try:
+            await env.cleanup()
+        except Exception:
+            pass
 
     return EvalResult(
         task_id=task.task_id,
         patch=patch,
         success=bool(patch.strip()) and error is None,
-        tokens_used=session.used_tokens,
-        steps=session.step_count,
+        tokens_used=session.used_tokens if session else 0,
+        steps=session.step_count if session else 0,
         duration=duration,
         error=error,
         trajectory_path=tracer.path,
@@ -159,16 +162,30 @@ async def run_eval_batch(
     concurrency: int = 4,
     **kwargs,
 ) -> list[EvalResult]:
-    """Run multiple evaluation tasks with controlled concurrency."""
+    """Run multiple evaluation tasks with controlled concurrency.
+
+    Individual task failures produce an EvalResult with error set,
+    rather than aborting the entire batch.
+    """
     semaphore = asyncio.Semaphore(concurrency)
-    results: list[EvalResult] = []
 
     async def run_one(task: EvalTask) -> EvalResult:
         async with semaphore:
-            return await run_eval_task(task, **kwargs)
+            try:
+                return await run_eval_task(task, **kwargs)
+            except Exception as e:
+                return EvalResult(
+                    task_id=task.task_id,
+                    patch="",
+                    success=False,
+                    tokens_used=0,
+                    steps=0,
+                    duration=0.0,
+                    error=f"Unhandled: {type(e).__name__}: {e}",
+                )
 
     coros = [run_one(t) for t in tasks]
-    results = await asyncio.gather(*coros, return_exceptions=False)
+    results = await asyncio.gather(*coros)
     return results
 
 

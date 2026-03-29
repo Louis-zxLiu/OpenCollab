@@ -21,7 +21,7 @@ class Agent:
         name: Human-readable identifier (e.g., "lead", "coder", "reviewer").
         system_prompt: The system prompt that defines this agent's behavior.
         tools: List of Tool instances this agent is allowed to use.
-        model: LLM model identifier (e.g., "gpt-4o", "claude-sonnet-4-20250514").
+        model: LLM model identifier (e.g., "claude-sonnet-4-20250514").
         provider: LLM provider ("openai", "anthropic", or any OpenAI-compatible).
         api_key: Override API key for this agent (defaults to env var).
         base_url: Override base URL (for proxies, local models, etc.).

@@ -26,62 +26,81 @@ app = typer.Typer(
 console = Console()
 
 
+def _resolve_config(workspace: str, model: str | None, provider: str | None,
+                     api_key: str | None, base_url: str | None, budget: int | None) -> dict:
+    """Merge CLI args with .env defaults. CLI args take precedence."""
+    from opencollab.core.config import get_config
+    cfg = get_config(workspace)
+    return {
+        "model": model or cfg["model"],
+        "provider": provider or cfg["provider"],
+        "api_key": api_key or cfg["api_key"],
+        "base_url": base_url or cfg["base_url"],
+        "budget": budget if budget is not None else int(cfg["budget"] or 200_000),
+    }
+
+
 @app.command()
 def chat(
-    model: str = typer.Option("gpt-4o", "--model", "-m", help="LLM model identifier"),
-    provider: str = typer.Option("openai", "--provider", "-p", help="LLM provider (openai/anthropic)"),
-    api_key: Optional[str] = typer.Option(None, "--api-key", envvar="OPENAI_API_KEY", help="API key"),
-    base_url: Optional[str] = typer.Option(None, "--base-url", envvar="OPENAI_BASE_URL", help="API base URL"),
+    model: Optional[str] = typer.Option(None, "--model", "-m", help="LLM model (default from .env)"),
+    provider: Optional[str] = typer.Option(None, "--provider", "-p", help="LLM provider (default from .env or openai)"),
+    api_key: Optional[str] = typer.Option(None, "--api-key", help="API key (default from .env)"),
+    base_url: Optional[str] = typer.Option(None, "--base-url", help="API base URL (default from .env)"),
     workspace: str = typer.Option(".", "--workspace", "-w", help="Working directory"),
-    budget: int = typer.Option(200_000, "--budget", help="Max token budget"),
+    budget: Optional[int] = typer.Option(None, "--budget", help="Max token budget (default from .env or 200000)"),
     session_file: Optional[str] = typer.Option(None, "--session", "-s", help="Resume from session JSONL"),
     trace: bool = typer.Option(False, "--trace", help="Enable trajectory recording"),
     yolo: bool = typer.Option(False, "--yolo", help="Auto-approve risky commands"),
 ):
     """Interactive single-agent chat mode (default)."""
+    cfg = _resolve_config(workspace, model, provider, api_key, base_url, budget)
     asyncio.run(_chat(
-        model=model, provider=provider, api_key=api_key, base_url=base_url,
-        workspace=workspace, budget=budget, session_file=session_file,
-        trace=trace, yolo=yolo,
+        model=cfg["model"], provider=cfg["provider"], api_key=cfg["api_key"],
+        base_url=cfg["base_url"], workspace=workspace, budget=cfg["budget"],
+        session_file=session_file, trace=trace, yolo=yolo,
     ))
 
 
 @app.command()
 def team(
-    model: str = typer.Option("gpt-4o", "--model", "-m", help="LLM model identifier"),
-    provider: str = typer.Option("openai", "--provider", "-p", help="LLM provider"),
-    api_key: Optional[str] = typer.Option(None, "--api-key", envvar="OPENAI_API_KEY"),
-    base_url: Optional[str] = typer.Option(None, "--base-url", envvar="OPENAI_BASE_URL"),
+    model: Optional[str] = typer.Option(None, "--model", "-m", help="LLM model (default from .env)"),
+    provider: Optional[str] = typer.Option(None, "--provider", "-p", help="LLM provider (default from .env or openai)"),
+    api_key: Optional[str] = typer.Option(None, "--api-key", help="API key (default from .env)"),
+    base_url: Optional[str] = typer.Option(None, "--base-url", help="API base URL (default from .env)"),
     workspace: str = typer.Option(".", "--workspace", "-w", help="Working directory"),
-    budget: int = typer.Option(500_000, "--budget", help="Max token budget"),
+    budget: Optional[int] = typer.Option(None, "--budget", help="Max token budget (default from .env or 500000)"),
     trace: bool = typer.Option(False, "--trace", help="Enable trajectory recording"),
     yolo: bool = typer.Option(False, "--yolo", help="Auto-approve risky commands"),
     no_worktrees: bool = typer.Option(False, "--no-worktrees", help="Disable git worktree isolation"),
 ):
     """Multi-agent team mode with Lead + Teammates."""
+    cfg = _resolve_config(workspace, model, provider, api_key, base_url, budget)
+    # Team mode gets higher default budget
+    team_budget = cfg["budget"] if budget is not None else max(cfg["budget"], 500_000)
     asyncio.run(_team(
-        model=model, provider=provider, api_key=api_key, base_url=base_url,
-        workspace=workspace, budget=budget, trace=trace, yolo=yolo,
-        use_worktrees=not no_worktrees,
+        model=cfg["model"], provider=cfg["provider"], api_key=cfg["api_key"],
+        base_url=cfg["base_url"], workspace=workspace, budget=team_budget,
+        trace=trace, yolo=yolo, use_worktrees=not no_worktrees,
     ))
 
 
 @app.command(name="eval")
 def eval_cmd(
     tasks_file: str = typer.Argument(..., help="JSONL file with eval tasks"),
-    model: str = typer.Option("gpt-4o", "--model", "-m"),
-    provider: str = typer.Option("openai", "--provider", "-p"),
-    api_key: Optional[str] = typer.Option(None, "--api-key", envvar="OPENAI_API_KEY"),
-    base_url: Optional[str] = typer.Option(None, "--base-url", envvar="OPENAI_BASE_URL"),
+    model: Optional[str] = typer.Option(None, "--model", "-m", help="LLM model (default from .env)"),
+    provider: Optional[str] = typer.Option(None, "--provider", "-p", help="LLM provider (default from .env)"),
+    api_key: Optional[str] = typer.Option(None, "--api-key", help="API key (default from .env)"),
+    base_url: Optional[str] = typer.Option(None, "--base-url", help="API base URL (default from .env)"),
     output_dir: str = typer.Option("eval_results", "--output", "-o"),
     concurrency: int = typer.Option(4, "--concurrency", "-c", help="Parallel tasks"),
     max_tokens: int = typer.Option(100_000, "--max-tokens"),
     timeout: float = typer.Option(600.0, "--timeout"),
 ):
     """Headless evaluation mode for benchmarks (SWE-bench, etc.)."""
+    cfg = _resolve_config(".", model, provider, api_key, base_url, None)
     asyncio.run(_eval(
-        tasks_file=tasks_file, model=model, provider=provider,
-        api_key=api_key, base_url=base_url, output_dir=output_dir,
+        tasks_file=tasks_file, model=cfg["model"], provider=cfg["provider"],
+        api_key=cfg["api_key"], base_url=cfg["base_url"], output_dir=output_dir,
         concurrency=concurrency, max_tokens=max_tokens, timeout=timeout,
     ))
 

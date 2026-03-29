@@ -22,43 +22,88 @@ from opencollab.core.env import Environment
 logger = logging.getLogger(__name__)
 
 
-class MCPTool(Tool):
-    """A tool backed by a remote MCP server. Auto-generated from MCP tool definitions."""
+# ---------------------------------------------------------------------------
+# Persistent MCP connection — handles lifecycle for all tools from one server
+# ---------------------------------------------------------------------------
 
-    def __init__(
-        self,
-        name: str,
-        description: str,
-        parameters: dict[str, Any],
-        server_command: str,
-        server_args: list[str],
-    ):
-        self.name = name
-        self.description = description
-        self.parameters = parameters
-        self._server_command = server_command
-        self._server_args = server_args
+class MCPConnection:
+    """Persistent connection to an MCP server via stdio transport.
+
+    Manages the full lifecycle: start process → initialize handshake →
+    tool discovery → tool execution → shutdown.
+
+    All MCPTool instances from the same server share one MCPConnection.
+    """
+
+    def __init__(self, command: str, args: list[str]):
+        self._command = command
+        self._args = args
         self._process: asyncio.subprocess.Process | None = None
-        self._stdin = None
-        self._stdout = None
         self._request_id = 0
+        self._initialized = False
+        self._lock = asyncio.Lock()
 
-    async def _ensure_connection(self) -> None:
-        """Start the MCP server process if not running."""
+    async def ensure_ready(self) -> None:
+        """Start process and perform MCP initialize handshake if needed."""
+        async with self._lock:
+            if self._initialized and self._process and self._process.returncode is None:
+                return
+
+            # (Re)start process
+            if self._process and self._process.returncode is not None:
+                self._initialized = False
+
+            self._process = await asyncio.create_subprocess_exec(
+                self._command, *self._args,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            self._request_id = 0
+
+            # MCP initialize handshake
+            init_resp = await self._jsonrpc_call_raw("initialize", {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "opencollab", "version": "0.1.0"},
+            })
+            logger.debug(f"MCP init response: {init_resp}")
+
+            # Send initialized notification (no response expected)
+            await self._send_notification("notifications/initialized")
+
+            self._initialized = True
+
+    async def call(self, method: str, params: dict) -> dict:
+        """Send a JSON-RPC request and return the response."""
+        await self.ensure_ready()
+        return await self._jsonrpc_call_raw(method, params)
+
+    async def list_tools(self) -> list[dict]:
+        """Discover available tools from the server."""
+        resp = await self.call("tools/list", {})
+        if "result" in resp and "tools" in resp["result"]:
+            return resp["result"]["tools"]
+        return []
+
+    async def call_tool(self, name: str, arguments: dict) -> dict:
+        """Execute a tool on the server."""
+        return await self.call("tools/call", {"name": name, "arguments": arguments})
+
+    async def close(self) -> None:
+        """Terminate the server process."""
         if self._process and self._process.returncode is None:
-            return
+            self._process.terminate()
+            try:
+                await asyncio.wait_for(self._process.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                self._process.kill()
+        self._initialized = False
 
-        self._process = await asyncio.create_subprocess_exec(
-            self._server_command, *self._server_args,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
+    # ---- Internal JSON-RPC transport ----
 
-    async def _jsonrpc_call(self, method: str, params: dict) -> dict:
-        """Send a JSON-RPC request and read response."""
-        await self._ensure_connection()
-
+    async def _jsonrpc_call_raw(self, method: str, params: dict) -> dict:
+        """Send JSON-RPC request and read response (Content-Length framed)."""
         self._request_id += 1
         request = {
             "jsonrpc": "2.0",
@@ -66,18 +111,52 @@ class MCPTool(Tool):
             "method": method,
             "params": params,
         }
-        msg = json.dumps(request)
-        content = f"Content-Length: {len(msg)}\r\n\r\n{msg}"
+        await self._send_message(request)
+        return await self._read_message()
 
-        self._process.stdin.write(content.encode())
+    async def _send_notification(self, method: str, params: dict | None = None) -> None:
+        """Send a JSON-RPC notification (no id, no response)."""
+        notif: dict[str, Any] = {"jsonrpc": "2.0", "method": method}
+        if params:
+            notif["params"] = params
+        await self._send_message(notif)
+
+    async def _send_message(self, message: dict) -> None:
+        msg = json.dumps(message)
+        frame = f"Content-Length: {len(msg)}\r\n\r\n{msg}"
+        self._process.stdin.write(frame.encode())
         await self._process.stdin.drain()
 
-        # Read response (Content-Length header + body)
-        header = await self._process.stdout.readline()
-        await self._process.stdout.readline()  # empty line
+    async def _read_message(self) -> dict:
+        header = await asyncio.wait_for(self._process.stdout.readline(), timeout=30)
+        await self._process.stdout.readline()  # empty line separator
         length = int(header.decode().split(":")[1].strip())
         body = await self._process.stdout.readexactly(length)
         return json.loads(body.decode())
+
+
+# ---------------------------------------------------------------------------
+# MCPTool — a single tool backed by a shared MCPConnection
+# ---------------------------------------------------------------------------
+
+class MCPTool(Tool):
+    """A tool backed by a remote MCP server.
+
+    Multiple MCPTool instances from the same server share one MCPConnection,
+    which maintains the process and MCP handshake state.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        description: str,
+        parameters: dict[str, Any],
+        connection: MCPConnection,
+    ):
+        self.name = name
+        self.description = description
+        self.parameters = parameters
+        self._conn = connection
 
     async def execute(
         self,
@@ -86,11 +165,10 @@ class MCPTool(Tool):
         confirm_fn: Callable[[str], Awaitable[bool]] | None = None,
     ) -> str:
         try:
-            resp = await self._jsonrpc_call("tools/call", {"name": self.name, "arguments": params})
+            resp = await self._conn.call_tool(self.name, params)
             if "result" in resp:
                 result = resp["result"]
                 if isinstance(result, dict) and "content" in result:
-                    # MCP tool result format
                     parts = []
                     for c in result["content"]:
                         if c.get("type") == "text":
@@ -103,98 +181,46 @@ class MCPTool(Tool):
         except Exception as e:
             return f"MCP tool execution error: {type(e).__name__}: {e}"
 
-    async def close(self) -> None:
-        if self._process and self._process.returncode is None:
-            self._process.terminate()
-            await self._process.wait()
 
+# ---------------------------------------------------------------------------
+# Public API — load tools from an MCP server
+# ---------------------------------------------------------------------------
 
-async def load_mcp_tools(command: str, args: list[str]) -> list[MCPTool]:
+async def load_mcp_tools(command: str, args: list[str]) -> tuple[list[MCPTool], MCPConnection]:
     """Connect to an MCP server and discover its tools.
 
-    Usage:
-        tools = await load_mcp_tools("npx", ["-y", "@modelcontextprotocol/server-github"])
+    Returns (tools, connection). The caller is responsible for calling
+    connection.close() when done.
 
-    Returns a list of MCPTool instances ready to be added to an Agent.
+    Usage:
+        tools, conn = await load_mcp_tools("npx", ["-y", "@modelcontextprotocol/server-github"])
+        agent = Agent(..., tools=[*basic_tools, *tools])
+        # ... use agent ...
+        await conn.close()
     """
-    # Start server process
-    proc = await asyncio.create_subprocess_exec(
-        command, *args,
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
+    conn = MCPConnection(command, args)
 
     try:
-        # Initialize MCP connection
-        init_request = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": {"name": "opencollab", "version": "0.1.0"},
-            },
-        }
-        msg = json.dumps(init_request)
-        content = f"Content-Length: {len(msg)}\r\n\r\n{msg}"
-        proc.stdin.write(content.encode())
-        await proc.stdin.drain()
+        await conn.ensure_ready()
+        tool_defs = await conn.list_tools()
 
-        # Read init response
-        header = await asyncio.wait_for(proc.stdout.readline(), timeout=30)
-        await proc.stdout.readline()
-        length = int(header.decode().split(":")[1].strip())
-        body = await proc.stdout.readexactly(length)
-        _init_resp = json.loads(body.decode())
-
-        # Send initialized notification
-        notif = {"jsonrpc": "2.0", "method": "notifications/initialized"}
-        notif_msg = json.dumps(notif)
-        notif_content = f"Content-Length: {len(notif_msg)}\r\n\r\n{notif_msg}"
-        proc.stdin.write(notif_content.encode())
-        await proc.stdin.drain()
-
-        # List tools
-        list_request = {
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": "tools/list",
-            "params": {},
-        }
-        list_msg = json.dumps(list_request)
-        list_content = f"Content-Length: {len(list_msg)}\r\n\r\n{list_msg}"
-        proc.stdin.write(list_content.encode())
-        await proc.stdin.drain()
-
-        header = await asyncio.wait_for(proc.stdout.readline(), timeout=30)
-        await proc.stdout.readline()
-        length = int(header.decode().split(":")[1].strip())
-        body = await proc.stdout.readexactly(length)
-        tools_resp = json.loads(body.decode())
-
-        # Parse tool definitions
         tools: list[MCPTool] = []
-        if "result" in tools_resp and "tools" in tools_resp["result"]:
-            for td in tools_resp["result"]["tools"]:
-                tools.append(MCPTool(
-                    name=td["name"],
-                    description=td.get("description", ""),
-                    parameters=td.get("inputSchema", {"type": "object", "properties": {}}),
-                    server_command=command,
-                    server_args=args,
-                ))
-                logger.info(f"Loaded MCP tool: {td['name']}")
+        for td in tool_defs:
+            tools.append(MCPTool(
+                name=td["name"],
+                description=td.get("description", ""),
+                parameters=td.get("inputSchema", {"type": "object", "properties": {}}),
+                connection=conn,
+            ))
+            logger.info(f"Loaded MCP tool: {td['name']}")
 
-        return tools
+        return tools, conn
 
     except asyncio.TimeoutError:
         logger.error(f"MCP server {command} timed out during initialization")
-        return []
+        await conn.close()
+        return [], conn
     except Exception as e:
         logger.error(f"Failed to load MCP tools from {command}: {e}")
-        return []
-    finally:
-        proc.terminate()
-        await proc.wait()
+        await conn.close()
+        return [], conn

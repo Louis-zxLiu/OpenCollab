@@ -97,8 +97,11 @@ class WorktreeEnvironment(Environment):
     """
 
     def __init__(self, source_workspace: str, branch_name: str | None = None):
+        import uuid
+
         self._source = os.path.abspath(source_workspace)
-        self._branch = branch_name or f"opencollab-teammate-{os.getpid()}-{id(self)}"
+        # Use UUID to guarantee uniqueness even under parallel same-role delegation
+        self._branch = branch_name or f"opencollab-wt-{uuid.uuid4().hex[:12]}"
         self._worktree_dir: str | None = None
         self._local_env: LocalEnvironment | None = None
 

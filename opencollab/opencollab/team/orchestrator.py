@@ -201,13 +201,21 @@ class Team:
         # Active teammate environments (for cleanup)
         self._teammate_envs: list[WorktreeEnvironment] = []
 
-    def _make_basic_tools(self) -> list[Tool]:
-        """Create the standard tool set for agents."""
+    def _make_basic_tools(self, interceptor: SandboxInterceptor | None = None) -> list[Tool]:
+        """Create the standard tool set for agents.
+
+        Args:
+            interceptor: Safety interceptor. If None, uses self._interceptor
+                         (main workspace). Teammates should pass a worktree-rooted
+                         interceptor to ensure path resolution stays within their
+                         isolated directory.
+        """
+        ic = interceptor or self._interceptor
         return [
-            BashTool(self._interceptor),
-            FileReadTool(self._interceptor),
-            FileWriteTool(self._interceptor),
-            GrepTool(self._interceptor),
+            BashTool(ic),
+            FileReadTool(ic),
+            FileWriteTool(ic),
+            GrepTool(ic),
         ]
 
     async def run(self, user_message: str) -> str:
@@ -234,18 +242,26 @@ class Team:
             ))
 
         # Create isolated environment for teammate
+        import uuid as _uuid
+
         if self.use_worktrees:
-            env = WorktreeEnvironment(self.workspace, branch_name=f"opencollab-{role}-{int(time.time())}")
+            branch = f"opencollab-{role}-{_uuid.uuid4().hex[:8]}"
+            env = WorktreeEnvironment(self.workspace, branch_name=branch)
             await env.setup()
             self._teammate_envs.append(env)
         else:
             env = LocalEnvironment(self.workspace)
 
-        # Create teammate agent
+        # Create per-teammate interceptor rooted at the teammate's workspace,
+        # NOT the main workspace. This ensures file tools resolve paths within
+        # the worktree directory, preserving physical isolation.
+        teammate_interceptor = SandboxInterceptor(env.workspace)
+
+        # Create teammate agent with worktree-rooted tools
         teammate_agent = Agent(
             name=role,
             system_prompt=get_role_prompt(role),
-            tools=self._make_basic_tools(),
+            tools=self._make_basic_tools(interceptor=teammate_interceptor),
             model=self.model,
             provider=self.provider,
             api_key=self.api_key,
