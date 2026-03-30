@@ -697,9 +697,29 @@ def run_instance_docker(
         _, patch = exec_in(cid, "git diff", timeout=10)
 
         if not patch.strip():
+            # Persist a compact diagnostic snapshot for no-patch outcomes.
+            try:
+                _, git_status = exec_in(cid, "git status --short", timeout=10)
+            except Exception as status_err:
+                git_status = f"<failed to capture git status: {type(status_err).__name__}: {status_err}>"
+            result_excerpt = result_text[-1200:] if result_text else ""
+            reason = (
+                "No patch produced by agent.\n"
+                f"instance_id: {instance_id}\n"
+                f"used_tokens: {used_tokens}\n"
+                f"steps: {steps}\n\n"
+                "git status --short:\n"
+                f"{git_status.strip() if git_status else '<empty>'}\n\n"
+                "agent_result_tail:\n"
+                f"{result_excerpt.strip() if result_excerpt else '<empty>'}\n"
+            )
+            (log_dir / "no_patch_reason.txt").write_text(reason)
+            (log_dir / "grading_method.txt").write_text(
+                "no_patch: agent finished without workspace changes (git diff empty)"
+            )
             if verbose:
                 print(f"  {instance_id}: no patch")
-            return instance_id, False, "", "skipped"
+            return instance_id, False, "", "no_patch"
 
         (log_dir / "patch.diff").write_text(patch)
         if verbose:
