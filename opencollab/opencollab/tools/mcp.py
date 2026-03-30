@@ -128,10 +128,27 @@ class MCPConnection:
         await self._process.stdin.drain()
 
     async def _read_message(self) -> dict:
+        """Read a Content-Length framed JSON-RPC message.
+
+        Ref: openclaw parseContentLengthHeader — validate before parse.
+        """
         header = await asyncio.wait_for(self._process.stdout.readline(), timeout=30)
+        if not header:
+            raise ConnectionError("MCP server closed stdout")
         await self._process.stdout.readline()  # empty line separator
-        length = int(header.decode().split(":")[1].strip())
-        body = await self._process.stdout.readexactly(length)
+
+        # Validate Content-Length header (ref: openclaw — return error, not crash)
+        header_str = header.decode().strip()
+        if ":" not in header_str:
+            raise ValueError(f"Malformed MCP header (no colon): {header_str!r}")
+        try:
+            length = int(header_str.split(":", 1)[1].strip())
+        except ValueError:
+            raise ValueError(f"Invalid Content-Length value: {header_str!r}")
+        if length < 0:
+            raise ValueError(f"Negative Content-Length: {length}")
+
+        body = await asyncio.wait_for(self._process.stdout.readexactly(length), timeout=30)
         return json.loads(body.decode())
 
 

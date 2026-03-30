@@ -312,11 +312,16 @@ class Team:
                 data={"tool": "delegate", "role": role, "latency": latency},
             ))
 
-        # If using worktree, get the diff and mention it
+        # If using worktree, include the actual diff so Lead can see changes
+        # Ref: kimi-cli DiffDisplayBlock returns full content; claude-code teams
+        # share results through task completion with full output
         if isinstance(env, WorktreeEnvironment):
             diff = await env.get_diff()
             if diff:
-                result += f"\n\n[Changes made — diff available ({len(diff)} chars)]"
+                # Cap diff to avoid context explosion (ref: session.py MAX_TOOL_OUTPUT_CHARS)
+                if len(diff) > 12_000:
+                    diff = diff[:6_000] + f"\n\n... [{len(diff) - 12_000} chars truncated] ...\n\n" + diff[-6_000:]
+                result += f"\n\n[Changes made in worktree]\n```diff\n{diff}\n```"
 
         return result
 
@@ -342,15 +347,21 @@ class Team:
             code_result = await self.delegate("coder", current_task, context)
 
             # Step 2: Reviewer checks
+            # Ref: claude-code review plugin — use structured verdict line
+            # to avoid false positives (e.g., "password" containing "PASS")
             review_prompt = (
                 f"Review the following implementation for task: '{task}'\n\n"
                 f"Implementation result:\n{code_result}\n\n"
-                f"If the implementation is correct and complete, output exactly: PASS\n"
-                f"If there are issues, output detailed fix instructions."
+                f"Your response MUST end with a verdict line in exactly this format:\n"
+                f"VERDICT: PASS\n"
+                f"or\n"
+                f"VERDICT: FAIL\n\n"
+                f"If FAIL, provide detailed fix instructions before the verdict line."
             )
             review_result = await self.delegate("reviewer", review_prompt)
 
-            if "PASS" in review_result.upper():
+            # Check for structured verdict (line must start with "VERDICT: PASS")
+            if any(line.strip().upper() == "VERDICT: PASS" for line in review_result.splitlines()):
                 return (
                     f"[Self-Collaboration: PASSED after {iteration} iteration(s)]\n\n"
                     f"{code_result}"

@@ -13,7 +13,7 @@ import json
 import os
 import sys
 import uuid
-from typing import Optional
+from typing import Any, Optional
 
 import typer
 from rich.console import Console
@@ -26,6 +26,13 @@ app = typer.Typer(
 console = Console()
 
 
+def _safe_int(value: Any, default: int) -> int:
+    try:
+        return int(value) if value else default
+    except (TypeError, ValueError):
+        return default
+
+
 def _resolve_config(workspace: str, model: str | None, provider: str | None,
                      api_key: str | None, base_url: str | None, budget: int | None) -> dict:
     """Merge CLI args with .env defaults. CLI args take precedence."""
@@ -36,7 +43,7 @@ def _resolve_config(workspace: str, model: str | None, provider: str | None,
         "provider": provider or cfg["provider"],
         "api_key": api_key or cfg["api_key"],
         "base_url": base_url or cfg["base_url"],
-        "budget": budget if budget is not None else int(cfg["budget"] or 200_000),
+        "budget": budget if budget is not None else _safe_int(cfg["budget"], 200_000),
     }
 
 

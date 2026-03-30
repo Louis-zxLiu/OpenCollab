@@ -659,6 +659,12 @@ def run_instance_docker(
 {hints_section}{test_section}{test_guidance}
 """
 
+        # Persist and optionally print the exact agent input for inspection.
+        (log_dir / "agent_input.txt").write_text(task)
+        if verbose:
+            print("  Agent input (task prompt):")
+            print(task)
+
         if agent_mode == "single":
             if verbose:
                 print("  Running OpenCollab single-agent session...")

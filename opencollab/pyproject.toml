@@ -7,7 +7,7 @@ name = "opencollab"
 version = "0.1.0"
 description = "Minimal multi-agent software development framework — first principles, context isolation, tool-based delegation."
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.9"
 license = "MIT"
 dependencies = [
     "openai>=1.30",
@@ -29,7 +29,7 @@ opencollab = "opencollab.cli.main:app"
 
 [tool.ruff]
 line-length = 120
-target-version = "py311"
+target-version = "py39"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W"]
