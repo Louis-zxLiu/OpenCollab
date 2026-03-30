@@ -1,0 +1,11 @@
+openai>=1.0
+anthropic
+typer
+rich
+prompt-toolkit
+filelock
+pydantic
+datasets
+tqdm
+docker
+swebench
