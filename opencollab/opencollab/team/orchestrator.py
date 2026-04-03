@@ -156,6 +156,7 @@ class Team:
         on_event: Callable[[SessionEvent], Awaitable[None] | None] | None = None,
         confirm_fn: Callable[[str], Awaitable[bool]] | None = None,
         use_worktrees: bool = True,
+        repo_map: str | None = None,
     ):
         self.workspace = workspace
         self.model = model
@@ -166,6 +167,7 @@ class Team:
         self.on_event = on_event
         self.confirm_fn = confirm_fn
         self.use_worktrees = use_worktrees
+        self.repo_map = repo_map
         self._total_budget = max_budget_tokens
         self._used_tokens = 0
 
@@ -196,6 +198,7 @@ class Team:
             max_budget_tokens=max_budget_tokens,
             on_event=on_event,
             confirm_fn=confirm_fn,
+            repo_map=repo_map,
         )
 
         # Active teammate environments (for cleanup)
@@ -284,6 +287,7 @@ class Team:
             max_steps=50,
             on_event=self.on_event,
             confirm_fn=self.confirm_fn,
+            repo_map=self.repo_map,
         )
 
         # Build the task message with optional context

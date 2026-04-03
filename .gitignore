@@ -5,3 +5,4 @@ opencode/
 self-collaboration_paper_tex/
 .env
 logs/
+*.pyc

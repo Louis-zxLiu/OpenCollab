@@ -58,12 +58,14 @@ class Tracer:
 
     def flush(self) -> None:
         """Force flush to disk."""
-        if self._file and not self._file.closed:
-            self._file.flush()
+        f = getattr(self, "_file", None)
+        if f and not f.closed:
+            f.flush()
 
     def close(self) -> None:
-        if self._file and not self._file.closed:
-            self._file.close()
+        f = getattr(self, "_file", None)
+        if f and not f.closed:
+            f.close()
 
     @property
     def path(self) -> str:

@@ -24,6 +24,42 @@ app = typer.Typer(
     add_completion=False,
 )
 console = Console()
+_prompt_session: Any | None = None
+
+
+def _get_prompt_session() -> Any:
+    """Lazy-init prompt_toolkit session for robust terminal line editing (IME-safe)."""
+    global _prompt_session
+    if _prompt_session is None:
+        from prompt_toolkit import PromptSession
+
+        _prompt_session = PromptSession()
+    return _prompt_session
+
+
+async def _read_line(prompt_text: str) -> str:
+    """Read one input line; fall back to rich console input if needed."""
+    try:
+        session = _get_prompt_session()
+        return await session.prompt_async(prompt_text)
+    except Exception:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, lambda: console.input(prompt_text))
+
+
+def _safe_suspend_live(tui: Any) -> bool:
+    """Suspend Live rendering if supported by the current TUI implementation."""
+    suspend = getattr(tui, "suspend_live", None)
+    if callable(suspend):
+        return bool(suspend())
+    return False
+
+
+def _safe_resume_live(tui: Any, was_suspended: bool) -> None:
+    """Resume Live rendering if supported by the current TUI implementation."""
+    resume = getattr(tui, "resume_live", None)
+    if callable(resume):
+        resume(was_suspended)
 
 
 def _safe_int(value: Any, default: int) -> int:
@@ -31,6 +67,28 @@ def _safe_int(value: Any, default: int) -> int:
         return int(value) if value else default
     except (TypeError, ValueError):
         return default
+
+
+def _required_env_key(provider: str | None) -> str:
+    p = (provider or "openai").lower()
+    return "ANTHROPIC_API_KEY" if p == "anthropic" else "OPENAI_API_KEY"
+
+
+def _missing_api_key(provider: str | None, api_key: str | None) -> bool:
+    if api_key:
+        return False
+    return not bool(os.environ.get(_required_env_key(provider)))
+
+
+def _print_missing_key_hint(provider: str | None) -> None:
+    from opencollab.cli.tui import TUI
+
+    tui = TUI(console)
+    tui.print_welcome()
+    env_key = _required_env_key(provider)
+    console.print(
+        f"[red]Missing API key[/red]: pass [bold]--api-key[/bold] or set [bold]{env_key}[/bold]."
+    )
 
 
 def _resolve_config(workspace: str, model: str | None, provider: str | None,
@@ -61,6 +119,10 @@ def chat(
 ):
     """Interactive single-agent chat mode (default)."""
     cfg = _resolve_config(workspace, model, provider, api_key, base_url, budget)
+    if _missing_api_key(cfg["provider"], cfg["api_key"]):
+        _print_missing_key_hint(cfg["provider"])
+        raise typer.Exit(code=1)
+
     asyncio.run(_chat(
         model=cfg["model"], provider=cfg["provider"], api_key=cfg["api_key"],
         base_url=cfg["base_url"], workspace=workspace, budget=cfg["budget"],
@@ -82,6 +144,10 @@ def team(
 ):
     """Multi-agent team mode with Lead + Teammates."""
     cfg = _resolve_config(workspace, model, provider, api_key, base_url, budget)
+    if _missing_api_key(cfg["provider"], cfg["api_key"]):
+        _print_missing_key_hint(cfg["provider"])
+        raise typer.Exit(code=1)
+
     # Team mode gets higher default budget
     team_budget = cfg["budget"] if budget is not None else max(cfg["budget"], 500_000)
     asyncio.run(_team(
@@ -126,8 +192,10 @@ async def _chat(
     from opencollab.core.session import Session
     from opencollab.core.env import LocalEnvironment
     from opencollab.core.tracer import Tracer
+    from opencollab.core.context import get_repo_map
     from opencollab.tools.bash import BashTool
     from opencollab.tools.fs import FileReadTool, FileWriteTool, GrepTool
+    from opencollab.tools.human import AskUserTool
     from opencollab.tools.safety import SandboxInterceptor
     from opencollab.cli.tui import TUI
 
@@ -138,6 +206,9 @@ async def _chat(
 
     # Human-in-the-loop confirmation (disabled in yolo mode)
     confirm_fn = None if yolo else _confirm_prompt
+
+    # Repo map for project topology (机制一)
+    repo_map = get_repo_map(workspace)
 
     agent = Agent(
         name="assistant",
@@ -150,6 +221,7 @@ async def _chat(
             FileReadTool(interceptor),
             FileWriteTool(interceptor),
             GrepTool(interceptor),
+            AskUserTool(),
         ],
         model=model,
         provider=provider,
@@ -160,29 +232,38 @@ async def _chat(
     tui = TUI(console)
     tui.print_welcome()
 
+    # Auto-save path (机制四 — session hydration)
+    session_id = uuid.uuid4().hex[:8]
+    auto_save_dir = os.path.join(workspace, ".opencollab", "sessions")
+    auto_save_path = os.path.join(auto_save_dir, f"{session_id}.jsonl")
+
     # Create or restore session
     if session_file and os.path.exists(session_file):
         session = Session.load(session_file, agent, env=env, tracer=tracer,
                                max_budget_tokens=budget, on_event=tui.event_handler,
-                               confirm_fn=confirm_fn)
+                               confirm_fn=confirm_fn, repo_map=repo_map,
+                               auto_save_path=auto_save_path)
         console.print(f"[dim]Restored session from {session_file}[/dim]")
     else:
         session = Session(
             agent=agent, env=env, tracer=tracer,
             max_budget_tokens=budget, on_event=tui.event_handler,
-            confirm_fn=confirm_fn,
+            confirm_fn=confirm_fn, repo_map=repo_map,
+            auto_save_path=auto_save_path,
         )
+        console.print(f"[dim]Session auto-saving to {auto_save_path}[/dim]")
 
     # REPL loop
     cancel_event = asyncio.Event()
 
     while True:
+        was_suspended = _safe_suspend_live(tui)
         try:
-            user_input = await asyncio.get_event_loop().run_in_executor(
-                None, lambda: console.input("[bold green]> [/bold green]")
-            )
+            user_input = await _read_line("> ")
         except (EOFError, KeyboardInterrupt):
             break
+        finally:
+            _safe_resume_live(tui, was_suspended)
 
         user_input = user_input.strip()
         if not user_input:
@@ -222,15 +303,18 @@ async def _team(
 ):
     from opencollab.team.orchestrator import Team
     from opencollab.core.tracer import Tracer
+    from opencollab.core.context import get_repo_map
+    from opencollab.tools.human import AskUserTool
     from opencollab.cli.tui import TUI
 
     workspace = os.path.abspath(workspace)
     tracer = Tracer(run_id=f"team-{uuid.uuid4().hex[:8]}") if trace else None
     confirm_fn = None if yolo else _confirm_prompt
+    repo_map = get_repo_map(workspace)
 
     tui = TUI(console)
     tui.print_welcome()
-    console.print("[bold blue]Team mode[/bold blue] — Lead + Specialists\n")
+    console.print("[bold blue]Team mode[/bold blue] — Lead (Planner) + Specialists (Coder + Tester)\n")
 
     team_instance = Team(
         workspace=workspace,
@@ -243,17 +327,23 @@ async def _team(
         on_event=tui.event_handler,
         confirm_fn=confirm_fn,
         use_worktrees=use_worktrees,
+        repo_map=repo_map,
     )
+
+    # Interactive mode: give Lead the ask_user tool (not added in Team.__init__
+    # to keep headless eval clean — ref: SWE-bench regression root cause)
+    team_instance.lead_agent.tools.append(AskUserTool())
 
     cancel_event = asyncio.Event()
 
     while True:
+        was_suspended = _safe_suspend_live(tui)
         try:
-            user_input = await asyncio.get_event_loop().run_in_executor(
-                None, lambda: console.input("[bold green]> [/bold green]")
-            )
+            user_input = await _read_line("> ")
         except (EOFError, KeyboardInterrupt):
             break
+        finally:
+            _safe_resume_live(tui, was_suspended)
 
         user_input = user_input.strip()
         if not user_input:
@@ -334,13 +424,18 @@ async def _eval(
 
 async def _confirm_prompt(message: str) -> bool:
     """Ask the user for confirmation (human-in-the-loop)."""
+    from opencollab.cli.tui import TUI
+
+    active_tui = TUI.get_active()
+    was_suspended = _safe_suspend_live(active_tui) if active_tui else False
     try:
-        response = await asyncio.get_event_loop().run_in_executor(
-            None, lambda: console.input(f"[yellow]{message}[/yellow] [y/N] ")
-        )
+        response = await _read_line(f"{message} [y/N] ")
         return response.strip().lower() in ("y", "yes")
     except (EOFError, KeyboardInterrupt):
         return False
+    finally:
+        if active_tui:
+            _safe_resume_live(active_tui, was_suspended)
 
 
 def main():

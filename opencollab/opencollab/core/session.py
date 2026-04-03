@@ -84,6 +84,8 @@ class Session:
         compaction_threshold: int = DEFAULT_COMPACTION_THRESHOLD,
         on_event: EventCallback | None = None,
         confirm_fn: Callable[[str], Awaitable[bool]] | None = None,
+        repo_map: str | None = None,
+        auto_save_path: str | None = None,
     ):
         self.agent = agent
         self.env = env or LocalEnvironment()
@@ -93,9 +95,14 @@ class Session:
         self.compaction_threshold = compaction_threshold
         self.on_event = on_event
         self.confirm_fn = confirm_fn  # Human-in-the-loop callback
+        self._auto_save_path = auto_save_path
 
-        # State
-        self.messages: list[dict[str, Any]] = [{"role": "system", "content": agent.system_prompt}]
+        # State — inject repo map into system prompt if provided
+        # (ref: 机制一 — 知识就是 Prompt, 直接作为 System 注入)
+        system_content = agent.system_prompt
+        if repo_map:
+            system_content += f"\n\nProject Structure:\n{repo_map}"
+        self.messages: list[dict[str, Any]] = [{"role": "system", "content": system_content}]
         self.used_tokens: int = 0
         self.step_count: int = 0
         self.is_done: bool = False
@@ -232,11 +239,23 @@ class Session:
         latency = time.monotonic() - start
         self.used_tokens += response.usage.total_tokens
 
-        # Log to tracer
+        # Log to tracer — full content for debugging
         if self.tracer:
+            tool_calls_log = None
+            if response.tool_calls:
+                tool_calls_log = [
+                    {"id": tc.get("id"), "name": tc.get("function", {}).get("name"),
+                     "arguments": tc.get("function", {}).get("arguments", "")}
+                    for tc in response.tool_calls
+                ]
             self.tracer.log_step(
                 step_type="llm_call",
-                payload={"model": self.agent.model, "finish_reason": response.finish_reason},
+                payload={
+                    "model": self.agent.model,
+                    "finish_reason": response.finish_reason,
+                    "content": response.content,
+                    "tool_calls": tool_calls_log,
+                },
                 tokens=response.usage.total_tokens,
                 latency=latency,
             )
@@ -334,9 +353,11 @@ class Session:
                 result = truncated
 
             if self.tracer:
+                # Cap result in trace to 4k to keep trajectory files manageable
+                trace_result = result if len(result) <= 4096 else result[:2048] + "\n...[truncated]...\n" + result[-2048:]
                 self.tracer.log_step(
                     step_type="tool_exec",
-                    payload={"tool": tool_name, "args": args, "result_len": len(result)},
+                    payload={"tool": tool_name, "args": args, "result_len": len(result), "result": trace_result},
                     tokens=0,
                     latency=tool_latency,
                 )

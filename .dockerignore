@@ -4,3 +4,4 @@
 **/*.pyc
 logs
 swe_workdir
+*.pyc

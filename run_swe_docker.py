@@ -321,6 +321,7 @@ async def run_opencollab_team_agent(
     cfg: AgentRunConfig,
     max_round: int,
     max_steps: int,
+    run_id: str = "",
 ) -> tuple[str, int, int]:
     """Run OpenCollab Team against an existing docker container workspace."""
     team_mod = importlib.import_module("opencollab.team.orchestrator")
@@ -341,6 +342,12 @@ async def run_opencollab_team_agent(
     FileWriteTool = fs_mod.FileWriteTool
     GrepTool = fs_mod.GrepTool
 
+    tracer_mod = importlib.import_module("opencollab.core.tracer")
+    Tracer = tracer_mod.Tracer
+    safe_tracer_id = cfg.model.replace("/", "_").replace(":", "_")
+    traj_run_id = f"team_{safe_tracer_id}_{run_id}" if run_id else f"team_{safe_tracer_id}"
+    tracer = Tracer(run_id=traj_run_id, output_dir=str(Path("logs") / "trajectories"))
+
     team = Team(
         workspace=DOCKER_WORKDIR,
         model=cfg.model,
@@ -350,6 +357,7 @@ async def run_opencollab_team_agent(
         lead_prompt=TEAM_LEAD_PROMPT,
         max_budget_tokens=cfg.budget,
         use_worktrees=False,
+        tracer=tracer,
     )
 
     # Bind lead execution to the target SWE-bench container workspace.
@@ -687,6 +695,7 @@ def run_instance_docker(
                     cfg=cfg,
                     max_round=max_round,
                     max_steps=max_steps,
+                    run_id=run_id,
                 )
             )
         (log_dir / "agent_result.txt").write_text(result_text)
