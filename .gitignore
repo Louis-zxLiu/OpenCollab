@@ -4,6 +4,9 @@ openclaw/
 opencode/
 self-collaboration_paper_tex/
 .env
+configs/.env
+.opencollab/
 logs/
+__pycache__/
 *.pyc
 .DS_Store

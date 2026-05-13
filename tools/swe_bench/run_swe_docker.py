@@ -14,7 +14,7 @@ Evaluation uses the official swebench eval_script + grading when available,
 falling back to test_cmd execution otherwise.
 
 Usage:
-  ./run_swe_docker.sh --instance_ids django__django-15400
+  scripts/run_swe_docker.sh --instance_ids django__django-15400
 """
 
 from __future__ import annotations
@@ -34,16 +34,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
-# Load .env BEFORE config resolution
-if os.path.exists(".env"):
-    for line in open(".env", encoding="utf-8"):
-        if "=" in line and not line.startswith("#"):
-            k, v = line.strip().split("=", 1)
-            v = v.strip().strip('"').strip("'")
-            os.environ.setdefault(k, v)
+# Allow config loading and package imports relative to this script.
+_repo_root = Path(__file__).resolve().parents[2]
 
 # Allow running without editable install: repo_root/opencollab is the package root.
-_repo_root = Path(__file__).resolve().parent
 _pkg_root = _repo_root / "opencollab"
 if str(_pkg_root) not in sys.path:
     sys.path.insert(0, str(_pkg_root))
@@ -850,7 +844,7 @@ def main() -> None:
     if args.arch:
         _cfg["arch"] = args.arch
 
-    env_cfg = get_config(str(_repo_root / "opencollab"))
+    env_cfg = get_config(str(_repo_root))
     model = args.model or env_cfg["model"] or "gpt-4o"
     provider = args.provider or env_cfg["provider"] or "openai"
     cfg = AgentRunConfig(

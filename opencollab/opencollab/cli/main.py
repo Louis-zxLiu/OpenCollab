@@ -107,12 +107,12 @@ def _resolve_config(workspace: str, model: str | None, provider: str | None,
 
 @app.command()
 def chat(
-    model: Optional[str] = typer.Option(None, "--model", "-m", help="LLM model (default from .env)"),
-    provider: Optional[str] = typer.Option(None, "--provider", "-p", help="LLM provider (default from .env or openai)"),
-    api_key: Optional[str] = typer.Option(None, "--api-key", help="API key (default from .env)"),
-    base_url: Optional[str] = typer.Option(None, "--base-url", help="API base URL (default from .env)"),
+    model: Optional[str] = typer.Option(None, "--model", "-m", help="LLM model (default from config)"),
+    provider: Optional[str] = typer.Option(None, "--provider", "-p", help="LLM provider (default from config or openai)"),
+    api_key: Optional[str] = typer.Option(None, "--api-key", help="API key (default from config)"),
+    base_url: Optional[str] = typer.Option(None, "--base-url", help="API base URL (default from config)"),
     workspace: str = typer.Option(".", "--workspace", "-w", help="Working directory"),
-    budget: Optional[int] = typer.Option(None, "--budget", help="Max token budget (default from .env or 200000)"),
+    budget: Optional[int] = typer.Option(None, "--budget", help="Max token budget (default from config or 200000)"),
     session_file: Optional[str] = typer.Option(None, "--session", "-s", help="Resume from session JSONL"),
     trace: bool = typer.Option(False, "--trace", help="Enable trajectory recording"),
     yolo: bool = typer.Option(False, "--yolo", help="Auto-approve risky commands"),
@@ -132,12 +132,12 @@ def chat(
 
 @app.command()
 def team(
-    model: Optional[str] = typer.Option(None, "--model", "-m", help="LLM model (default from .env)"),
-    provider: Optional[str] = typer.Option(None, "--provider", "-p", help="LLM provider (default from .env or openai)"),
-    api_key: Optional[str] = typer.Option(None, "--api-key", help="API key (default from .env)"),
-    base_url: Optional[str] = typer.Option(None, "--base-url", help="API base URL (default from .env)"),
+    model: Optional[str] = typer.Option(None, "--model", "-m", help="LLM model (default from config)"),
+    provider: Optional[str] = typer.Option(None, "--provider", "-p", help="LLM provider (default from config or openai)"),
+    api_key: Optional[str] = typer.Option(None, "--api-key", help="API key (default from config)"),
+    base_url: Optional[str] = typer.Option(None, "--base-url", help="API base URL (default from config)"),
     workspace: str = typer.Option(".", "--workspace", "-w", help="Working directory"),
-    budget: Optional[int] = typer.Option(None, "--budget", help="Max token budget (default from .env or 500000)"),
+    budget: Optional[int] = typer.Option(None, "--budget", help="Max token budget (default from config or 500000)"),
     trace: bool = typer.Option(False, "--trace", help="Enable trajectory recording"),
     yolo: bool = typer.Option(False, "--yolo", help="Auto-approve risky commands"),
     no_worktrees: bool = typer.Option(False, "--no-worktrees", help="Disable git worktree isolation"),
@@ -160,10 +160,10 @@ def team(
 @app.command(name="eval")
 def eval_cmd(
     tasks_file: str = typer.Argument(..., help="JSONL file with eval tasks"),
-    model: Optional[str] = typer.Option(None, "--model", "-m", help="LLM model (default from .env)"),
-    provider: Optional[str] = typer.Option(None, "--provider", "-p", help="LLM provider (default from .env)"),
-    api_key: Optional[str] = typer.Option(None, "--api-key", help="API key (default from .env)"),
-    base_url: Optional[str] = typer.Option(None, "--base-url", help="API base URL (default from .env)"),
+    model: Optional[str] = typer.Option(None, "--model", "-m", help="LLM model (default from config)"),
+    provider: Optional[str] = typer.Option(None, "--provider", "-p", help="LLM provider (default from config)"),
+    api_key: Optional[str] = typer.Option(None, "--api-key", help="API key (default from config)"),
+    base_url: Optional[str] = typer.Option(None, "--base-url", help="API base URL (default from config)"),
     output_dir: str = typer.Option("eval_results", "--output", "-o"),
     concurrency: int = typer.Option(4, "--concurrency", "-c", help="Parallel tasks"),
     max_tokens: int = typer.Option(100_000, "--max-tokens"),

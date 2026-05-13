@@ -18,10 +18,10 @@ COPY --from=dockercli /usr/local/bin/docker /usr/local/bin/docker
 
 # Install runtime dependencies required by OpenCollab and runner
 COPY opencollab /app/opencollab
-COPY requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r /app/requirements.txt
+RUN pip install --no-cache-dir -e "/app/opencollab[swebench]"
 
 # Runner scripts
-COPY run_swe_docker.py /app/run_swe_docker.py
+RUN mkdir -p /app/tools/swe_bench
+COPY tools/swe_bench/run_swe_docker.py /app/tools/swe_bench/run_swe_docker.py
 
-ENTRYPOINT ["python", "/app/run_swe_docker.py"]
+ENTRYPOINT ["python", "/app/tools/swe_bench/run_swe_docker.py"]

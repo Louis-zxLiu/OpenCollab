@@ -1,7 +1,8 @@
-"""Configuration — load defaults from .env file and environment variables.
+"""Pydantic-backed configuration loading.
 
-Reads .env from the current working directory (or workspace), then
-falls back to environment variables. No external dependencies (no python-dotenv).
+Reads configs/.env from the current working directory or workspace, then falls
+back to legacy .env files. Env-file parsing is built in, so python-dotenv is
+not required.
 
 Supported variables:
     OPENCOLLAB_MODEL      — default LLM model (e.g., "claude-sonnet-4-20250514")
@@ -9,11 +10,48 @@ Supported variables:
     OPENCOLLAB_API_KEY    — API key (also reads OPENAI_API_KEY / ANTHROPIC_API_KEY)
     OPENCOLLAB_BASE_URL   — API base URL (also reads OPENAI_BASE_URL)
     OPENCOLLAB_BUDGET     — default token budget
+    OPENCOLLAB_CONFIG_FILE — explicit path to an env file
 """
 
 from __future__ import annotations
 
 import os
+from pathlib import Path
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+
+class OpenCollabConfig(BaseModel):
+    """Runtime configuration for OpenCollab."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    model: str = Field(default="gpt-4o", min_length=1)
+    provider: str = Field(default="openai", min_length=1)
+    api_key: str | None = None
+    base_url: str | None = None
+    budget: int = Field(default=200_000, ge=1)
+
+    @field_validator("model", "provider", mode="before")
+    @classmethod
+    def _strip_required_strings(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return value.strip()
+        return value
+
+    @field_validator("provider")
+    @classmethod
+    def _normalize_provider(cls, value: str) -> str:
+        return value.lower()
+
+    @field_validator("api_key", "base_url", mode="before")
+    @classmethod
+    def _empty_string_as_none(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            stripped = value.strip()
+            return stripped or None
+        return value
 
 
 def load_dotenv(path: str | None = None) -> dict[str, str]:
@@ -42,14 +80,46 @@ def load_dotenv(path: str | None = None) -> dict[str, str]:
     return result
 
 
-def get_config(workspace: str | None = None) -> dict[str, str | None]:
-    """Get resolved configuration from .env + environment variables.
+def _candidate_env_paths(workspace: str | None = None) -> list[str]:
+    """Return config file candidates in priority order."""
+    explicit = os.environ.get("OPENCOLLAB_CONFIG_FILE")
+    if explicit:
+        return [explicit]
 
-    Priority: environment variable > .env file > built-in default
+    bases: list[Path] = []
+    if workspace:
+        bases.append(Path(workspace))
+    bases.append(Path.cwd())
+
+    paths: list[str] = []
+    seen: set[str] = set()
+    for base in bases:
+        for candidate in (base / "configs" / ".env", base / ".env"):
+            key = str(candidate.resolve() if candidate.exists() else candidate.absolute())
+            if key not in seen:
+                paths.append(str(candidate))
+                seen.add(key)
+    return paths
+
+
+def load_config_env(workspace: str | None = None) -> dict[str, str]:
+    """Load env-file defaults from configs/.env and legacy .env locations.
+
+    Earlier paths have higher priority.
     """
-    # Load .env from workspace directory
-    env_path = os.path.join(workspace, ".env") if workspace else None
-    dotenv = load_dotenv(env_path)
+    values: dict[str, str] = {}
+    for path in _candidate_env_paths(workspace):
+        for key, value in load_dotenv(path).items():
+            values.setdefault(key, value)
+    return values
+
+
+def build_config(workspace: str | None = None, overrides: dict[str, Any] | None = None) -> OpenCollabConfig:
+    """Build and validate runtime configuration.
+
+    Priority: environment variable > configs/.env > .env > built-in default
+    """
+    dotenv = load_config_env(workspace)
 
     def resolve(key: str, *fallback_keys: str, default: str | None = None) -> str | None:
         # Check env vars first (highest priority)
@@ -70,10 +140,18 @@ def get_config(workspace: str | None = None) -> dict[str, str | None]:
                 return val
         return default
 
-    return {
+    values: dict[str, Any] = {
         "model": resolve("OPENCOLLAB_MODEL", default="gpt-4o"),
         "provider": resolve("OPENCOLLAB_PROVIDER", default="openai"),
         "api_key": resolve("OPENCOLLAB_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"),
         "base_url": resolve("OPENCOLLAB_BASE_URL", "OPENAI_BASE_URL"),
         "budget": resolve("OPENCOLLAB_BUDGET", default="200000"),
     }
+    if overrides:
+        values.update({k: v for k, v in overrides.items() if v is not None})
+    return OpenCollabConfig.model_validate(values)
+
+
+def get_config(workspace: str | None = None) -> dict[str, Any]:
+    """Get resolved configuration as a dict for existing callers."""
+    return build_config(workspace).model_dump()
