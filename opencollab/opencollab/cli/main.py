@@ -251,6 +251,7 @@ async def _chat(
             confirm_fn=confirm_fn, repo_map=repo_map,
             auto_save_path=auto_save_path,
         )
+        session.save(auto_save_path)
         console.print(f"[dim]Session auto-saving to {auto_save_path}[/dim]")
 
     # REPL loop

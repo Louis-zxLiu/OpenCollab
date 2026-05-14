@@ -15,6 +15,7 @@ import asyncio
 import copy
 import hashlib
 import json
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Awaitable
@@ -169,6 +170,7 @@ class Session:
         self.messages.append({"role": "user", "content": content})
         self.is_done = False
         self._recent_call_hashes.clear()
+        self._auto_save()
 
     def snapshot(self) -> Session:
         """Deep copy for branching / time-travel (ref: design doc snapshot)."""
@@ -189,9 +191,17 @@ class Session:
 
     def save(self, path: str) -> None:
         """Persist session as JSONL (ref: design doc — serialize to JSONL)."""
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         with open(path, "w") as f:
             for msg in self.messages:
                 f.write(json.dumps(msg, ensure_ascii=False) + "\n")
+
+    def _auto_save(self) -> None:
+        """Persist to the configured auto-save path when enabled."""
+        if self._auto_save_path:
+            self.save(self._auto_save_path)
 
     @classmethod
     def load(cls, path: str, agent: Agent, **kwargs) -> Session:
@@ -280,6 +290,7 @@ class Session:
             self.is_done = True
 
         await self._emit(SessionEvent(type="step_end", data={"step": self.step_count, "latency": latency}))
+        self._auto_save()
 
     async def _process_tool_calls(self, tool_calls: list[dict]) -> None:
         """Execute tool calls and append results.
@@ -422,6 +433,7 @@ class Session:
                 tokens=0,
                 latency=0,
             )
+        self._auto_save()
 
     # ---- Event emission ----
 
