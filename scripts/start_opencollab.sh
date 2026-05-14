@@ -82,7 +82,7 @@ ensure_venv() {
 }
 
 main() {
-    local mode="${1:-team}"
+    local mode="${1:-chat}"
     if [ "$mode" = "-h" ] || [ "$mode" = "--help" ] || [ "$mode" = "help" ]; then
         usage
         exit 0
