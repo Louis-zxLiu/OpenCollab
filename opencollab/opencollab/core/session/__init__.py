@@ -12,6 +12,7 @@ from opencollab.core.session.tools import (
     CallbackPermissionPolicy,
     PermissionPolicy,
     ToolCallProcessor,
+    ToolProcessingResult,
 )
 
 SessionMachine = SessionRunner
@@ -39,5 +40,5 @@ __all__ = [
     "SessionState",
     "SessionStore",
     "ToolCallProcessor",
+    "ToolProcessingResult",
 ]
-

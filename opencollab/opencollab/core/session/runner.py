@@ -152,7 +152,8 @@ class SessionRunner:
             self.state.phase = SessionPhase.ERROR
             raise RuntimeError("Cannot execute tools before calling LLM")
 
-        await self.tool_processor.process(response.tool_calls)
+        result = await self.tool_processor.process(response.tool_calls)
+        result.apply_to(self.state)
         self.state.phase = SessionPhase.AUTOSAVING
 
     async def _autosave_pending_step(self) -> None:

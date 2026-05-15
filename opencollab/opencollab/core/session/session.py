@@ -245,7 +245,8 @@ class Session:
         await self.compactor.compact()
 
     async def _process_tool_calls(self, tool_calls: list[dict]) -> None:
-        await self.tool_processor.process(tool_calls)
+        result = await self.tool_processor.process(tool_calls)
+        result.apply_to(self.state)
 
     def _build_tool_schemas(self) -> list[dict] | None:
         return self.runner._build_tool_schemas()
@@ -263,7 +264,8 @@ class Session:
         if response.content:
             await self.event_bus.emit(SessionEvent(type="text_delta", data={"content": response.content}))
         if response.tool_calls:
-            await self.tool_processor.process(response.tool_calls)
+            result = await self.tool_processor.process(response.tool_calls)
+            result.apply_to(self.state)
         else:
             self.state.mark_done()
 

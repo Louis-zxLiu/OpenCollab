@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Protocol
 
 from opencollab.core.session.events import EventBus, SessionEvent
@@ -29,6 +30,19 @@ class CallbackPermissionPolicy:
         return await self._confirm_fn(prompt)
 
 
+@dataclass
+class ToolProcessingResult:
+    messages_to_append: list[dict[str, Any]] = field(default_factory=list)
+    recent_hash_updates: list[str] = field(default_factory=list)
+    loop_detections: list[dict[str, Any]] = field(default_factory=list)
+
+    def apply_to(self, state: SessionState) -> None:
+        for message in self.messages_to_append:
+            state.append_message(message)
+        for call_hash in self.recent_hash_updates:
+            state.remember_tool_call_hash(call_hash, max_window=MAX_CALL_HASH_WINDOW)
+
+
 class ToolCallProcessor:
     def __init__(
         self,
@@ -47,7 +61,10 @@ class ToolCallProcessor:
         self.tracer = tracer
         self.permission_policy = permission_policy
 
-    async def process(self, tool_calls: list[dict]) -> None:
+    async def process(self, tool_calls: list[dict]) -> ToolProcessingResult:
+        result = ToolProcessingResult()
+        recent_call_hashes = list(self.state.recent_call_hashes)
+
         for tc in tool_calls:
             func = tc["function"]
             tool_name = func["name"]
@@ -56,20 +73,27 @@ class ToolCallProcessor:
             try:
                 args = self._parse_tool_args(func)
             except json.JSONDecodeError:
-                self.state.messages.append({
+                result.messages_to_append.append({
                     "role": "tool",
                     "tool_call_id": tool_id,
                     "content": f"Error: invalid JSON arguments: {func['arguments'][:200]}",
                 })
                 continue
 
-            recent_same = self._detect_repeated_tool_call(tool_name, args)
+            call_hash = self._tool_call_hash(tool_name, args)
+            result.recent_hash_updates.append(call_hash)
+            recent_call_hashes.append(call_hash)
+            if len(recent_call_hashes) > MAX_CALL_HASH_WINDOW:
+                recent_call_hashes = recent_call_hashes[-MAX_CALL_HASH_WINDOW:]
+
+            recent_same = self._count_recent_similar_calls(recent_call_hashes, call_hash)
             if recent_same >= MAX_SIMILAR_CALLS:
                 warning = (
                     f"[Loop detected: tool '{tool_name}' called {recent_same} times with identical arguments. "
                     f"You are stuck in a loop. Try a completely different approach or ask for help.]"
                 )
-                self.state.messages.append({"role": "tool", "tool_call_id": tool_id, "content": warning})
+                result.messages_to_append.append({"role": "tool", "tool_call_id": tool_id, "content": warning})
+                result.loop_detections.append({"tool": tool_name, "count": recent_same})
                 await self.event_bus.emit(
                     SessionEvent(type="loop_detected", data={"tool": tool_name, "count": recent_same})
                 )
@@ -77,7 +101,7 @@ class ToolCallProcessor:
 
             tool = self._find_tool(tool_name)
             if not tool:
-                self.state.messages.append({
+                result.messages_to_append.append({
                     "role": "tool",
                     "tool_call_id": tool_id,
                     "content": f"Error: unknown tool '{tool_name}'. Available: {[t.name for t in self.agent.tools]}",
@@ -86,37 +110,43 @@ class ToolCallProcessor:
 
             await self.event_bus.emit(SessionEvent(type="tool_start", data={"tool": tool_name, "args": args}))
 
-            result, tool_latency = await self._execute_tool(tool, args)
-            result = self._truncate_tool_result(result)
+            tool_output, tool_latency = await self._execute_tool(tool, args)
+            tool_output = self._truncate_tool_result(tool_output)
 
             if self.tracer:
                 # Cap result in trace to 4k to keep trajectory files manageable
                 trace_result = (
-                    result if len(result) <= 4096 else result[:2048] + "\n...[truncated]...\n" + result[-2048:]
+                    tool_output
+                    if len(tool_output) <= 4096
+                    else tool_output[:2048] + "\n...[truncated]...\n" + tool_output[-2048:]
                 )
                 self.tracer.log_step(
                     step_type="tool_exec",
-                    payload={"tool": tool_name, "args": args, "result_len": len(result), "result": trace_result},
+                    payload={
+                        "tool": tool_name,
+                        "args": args,
+                        "result_len": len(tool_output),
+                        "result": trace_result,
+                    },
                     tokens=0,
                     latency=tool_latency,
                 )
 
-            self._append_tool_result(tool_id, result)
+            result.messages_to_append.append(self._tool_result_message(tool_id, tool_output))
             await self.event_bus.emit(SessionEvent(type="tool_end", data={"tool": tool_name, "latency": tool_latency}))
+
+        return result
 
     def _parse_tool_args(self, func: dict) -> dict:
         args_str = func["arguments"]
         return json.loads(args_str) if args_str else {}
 
-    def _detect_repeated_tool_call(self, tool_name: str, args: dict) -> int:
-        # Loop detection — hash the (tool_name, args) tuple
-        call_hash = hashlib.md5(json.dumps({"name": tool_name, "args": args}, sort_keys=True).encode()).hexdigest()
-        self.state.recent_call_hashes.append(call_hash)
-        if len(self.state.recent_call_hashes) > MAX_CALL_HASH_WINDOW:
-            self.state.recent_call_hashes = self.state.recent_call_hashes[-MAX_CALL_HASH_WINDOW:]
+    def _tool_call_hash(self, tool_name: str, args: dict) -> str:
+        return hashlib.md5(json.dumps({"name": tool_name, "args": args}, sort_keys=True).encode()).hexdigest()
 
+    def _count_recent_similar_calls(self, recent_call_hashes: list[str], call_hash: str) -> int:
         # Check for repeated identical calls (ref: opencode doom_loop)
-        return sum(1 for h in self.state.recent_call_hashes[-MAX_SIMILAR_CALLS * 2 :] if h == call_hash)
+        return sum(1 for h in recent_call_hashes[-MAX_SIMILAR_CALLS * 2 :] if h == call_hash)
 
     def _find_tool(self, tool_name: str):
         return self.agent.find_tool(tool_name)
@@ -144,5 +174,5 @@ class ToolCallProcessor:
                 result[-MAX_TOOL_OUTPUT_CHARS // 2:]
         return result
 
-    def _append_tool_result(self, tool_id: str, result: str) -> None:
-        self.state.messages.append({"role": "tool", "tool_call_id": tool_id, "content": result})
+    def _tool_result_message(self, tool_id: str, result: str) -> dict[str, str]:
+        return {"role": "tool", "tool_call_id": tool_id, "content": result}

@@ -465,6 +465,26 @@ def test_tool_calls_execute_append_tool_result_and_continue(install_fake_llm):
     assert fake_llm.calls[0]["tools"][0]["function"]["name"] == "fake_tool"
 
 
+def test_tool_processor_returns_result_before_state_application(install_fake_llm):
+    install_fake_llm(FakeLLMClient())
+    tool = FakeTool(result=lambda args: f"echo {args['value']}")
+    session = session_mod.Session(agent=FakeAgent(tools=[tool]))
+    original_messages = copy.deepcopy(session.messages)
+
+    result = run(session.tool_processor.process([tool_call(arguments='{"value": 9}')]))
+
+    assert isinstance(result, session_mod.ToolProcessingResult)
+    assert result.messages_to_append == [{"role": "tool", "tool_call_id": "call-1", "content": "echo 9"}]
+    assert len(result.recent_hash_updates) == 1
+    assert session.messages == original_messages
+    assert session._recent_call_hashes == []
+
+    result.apply_to(session.state)
+
+    assert session.messages[-1] == {"role": "tool", "tool_call_id": "call-1", "content": "echo 9"}
+    assert session._recent_call_hashes == result.recent_hash_updates
+
+
 def test_tool_permission_error_is_returned_as_tool_message(install_fake_llm):
     tool = FakeTool(exc=PermissionError("blocked"))
     install_fake_llm(FakeLLMClient([
