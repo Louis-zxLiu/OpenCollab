@@ -41,7 +41,7 @@ class SessionRunner:
 
     async def run_loop(self, cancel_event: asyncio.Event | None = None) -> str:
         try:
-            self.state.phase = SessionPhase.IDLE
+            self.state.set_phase(SessionPhase.IDLE)
             while not self.state.is_done and not self._is_terminal_phase() and self.state.step_count < self.max_steps:
                 await self._advance(cancel_event)
 
@@ -50,7 +50,7 @@ class SessionRunner:
                 self.tracer.flush()
             raise
         except Exception:
-            self.state.phase = SessionPhase.ERROR
+            self.state.set_phase(SessionPhase.ERROR)
             raise
 
         for msg in reversed(self.state.messages):
@@ -69,7 +69,7 @@ class SessionRunner:
     async def _advance(self, cancel_event: asyncio.Event | None = None) -> None:
         match self.state.phase:
             case SessionPhase.IDLE:
-                self.state.phase = SessionPhase.PRECHECK
+                self.state.set_phase(SessionPhase.PRECHECK)
             case SessionPhase.PRECHECK:
                 await self._precheck(cancel_event)
             case SessionPhase.COMPACTING:
@@ -83,86 +83,86 @@ class SessionRunner:
             case SessionPhase.AUTOSAVING:
                 await self._autosave_pending_step()
             case _:
-                self.state.phase = SessionPhase.ERROR
+                self.state.set_phase(SessionPhase.ERROR)
                 raise RuntimeError(f"Cannot advance terminal phase: {self.state.phase.value}")
 
     async def _precheck(self, cancel_event: asyncio.Event | None) -> None:
         if cancel_event and cancel_event.is_set():
-            self.state.messages.append({"role": "system", "content": "[Session interrupted by user]"})
+            self.state.append_message({"role": "system", "content": "[Session interrupted by user]"})
             await self.event_bus.emit(SessionEvent(type="error", data={"reason": "cancelled"}))
-            self.state.phase = SessionPhase.CANCELLED
+            self.state.set_phase(SessionPhase.CANCELLED)
             return
 
         if self.state.used_tokens >= self.max_budget_tokens:
-            self.state.messages.append({
+            self.state.append_message({
                 "role": "system",
                 "content": f"[Budget exceeded: {self.state.used_tokens} tokens used. Session stopped.]",
             })
             await self.event_bus.emit(SessionEvent(type="error", data={"reason": "budget_exceeded"}))
-            self.state.phase = SessionPhase.BUDGET_EXCEEDED
+            self.state.set_phase(SessionPhase.BUDGET_EXCEEDED)
             return
 
         if self.compactor.should_compact():
-            self.state.phase = SessionPhase.COMPACTING
+            self.state.set_phase(SessionPhase.COMPACTING)
             return
 
-        self.state.phase = SessionPhase.CALLING_LLM
+        self.state.set_phase(SessionPhase.CALLING_LLM)
 
     async def _run_compaction(self) -> None:
         result = await self.compactor.compact(apply=False)
         result.apply_to(self.state)
         if result.did_compact and self.auto_save:
             self.auto_save()
-        self.state.phase = SessionPhase.CALLING_LLM
+        self.state.set_phase(SessionPhase.CALLING_LLM)
 
     async def _run_llm_call(self) -> None:
-        self.state.step_count += 1
+        self.state.advance_step()
         await self.event_bus.emit(SessionEvent(type="step_start", data={"step": self.state.step_count}))
         start = time.monotonic()
 
         tools = self._build_tool_schemas()
         response = await self._call_llm(tools)
         latency = time.monotonic() - start
-        self.state.used_tokens += response.usage.total_tokens
+        self.state.add_used_tokens(response.usage.total_tokens)
 
         self._record_llm_trace(response, latency)
         self._append_assistant_message(response)
         self._pending_response = response
         self._pending_latency = latency
-        self.state.phase = SessionPhase.HANDLING_RESPONSE
+        self.state.set_phase(SessionPhase.HANDLING_RESPONSE)
 
     async def _handle_pending_response(self) -> None:
         response = self._pending_response
         if response is None:
-            self.state.phase = SessionPhase.ERROR
+            self.state.set_phase(SessionPhase.ERROR)
             raise RuntimeError("Cannot handle assistant response before calling LLM")
 
         if response.content:
             await self.event_bus.emit(SessionEvent(type="text_delta", data={"content": response.content}))
 
         if response.tool_calls:
-            self.state.phase = SessionPhase.EXECUTING_TOOLS
+            self.state.set_phase(SessionPhase.EXECUTING_TOOLS)
             return
 
-        self.state.is_done = True
+        self.state.mark_done()
         await self._finish_step(self._pending_latency)
         self._clear_pending_step()
-        self.state.phase = SessionPhase.DONE
+        self.state.set_phase(SessionPhase.DONE)
 
     async def _execute_pending_tools(self) -> None:
         response = self._pending_response
         if response is None:
-            self.state.phase = SessionPhase.ERROR
+            self.state.set_phase(SessionPhase.ERROR)
             raise RuntimeError("Cannot execute tools before calling LLM")
 
         result = await self.tool_processor.process(response.tool_calls)
         result.apply_to(self.state)
-        self.state.phase = SessionPhase.AUTOSAVING
+        self.state.set_phase(SessionPhase.AUTOSAVING)
 
     async def _autosave_pending_step(self) -> None:
         await self._finish_step(self._pending_latency)
         self._clear_pending_step()
-        self.state.phase = SessionPhase.DONE if self.state.is_done else SessionPhase.PRECHECK
+        self.state.set_phase(SessionPhase.DONE if self.state.is_done else SessionPhase.PRECHECK)
 
     def _clear_pending_step(self) -> None:
         self._pending_response = None
@@ -205,7 +205,7 @@ class SessionRunner:
             assistant_msg["content"] = response.content
         if response.tool_calls:
             assistant_msg["tool_calls"] = response.tool_calls
-        self.state.messages.append(assistant_msg)
+        self.state.append_message(assistant_msg)
 
     async def _finish_step(self, latency: float) -> None:
         await self.event_bus.emit(
