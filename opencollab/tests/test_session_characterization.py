@@ -328,6 +328,63 @@ def test_session_accepts_explicit_llm_client():
     assert fake_llm.calls
 
 
+def test_session_accepts_llm_client_alias():
+    fake_llm = FakeLLMClient([
+        llm_response(content="alias llm answer", input_tokens=2, output_tokens=3),
+    ])
+    session = session_mod.Session(agent=FakeAgent(), llm_client=fake_llm)
+
+    assert session._llm is fake_llm
+    assert session.runner.llm is fake_llm
+    assert session.compactor.llm is fake_llm
+
+    result = run(session.run_loop())
+
+    assert result == "alias llm answer"
+    assert fake_llm.calls
+
+
+def test_session_accepts_explicit_event_bus(install_fake_llm):
+    install_fake_llm(FakeLLMClient([
+        llm_response(content="event bus answer"),
+    ]))
+    events, on_event = event_collector()
+    event_bus = EventBus(on_event)
+    session = session_mod.Session(agent=FakeAgent(), event_bus=event_bus)
+
+    assert session.event_bus is event_bus
+    assert session.runner.event_bus is event_bus
+    assert session.tool_processor.event_bus is event_bus
+    assert session.compactor.event_bus is event_bus
+
+    result = run(session.run_loop())
+
+    assert result == "event bus answer"
+    assert [event.type for event in events] == ["step_start", "text_delta", "step_end"]
+
+
+def test_session_event_sink_overrides_injected_event_bus_target(install_fake_llm):
+    install_fake_llm(FakeLLMClient([
+        llm_response(content="event sink answer"),
+    ]))
+    original_events, original_callback = event_collector()
+    sink_events = []
+
+    class Sink:
+        async def emit(self, event):
+            sink_events.append(event.type)
+
+    event_bus = EventBus(original_callback)
+    session = session_mod.Session(agent=FakeAgent(), event_bus=event_bus, event_sink=Sink())
+
+    result = run(session.run_loop())
+
+    assert result == "event sink answer"
+    assert session.event_bus is event_bus
+    assert original_events == []
+    assert sink_events == ["step_start", "text_delta", "step_end"]
+
+
 def test_run_loop_when_already_done_returns_latest_assistant_without_llm_call(install_fake_llm):
     fake_llm = install_fake_llm(FakeLLMClient())
     session = session_mod.Session(agent=FakeAgent())

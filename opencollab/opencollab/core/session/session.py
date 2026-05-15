@@ -41,8 +41,10 @@ class Session:
         repo_map: str | None = None,
         auto_save_path: str | None = None,
         event_sink: EventSink | None = None,
+        event_bus: EventBus | None = None,
         permission_policy: PermissionPolicy | None = None,
         llm=None,
+        llm_client=None,
         store=None,
     ):
         self.agent = agent
@@ -51,7 +53,9 @@ class Session:
         self.max_budget_tokens = max_budget_tokens
         self.max_steps = max_steps
         self.compaction_threshold = compaction_threshold
-        self.event_bus = EventBus(event_sink if event_sink is not None else on_event)
+        self.event_bus = event_bus if event_bus is not None else EventBus(event_sink if event_sink is not None else on_event)
+        if event_bus is not None and (event_sink is not None or on_event is not None):
+            self.event_bus.set_target(event_sink if event_sink is not None else on_event)
         self._confirm_fn = confirm_fn
         self._permission_policy = permission_policy or (
             CallbackPermissionPolicy(confirm_fn) if confirm_fn is not None else None
@@ -64,8 +68,9 @@ class Session:
             system_content += f"\n\nProject Structure:\n{repo_map}"
         self.state = SessionState(messages=[{"role": "system", "content": system_content}])
 
-        if llm is not None:
-            self._llm = llm
+        injected_llm = llm if llm is not None else llm_client
+        if injected_llm is not None:
+            self._llm = injected_llm
         else:
             llm_cls = getattr(import_module("opencollab.core.session"), "LLMClient")
             self._llm = llm_cls(
