@@ -203,3 +203,20 @@ Primary references: `session.py:41-50`, `session.py:346-351`, `session.py:440-44
 - `snapshot()` and `load()` partial state behavior. They do not restore every runtime field today. Making them "more complete" may be correct, but it is a behavior change.
 - `repo_map` injection. It is only appended during construction and not persisted as a separate field. Reloading/injecting it twice would duplicate project structure in the prompt.
 - Tracer behavior. The tracer currently records full LLM response content/tool calls and truncated tool output; changing payload shape can break trajectory consumers.
+
+## 9. Post-refactor ownership boundaries
+
+The session package is now split around explicit state ownership:
+
+- `SessionState` owns lifecycle writes through methods such as `append_message()`, `replace_messages()`, `add_used_tokens()`, `advance_step()`, `mark_done()`, `set_phase()`, and user-turn/tool-hash helpers.
+- `Session` remains the public facade and compatibility layer. It owns the `SessionState`, wires runtime dependencies, and keeps existing facade properties and helper methods.
+- `SessionRunner` remains the state transition engine, but writes lifecycle state through `SessionState` methods.
+- `ToolCallProcessor.process()` returns `ToolProcessingResult`; runner/session compatibility paths apply returned messages and recent tool-call hashes explicitly.
+- `ContextCompactor.compact()` returns `CompactResult`; direct calls still apply by default for compatibility, while runner/session paths use `apply=False` and apply the result explicitly.
+
+Compatibility intentionally preserved:
+
+- `SessionEvent(type, data)` stays unchanged for TUI, Team, CLI, and callback users.
+- JSONL storage remains messages-only.
+- Compatibility exports such as `SessionMachine`, facade properties, and older helper methods remain in place.
+- TUI event adapter separation, Team-specific event types, HumanInput ports, and stronger event typing remain future work.
