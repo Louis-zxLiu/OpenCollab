@@ -242,7 +242,10 @@ class Session:
         return self.compactor.should_compact()
 
     async def _compact(self) -> None:
-        await self.compactor.compact()
+        result = await self.compactor.compact(apply=False)
+        result.apply_to(self.state)
+        if result.did_compact:
+            self._auto_save()
 
     async def _process_tool_calls(self, tool_calls: list[dict]) -> None:
         result = await self.tool_processor.process(tool_calls)

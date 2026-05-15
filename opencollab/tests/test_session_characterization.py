@@ -672,6 +672,31 @@ def test_context_compactor_falls_back_to_raw_text_when_llm_fails(install_fake_ll
     assert "[user]: message 1" in session.messages[1]["content"]
 
 
+def test_context_compactor_can_return_result_before_state_application(install_fake_llm):
+    install_fake_llm(FakeLLMClient([
+        llm_response(content="compact summary", input_tokens=3, output_tokens=4),
+    ]))
+    session = session_mod.Session(agent=FakeAgent())
+    session.messages.extend({"role": "user", "content": f"message {idx}"} for idx in range(10))
+    original_messages = copy.deepcopy(session.messages)
+
+    result = run(session.compactor.compact(apply=False))
+
+    assert isinstance(result, session_mod.CompactResult)
+    assert result.did_compact is True
+    assert result.compacted_count == 2
+    assert result.summary_len == len("compact summary")
+    assert result.used_tokens_delta == 7
+    assert session.messages == original_messages
+    assert session.used_tokens == 0
+
+    result.apply_to(session.state)
+
+    assert session.messages != original_messages
+    assert session.messages[1]["content"] == "[Context compacted — summary of 2 earlier messages]:\ncompact summary"
+    assert session.used_tokens == 7
+
+
 # Characterizes historical/current behavior: mutating runtime config after
 # Session construction desyncs facade fields from already-built runtime objects.
 # This is not recommended; new code should inject env/max_steps via constructors.

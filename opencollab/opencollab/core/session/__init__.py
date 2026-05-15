@@ -1,5 +1,5 @@
 from opencollab.core.llm import LLMClient
-from opencollab.core.session.compactor import COMPACTION_KEEP_RECENT, DEFAULT_COMPACTION_THRESHOLD, ContextCompactor
+from opencollab.core.session.compactor import COMPACTION_KEEP_RECENT, DEFAULT_COMPACTION_THRESHOLD, CompactResult, ContextCompactor
 from opencollab.core.session.events import EventBus, EventCallback, EventSink, SessionEvent
 from opencollab.core.session.runner import SessionRunner
 from opencollab.core.session.session import BudgetExceededError, LoopDetectedError, Session
@@ -21,6 +21,7 @@ __all__ = [
     "BudgetExceededError",
     "CallbackPermissionPolicy",
     "COMPACTION_KEEP_RECENT",
+    "CompactResult",
     "ContextCompactor",
     "DEFAULT_COMPACTION_THRESHOLD",
     "EventBus",

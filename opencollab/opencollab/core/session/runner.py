@@ -109,7 +109,10 @@ class SessionRunner:
         self.state.phase = SessionPhase.CALLING_LLM
 
     async def _run_compaction(self) -> None:
-        await self.compactor.compact()
+        result = await self.compactor.compact(apply=False)
+        result.apply_to(self.state)
+        if result.did_compact and self.auto_save:
+            self.auto_save()
         self.state.phase = SessionPhase.CALLING_LLM
 
     async def _run_llm_call(self) -> None:

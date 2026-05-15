@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 from opencollab.core.llm import estimate_messages_tokens
@@ -9,6 +10,21 @@ from opencollab.core.session.state import SessionState
 # Compaction thresholds (ref: opencode PRUNE_MINIMUM / PRUNE_PROTECT)
 DEFAULT_COMPACTION_THRESHOLD = 64_000  # tokens — trigger compaction
 COMPACTION_KEEP_RECENT = 8  # keep last N messages un-summarized
+
+
+@dataclass
+class CompactResult:
+    messages: list[dict[str, Any]] | None = None
+    used_tokens_delta: int = 0
+    did_compact: bool = False
+    compacted_count: int = 0
+    summary_len: int = 0
+
+    def apply_to(self, state: SessionState) -> None:
+        if self.messages is not None:
+            state.replace_messages(self.messages)
+        if self.used_tokens_delta:
+            state.add_used_tokens(self.used_tokens_delta)
 
 
 class ContextCompactor:
@@ -34,28 +50,36 @@ class ContextCompactor:
         estimated = estimate_messages_tokens(self.state.messages)
         return estimated > self.compaction_threshold
 
-    async def compact(self) -> None:
+    async def compact(self, apply: bool = True) -> CompactResult:
         """Summarize older messages to reduce context size."""
         await self.event_bus.emit(SessionEvent(type="compaction", data={"reason": "context_overflow"}))
 
         if len(self.state.messages) <= COMPACTION_KEEP_RECENT + 2:
-            return  # Not enough messages to compact
+            return CompactResult()  # Not enough messages to compact
 
         system_msg, older, recent = self._split_messages_for_compaction()
         summary_request, older_text = self._build_compaction_prompt(older)
-        summary_text = await self._call_compaction_llm(summary_request, older_text)
-
-        self._rebuild_compacted_messages(system_msg, older, recent, summary_text)
+        summary_text, used_tokens_delta = await self._call_compaction_llm(summary_request, older_text)
+        result = CompactResult(
+            messages=self._build_compacted_messages(system_msg, older, recent, summary_text),
+            used_tokens_delta=used_tokens_delta,
+            did_compact=True,
+            compacted_count=len(older),
+            summary_len=len(summary_text),
+        )
 
         if self.tracer:
             self.tracer.log_step(
                 step_type="compaction",
-                payload={"messages_compacted": len(older), "summary_len": len(summary_text)},
+                payload={"messages_compacted": result.compacted_count, "summary_len": result.summary_len},
                 tokens=0,
                 latency=0,
             )
-        if self.auto_save:
+        if apply:
+            result.apply_to(self.state)
+        if apply and self.auto_save:
             self.auto_save()
+        return result
 
     def _split_messages_for_compaction(self) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
         # Split: system prompt | older messages | recent messages
@@ -88,24 +112,27 @@ class ContextCompactor:
         ]
         return summary_request, older_text
 
-    async def _call_compaction_llm(self, summary_request: list[dict[str, str]], older_text: list[str]) -> str:
+    async def _call_compaction_llm(
+        self,
+        summary_request: list[dict[str, str]],
+        older_text: list[str],
+    ) -> tuple[str, int]:
         try:
             summary_resp = await self.llm.complete(summary_request, temperature=0.0)
             summary_text = summary_resp.content or "[compaction failed]"
-            self.state.used_tokens += summary_resp.usage.total_tokens
-            return summary_text
+            return summary_text, summary_resp.usage.total_tokens
         except Exception:
-            return "\n".join(older_text[:5000])  # Fallback: keep raw truncated
+            return "\n".join(older_text[:5000]), 0  # Fallback: keep raw truncated
 
-    def _rebuild_compacted_messages(
+    def _build_compacted_messages(
         self,
         system_msg: dict[str, Any],
         older: list[dict[str, Any]],
         recent: list[dict[str, Any]],
         summary_text: str,
-    ) -> None:
+    ) -> list[dict[str, Any]]:
         # Rebuild messages: system + compaction summary + recent
-        self.state.messages = [
+        return [
             system_msg,
             {
                 "role": "system",
