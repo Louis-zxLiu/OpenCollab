@@ -4,7 +4,10 @@ import copy
 import pytest
 
 from opencollab.core import session as session_mod
+from opencollab.core.events import EventBus as CompatEventBus
+from opencollab.core.events import SessionEvent as CompatSessionEvent
 from opencollab.core.llm import LLMResponse, Usage
+from opencollab.core.session import EventBus, Session, SessionEvent, SessionStore
 
 
 def run(coro):
@@ -125,6 +128,21 @@ def event_collector():
         events.append(event)
 
     return events, on_event
+
+
+def test_session_package_and_compat_event_imports_are_preserved():
+    assert Session is session_mod.Session
+    assert SessionEvent is session_mod.SessionEvent
+    assert CompatEventBus is EventBus
+    assert CompatSessionEvent is SessionEvent
+
+
+def test_event_bus_accepts_sink_and_swallows_sink_exception():
+    class BadSink:
+        async def emit(self, _event):
+            raise RuntimeError("sink failed")
+
+    run(EventBus(BadSink()).emit(SessionEvent(type="error", data={"reason": "boom"})))
 
 
 def test_run_loop_cancellation_appends_interruption_and_emits_error(install_fake_llm):
@@ -248,7 +266,11 @@ def test_tool_calls_execute_append_tool_result_and_continue(install_fake_llm):
 
     assert result == "done"
     assert session.step_count == 2
-    assert tool.calls == [{"args": {"value": 7}, "env": session.env, "confirm_fn": confirm_fn}]
+    assert session.confirm_fn is confirm_fn
+    assert tool.calls[0]["args"] == {"value": 7}
+    assert tool.calls[0]["env"] is session.env
+    assert tool.calls[0]["confirm_fn"] is not None
+    assert run(tool.calls[0]["confirm_fn"]("confirm?")) is True
     assert session.messages[1]["role"] == "assistant"
     assert session.messages[1]["tool_calls"][0]["function"]["name"] == "fake_tool"
     assert session.messages[2] == {"role": "tool", "tool_call_id": "call-1", "content": "echo 7"}
@@ -397,3 +419,17 @@ def test_save_and_load_round_trip_only_messages(tmp_path, install_fake_llm):
     assert loaded.used_tokens == 0
     assert loaded.step_count == 0
     assert loaded.is_done is False
+
+
+def test_session_store_preserves_messages_only_jsonl_semantics(tmp_path):
+    store = SessionStore()
+    path = tmp_path / "stored.jsonl"
+    messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "world"},
+    ]
+
+    store.save(str(path), messages)
+
+    assert store.load_messages(str(path), "fallback") == messages

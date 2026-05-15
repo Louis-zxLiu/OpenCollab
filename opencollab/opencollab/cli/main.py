@@ -198,6 +198,7 @@ async def _chat(
     from opencollab.tools.human import AskUserTool
     from opencollab.tools.safety import SandboxInterceptor
     from opencollab.cli.tui import TUI
+    from opencollab.tui.session_adapter import TuiEventSink, TuiPermissionPolicy
 
     workspace = os.path.abspath(workspace)
     interceptor = SandboxInterceptor(workspace)
@@ -205,7 +206,7 @@ async def _chat(
     tracer = Tracer(run_id=str(uuid.uuid4())[:8]) if trace else None
 
     # Human-in-the-loop confirmation (disabled in yolo mode)
-    confirm_fn = None if yolo else _confirm_prompt
+    permission_policy = None if yolo else TuiPermissionPolicy(_confirm_prompt)
 
     # Repo map for project topology (机制一)
     repo_map = get_repo_map(workspace)
@@ -230,6 +231,7 @@ async def _chat(
     )
 
     tui = TUI(console)
+    event_sink = TuiEventSink(tui)
     tui.print_welcome()
 
     # Auto-save path (机制四 — session hydration)
@@ -240,15 +242,15 @@ async def _chat(
     # Create or restore session
     if session_file and os.path.exists(session_file):
         session = Session.load(session_file, agent, env=env, tracer=tracer,
-                               max_budget_tokens=budget, on_event=tui.event_handler,
-                               confirm_fn=confirm_fn, repo_map=repo_map,
+                               max_budget_tokens=budget, event_sink=event_sink,
+                               permission_policy=permission_policy, repo_map=repo_map,
                                auto_save_path=auto_save_path)
         console.print(f"[dim]Restored session from {session_file}[/dim]")
     else:
         session = Session(
             agent=agent, env=env, tracer=tracer,
-            max_budget_tokens=budget, on_event=tui.event_handler,
-            confirm_fn=confirm_fn, repo_map=repo_map,
+            max_budget_tokens=budget, event_sink=event_sink,
+            permission_policy=permission_policy, repo_map=repo_map,
             auto_save_path=auto_save_path,
         )
         session.save(auto_save_path)
@@ -307,13 +309,15 @@ async def _team(
     from opencollab.core.context import get_repo_map
     from opencollab.tools.human import AskUserTool
     from opencollab.cli.tui import TUI
+    from opencollab.tui.session_adapter import TuiEventSink, TuiPermissionPolicy
 
     workspace = os.path.abspath(workspace)
     tracer = Tracer(run_id=f"team-{uuid.uuid4().hex[:8]}") if trace else None
-    confirm_fn = None if yolo else _confirm_prompt
+    permission_policy = None if yolo else TuiPermissionPolicy(_confirm_prompt)
     repo_map = get_repo_map(workspace)
 
     tui = TUI(console)
+    event_sink = TuiEventSink(tui)
     tui.print_welcome()
     console.print("[bold blue]Team mode[/bold blue] — Lead (Planner) + Specialists (Coder + Tester)\n")
 
@@ -325,8 +329,8 @@ async def _team(
         base_url=base_url,
         max_budget_tokens=budget,
         tracer=tracer,
-        on_event=tui.event_handler,
-        confirm_fn=confirm_fn,
+        event_sink=event_sink,
+        permission_policy=permission_policy,
         use_worktrees=use_worktrees,
         repo_map=repo_map,
     )

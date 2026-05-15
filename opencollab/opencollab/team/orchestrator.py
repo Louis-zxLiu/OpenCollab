@@ -22,7 +22,7 @@ import time
 from typing import Any, Callable, Awaitable
 
 from opencollab.core.agent import Agent
-from opencollab.core.session import Session, SessionEvent
+from opencollab.core.session import EventBus, EventSink, PermissionPolicy, Session, SessionEvent
 from opencollab.core.env import Environment, LocalEnvironment, WorktreeEnvironment
 from opencollab.core.tracer import Tracer
 from opencollab.tools.base import Tool
@@ -155,6 +155,8 @@ class Team:
         tracer: Tracer | None = None,
         on_event: Callable[[SessionEvent], Awaitable[None] | None] | None = None,
         confirm_fn: Callable[[str], Awaitable[bool]] | None = None,
+        event_sink: EventSink | None = None,
+        permission_policy: PermissionPolicy | None = None,
         use_worktrees: bool = True,
         repo_map: str | None = None,
     ):
@@ -164,8 +166,10 @@ class Team:
         self.api_key = api_key
         self.base_url = base_url
         self.tracer = tracer
+        self.event_bus = EventBus(event_sink if event_sink is not None else on_event)
         self.on_event = on_event
         self.confirm_fn = confirm_fn
+        self.permission_policy = permission_policy
         self.use_worktrees = use_worktrees
         self.repo_map = repo_map
         self._total_budget = max_budget_tokens
@@ -196,8 +200,9 @@ class Team:
             env=LocalEnvironment(workspace),
             tracer=tracer,
             max_budget_tokens=max_budget_tokens,
-            on_event=on_event,
+            event_sink=self.event_bus,
             confirm_fn=confirm_fn,
+            permission_policy=permission_policy,
             repo_map=repo_map,
         )
 
@@ -238,11 +243,10 @@ class Team:
         """
         start = time.monotonic()
 
-        if self.on_event:
-            await _emit_maybe(self.on_event, SessionEvent(
-                type="tool_start",
-                data={"tool": "delegate", "role": role, "task": task[:100]},
-            ))
+        await self.event_bus.emit(SessionEvent(
+            type="tool_start",
+            data={"tool": "delegate", "role": role, "task": task[:100]},
+        ))
 
         # Create isolated environment for teammate
         import uuid as _uuid
@@ -285,8 +289,9 @@ class Team:
             tracer=self.tracer,
             max_budget_tokens=teammate_budget,
             max_steps=50,
-            on_event=self.on_event,
+            event_sink=self.event_bus,
             confirm_fn=self.confirm_fn,
+            permission_policy=self.permission_policy,
             repo_map=self.repo_map,
         )
 
@@ -310,11 +315,10 @@ class Team:
                 latency=latency,
             )
 
-        if self.on_event:
-            await _emit_maybe(self.on_event, SessionEvent(
-                type="tool_end",
-                data={"tool": "delegate", "role": role, "latency": latency},
-            ))
+        await self.event_bus.emit(SessionEvent(
+            type="tool_end",
+            data={"tool": "delegate", "role": role, "latency": latency},
+        ))
 
         # If using worktree, include the actual diff so Lead can see changes
         # Ref: kimi-cli DiffDisplayBlock returns full content; claude-code teams
@@ -341,11 +345,10 @@ class Team:
         last_result = ""
 
         for iteration in range(1, max_iterations + 1):
-            if self.on_event:
-                await _emit_maybe(self.on_event, SessionEvent(
-                    type="tool_start",
-                    data={"tool": "review_loop", "iteration": iteration, "max": max_iterations},
-                ))
+            await self.event_bus.emit(SessionEvent(
+                type="tool_start",
+                data={"tool": "review_loop", "iteration": iteration, "max": max_iterations},
+            ))
 
             # Step 1: Coder implements
             code_result = await self.delegate("coder", current_task, context)
