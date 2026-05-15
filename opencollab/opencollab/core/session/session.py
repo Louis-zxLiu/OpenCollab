@@ -139,7 +139,7 @@ class Session:
 
     @messages.setter
     def messages(self, value: list[dict]) -> None:
-        self.state.messages = value
+        self.state.replace_messages(value)
 
     @property
     def used_tokens(self) -> int:
@@ -147,7 +147,7 @@ class Session:
 
     @used_tokens.setter
     def used_tokens(self, value: int) -> None:
-        self.state.used_tokens = value
+        self.state.set_used_tokens(value)
 
     @property
     def step_count(self) -> int:
@@ -155,7 +155,7 @@ class Session:
 
     @step_count.setter
     def step_count(self, value: int) -> None:
-        self.state.step_count = value
+        self.state.set_step_count(value)
 
     @property
     def is_done(self) -> bool:
@@ -163,7 +163,7 @@ class Session:
 
     @is_done.setter
     def is_done(self, value: bool) -> None:
-        self.state.is_done = value
+        self.state.mark_done(value)
 
     @property
     def _recent_call_hashes(self) -> list[str]:
@@ -171,7 +171,7 @@ class Session:
 
     @_recent_call_hashes.setter
     def _recent_call_hashes(self, value: list[str]) -> None:
-        self.state.recent_call_hashes = value
+        self.state.replace_recent_tool_hashes(value)
 
     @property
     def phase(self) -> SessionPhase:
@@ -179,15 +179,14 @@ class Session:
 
     @phase.setter
     def phase(self, value: SessionPhase) -> None:
-        self.state.phase = value
+        self.state.set_phase(value)
 
     async def run_loop(self, cancel_event: asyncio.Event | None = None) -> str:
         return await self.runner.run_loop(cancel_event)
 
     async def add_user_message(self, content: str) -> None:
-        self.messages.append({"role": "user", "content": content})
-        self.is_done = False
-        self._recent_call_hashes.clear()
+        self.state.append_message({"role": "user", "content": content})
+        self.state.reset_for_user_turn()
         self._auto_save()
 
     def snapshot(self) -> Session:
@@ -226,7 +225,7 @@ class Session:
         await self.runner._advance(cancel_event)
 
     async def _step(self) -> None:
-        self.phase = SessionPhase.CALLING_LLM
+        self.state.set_phase(SessionPhase.CALLING_LLM)
         await self.runner._run_llm_call()
         await self.runner._handle_pending_response()
         if self.phase == SessionPhase.EXECUTING_TOOLS:
@@ -261,7 +260,7 @@ class Session:
         if response.tool_calls:
             await self.tool_processor.process(response.tool_calls)
         else:
-            self.is_done = True
+            self.state.mark_done()
 
     async def _finish_step(self, latency: float) -> None:
         await self.runner._finish_step(latency)
