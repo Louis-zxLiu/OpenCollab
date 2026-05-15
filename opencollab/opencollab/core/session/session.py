@@ -42,6 +42,8 @@ class Session:
         auto_save_path: str | None = None,
         event_sink: EventSink | None = None,
         permission_policy: PermissionPolicy | None = None,
+        llm=None,
+        store=None,
     ):
         self.agent = agent
         self.env = env or LocalEnvironment()
@@ -55,20 +57,23 @@ class Session:
             CallbackPermissionPolicy(confirm_fn) if confirm_fn is not None else None
         )
         self._auto_save_path = auto_save_path
-        self.store = SessionStore()
+        self.store = store if store is not None else SessionStore()
 
         system_content = agent.system_prompt
         if repo_map:
             system_content += f"\n\nProject Structure:\n{repo_map}"
         self.state = SessionState(messages=[{"role": "system", "content": system_content}])
 
-        llm_cls = getattr(import_module("opencollab.core.session"), "LLMClient")
-        self._llm = llm_cls(
-            model=agent.model,
-            api_key=agent.api_key,
-            base_url=agent.base_url,
-            provider=agent.provider,
-        )
+        if llm is not None:
+            self._llm = llm
+        else:
+            llm_cls = getattr(import_module("opencollab.core.session"), "LLMClient")
+            self._llm = llm_cls(
+                model=agent.model,
+                api_key=agent.api_key,
+                base_url=agent.base_url,
+                provider=agent.provider,
+            )
         self._build_runtime()
 
     def _build_runtime(self) -> None:

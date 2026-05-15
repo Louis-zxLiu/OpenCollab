@@ -231,6 +231,22 @@ def test_no_tool_calls_marks_done_and_emits_text_delta(install_fake_llm):
     assert tracer.steps[0]["payload"]["content"] == "plain answer"
 
 
+def test_session_accepts_explicit_llm_client():
+    fake_llm = FakeLLMClient([
+        llm_response(content="explicit llm answer", input_tokens=2, output_tokens=3),
+    ])
+    session = session_mod.Session(agent=FakeAgent(), llm=fake_llm)
+
+    assert session._llm is fake_llm
+    assert session.runner.llm is fake_llm
+    assert session.compactor.llm is fake_llm
+
+    result = run(session.run_loop())
+
+    assert result == "explicit llm answer"
+    assert fake_llm.calls
+
+
 def test_run_loop_when_already_done_returns_latest_assistant_without_llm_call(install_fake_llm):
     fake_llm = install_fake_llm(FakeLLMClient())
     session = session_mod.Session(agent=FakeAgent())
@@ -465,6 +481,37 @@ def test_save_and_load_round_trip_only_messages(tmp_path, install_fake_llm):
     assert loaded.used_tokens == 0
     assert loaded.step_count == 0
     assert loaded.is_done is False
+
+
+def test_session_accepts_explicit_store(install_fake_llm):
+    install_fake_llm(FakeLLMClient())
+
+    class FakeStore:
+        def __init__(self):
+            self.save_calls = []
+            self.load_calls = []
+            self.loaded_messages = [{"role": "system", "content": "loaded from fake store"}]
+
+        def save(self, path, messages):
+            self.save_calls.append((path, copy.deepcopy(messages)))
+
+        def load_messages(self, path, system_prompt):
+            self.load_calls.append((path, system_prompt))
+            return copy.deepcopy(self.loaded_messages)
+
+    fake_store = FakeStore()
+    agent = FakeAgent()
+    session = session_mod.Session(agent=agent, store=fake_store)
+    session.messages.append({"role": "user", "content": "hello"})
+
+    session.save("fake-session.jsonl")
+    loaded = session_mod.Session.load("fake-session.jsonl", agent=agent, store=fake_store)
+
+    assert session.store is fake_store
+    assert fake_store.save_calls == [("fake-session.jsonl", session.messages)]
+    assert loaded.store is fake_store
+    assert fake_store.load_calls == [("fake-session.jsonl", agent.system_prompt)]
+    assert loaded.messages == fake_store.loaded_messages
 
 
 def test_session_store_preserves_messages_only_jsonl_semantics(tmp_path):
