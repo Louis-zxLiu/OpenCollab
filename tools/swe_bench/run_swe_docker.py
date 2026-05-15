@@ -342,6 +342,9 @@ async def run_opencollab_team_agent(
     traj_run_id = f"team_{safe_tracer_id}_{run_id}" if run_id else f"team_{safe_tracer_id}"
     tracer = Tracer(run_id=traj_run_id, output_dir=str(Path("logs") / "trajectories"))
 
+    lead_env = ExistingContainerEnvironment(container_id=container_id, workspace=DOCKER_WORKDIR)
+    lead_max_steps = max(1, max_round) * max(1, max_steps)
+
     team = Team(
         workspace=DOCKER_WORKDIR,
         model=cfg.model,
@@ -352,11 +355,10 @@ async def run_opencollab_team_agent(
         max_budget_tokens=cfg.budget,
         use_worktrees=False,
         tracer=tracer,
+        lead_env=lead_env,
+        lead_max_steps=lead_max_steps,
     )
 
-    # Bind lead execution to the target SWE-bench container workspace.
-    team.lead_session.env = ExistingContainerEnvironment(container_id=container_id, workspace=DOCKER_WORKDIR)
-    team.lead_session.max_steps = max(1, max_round) * max(1, max_steps)
     team._teammate_steps = 0
 
     async def _delegate_in_container(self, role: str, subtask: str, context: str = "") -> str:

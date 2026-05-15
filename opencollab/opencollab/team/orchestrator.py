@@ -159,6 +159,8 @@ class Team:
         permission_policy: PermissionPolicy | None = None,
         use_worktrees: bool = True,
         repo_map: str | None = None,
+        lead_env: Environment | None = None,
+        lead_max_steps: int | None = None,
     ):
         self.workspace = workspace
         self.model = model
@@ -195,16 +197,19 @@ class Team:
             base_url=base_url,
         )
 
-        self.lead_session = Session(
-            agent=self.lead_agent,
-            env=LocalEnvironment(workspace),
-            tracer=tracer,
-            max_budget_tokens=max_budget_tokens,
-            event_sink=self.event_bus,
-            confirm_fn=confirm_fn,
-            permission_policy=permission_policy,
-            repo_map=repo_map,
-        )
+        lead_session_kwargs = {
+            "agent": self.lead_agent,
+            "env": lead_env if lead_env is not None else LocalEnvironment(workspace),
+            "tracer": tracer,
+            "max_budget_tokens": max_budget_tokens,
+            "event_sink": self.event_bus,
+            "confirm_fn": confirm_fn,
+            "permission_policy": permission_policy,
+            "repo_map": repo_map,
+        }
+        if lead_max_steps is not None:
+            lead_session_kwargs["max_steps"] = lead_max_steps
+        self.lead_session = Session(**lead_session_kwargs)
 
         # Active teammate environments (for cleanup)
         self._teammate_envs: list[WorktreeEnvironment] = []

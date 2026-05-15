@@ -399,6 +399,52 @@ def test_event_callback_exception_is_swallowed(install_fake_llm):
     assert session.messages[-1] == {"role": "assistant", "content": "answer despite bad callback"}
 
 
+# Characterizes historical/current behavior: mutating runtime config after
+# Session construction desyncs facade fields from already-built runtime objects.
+# This is not recommended; new code should inject env/max_steps via constructors.
+def test_session_runtime_config_desync_after_mutating_env_and_max_steps(install_fake_llm):
+    install_fake_llm(FakeLLMClient())
+    old_env = object()
+    new_env = object()
+    old_max_steps = 7
+    new_max_steps = 3
+    session = session_mod.Session(
+        agent=FakeAgent(),
+        env=old_env,
+        max_steps=old_max_steps,
+    )
+
+    session.env = new_env
+    session.max_steps = new_max_steps
+
+    assert session.env is new_env
+    assert session.tool_processor.env is old_env
+    assert session.runner.max_steps == old_max_steps
+
+
+def test_team_lead_session_runtime_uses_constructor_env_and_max_steps(install_fake_llm):
+    install_fake_llm(FakeLLMClient())
+    from opencollab.team.orchestrator import Team
+
+    lead_env = object()
+    lead_max_steps = 7
+
+    team = Team(
+        workspace=".",
+        model="fake-model",
+        provider="fake-provider",
+        api_key="fake-key",
+        lead_env=lead_env,
+        lead_max_steps=lead_max_steps,
+        use_worktrees=False,
+    )
+
+    assert team.lead_session.env is lead_env
+    assert team.lead_session.tool_processor.env is lead_env
+    assert team.lead_session.max_steps == lead_max_steps
+    assert team.lead_session.runner.max_steps == lead_max_steps
+
+
 def test_save_and_load_round_trip_only_messages(tmp_path, install_fake_llm):
     install_fake_llm(FakeLLMClient())
     agent = FakeAgent()
