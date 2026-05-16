@@ -4,7 +4,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-VENV_DIR="$REPO_ROOT/.venv"
+PROJECT_DIR="$REPO_ROOT/opencollab"
+VENV_DIR="$PROJECT_DIR/.venv"
 CONFIG_DIR="$REPO_ROOT/configs"
 CONFIG_FILE="$CONFIG_DIR/.env"
 EXAMPLE_CONFIG="$CONFIG_DIR/.env.example"
@@ -64,16 +65,16 @@ ensure_venv() {
         return
     fi
 
-    cd "$REPO_ROOT"
+    cd "$PROJECT_DIR"
     if command -v uv >/dev/null 2>&1; then
         uv venv "$VENV_DIR"
-        uv pip install -e opencollab
+        uv pip install --python "$VENV_DIR/bin/python" -e "$PROJECT_DIR"
         return
     fi
 
     if command -v python3 >/dev/null 2>&1; then
         python3 -m venv "$VENV_DIR"
-        "$VENV_DIR/bin/pip" install -e opencollab
+        "$VENV_DIR/bin/pip" install -e "$PROJECT_DIR"
         return
     fi
 

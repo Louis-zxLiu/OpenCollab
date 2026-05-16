@@ -10,16 +10,16 @@ Bootstraps the local Python environment and starts OpenCollab.
 scripts/start_opencollab.sh
 ```
 
-By default, this starts team mode:
+By default, this starts chat mode:
 
 ```bash
-.venv/bin/opencollab team --workspace <repo-root>
+opencollab/.venv/bin/opencollab chat --workspace <repo-root>
 ```
 
-Start single-agent chat mode instead:
+Start team mode instead:
 
 ```bash
-scripts/start_opencollab.sh chat
+scripts/start_opencollab.sh team
 ```
 
 Pass extra OpenCollab CLI arguments after the mode:
@@ -66,12 +66,12 @@ Do not commit `configs/.env`.
 
 ## Environment Bootstrap
 
-If `.venv/bin/opencollab` already exists, the script uses it.
+If `opencollab/.venv/bin/opencollab` already exists, the script uses it.
 
 Otherwise it tries, in order:
 
-1. `uv venv .venv` and `uv pip install -e opencollab`
-2. `python3 -m venv .venv` and `.venv/bin/pip install -e opencollab`
+1. `uv venv opencollab/.venv` and `uv pip install --python opencollab/.venv/bin/python -e opencollab`
+2. `python3 -m venv opencollab/.venv` and `opencollab/.venv/bin/pip install -e opencollab`
 
 If neither `uv` nor `python3` is available, the script exits with an error.
 
