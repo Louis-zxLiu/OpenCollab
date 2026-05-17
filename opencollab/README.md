@@ -1,89 +1,75 @@
-# OpenCollab
+# OpenCollab Package
 
-Minimal multi-agent software development framework.
+This directory contains the installable Python package and the `opencollab`
+CLI.
 
-## Quick Start
-
-```bash
-pip install -e .
-opencollab team
-```
+## Install
 
 From the repository root with `uv`:
 
 ```bash
-uv venv .venv
-uv pip install -e opencollab
-.venv/bin/opencollab team --workspace .
+uv venv opencollab/.venv
+uv pip install --python opencollab/.venv/bin/python -e opencollab
 ```
 
-## Model Configuration
-
-OpenCollab supports OpenAI-compatible APIs through the OpenAI client path.
-Configure the provider, base URL, model, and API key with environment variables
-or a `.env` file.
-
-Runtime config should live in the repository-level `configs/` directory:
+Or with `pip`:
 
 ```bash
-cp configs/.env.example configs/.env
+python3 -m venv opencollab/.venv
+opencollab/.venv/bin/pip install -e opencollab
 ```
 
-DashScope compatible mode example:
+From inside this package directory:
 
 ```bash
-export OPENCOLLAB_PROVIDER=openai
-export OPENCOLLAB_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
-export OPENCOLLAB_MODEL=glm-5.1
-export OPENCOLLAB_API_KEY=<your-api-key>
+pip install -e .
 ```
-
-Do not commit real API keys.
-
-Config resolution order:
-
-1. Process environment variables
-2. `configs/.env`
-3. Legacy `.env`
-4. Built-in defaults
-
-Set `OPENCOLLAB_CONFIG_FILE=/path/to/file.env` to use a specific config file.
-The final config is validated by Pydantic before it is used.
 
 ## Commands
 
-From the repository root, use the launcher:
+The repository launcher is the preferred entrypoint during local development:
 
 ```bash
 scripts/start_opencollab.sh
 ```
 
-It creates `.venv` when needed, checks `configs/.env`, and starts team mode by
-default. Use `scripts/start_opencollab.sh chat` for single-agent chat mode.
-
-Interactive chat:
+It uses `opencollab/.venv`, checks `configs/.env`, and starts chat mode by
+default. Pass `team` to start team mode:
 
 ```bash
-opencollab chat --workspace .
+scripts/start_opencollab.sh team
 ```
 
-Interactive team mode:
+Direct CLI commands are also available after installation. Activate the venv or
+call the installed binary directly:
 
 ```bash
-opencollab team --workspace .
+opencollab/.venv/bin/opencollab chat --workspace .
+opencollab/.venv/bin/opencollab team --workspace .
+opencollab/.venv/bin/opencollab eval tasks.jsonl --output eval_results --concurrency 1
 ```
 
-Headless eval harness:
+## Headless Eval
 
-```bash
-opencollab eval tasks.jsonl --output eval_results --concurrency 1
-```
-
-Task files are JSONL. Each line describes one task:
+The eval command reads JSONL tasks. Each line describes one task:
 
 ```json
 {"task_id":"example","description":"Fix the bug described here.","repo_path":"/path/to/repo","timeout":600,"max_tokens":100000}
 ```
 
-The eval harness writes a summary JSONL file and trajectory logs under the
-output directory.
+The harness writes `results.jsonl` and trajectory logs under the output
+directory.
+
+Use the Docker-based SWE-bench runner in `tools/swe_bench/` for benchmark
+container orchestration.
+
+## Package Layout
+
+- `opencollab/cli/` contains Typer CLI entrypoints for chat, team, and eval.
+- `opencollab/core/` contains configuration, environment, providers, sessions,
+  tracing, and runtime primitives.
+- `opencollab/team/` contains team orchestration.
+- `opencollab/tui/` contains terminal UI adapters.
+- `opencollab/tools/` contains tool implementations.
+- `opencollab/harness/` contains the local headless evaluation harness.
+- `tests/` contains characterization and regression tests.

@@ -102,3 +102,5 @@ tools/swe_bench/
 The script builds `tools/swe_bench/Dockerfile` with the repository root as the
 Docker build context, then runs the resulting `swe-collab` image with mounted
 `configs/`, `logs/`, `swe_workdir/`, and the Docker socket.
+
+See `tools/swe_bench/README.md` for runner implementation details.
