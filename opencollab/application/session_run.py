@@ -314,8 +314,9 @@ class SessionRunUseCase(_SessionRunCompletionMixin):
 
     def _resume_from_awaiting(self) -> None:
         """Drain a complete pending table back into the message history as one
-        contiguous tool-result block, then resume at PRECHECK. Defensive no-op
-        if woken while still incomplete (the loop guard then stops at once).
+        contiguous tool-result block, then finish its suspended step through
+        AUTOSAVING. Defensive no-op if woken while still incomplete (the loop
+        guard then stops at once).
         """
         table = self.state.pending_events
         if not table.is_complete():
@@ -323,7 +324,7 @@ class SessionRunUseCase(_SessionRunCompletionMixin):
         for message in table.ordered_results():
             self.state.append_message(message)
         table.clear()
-        self.state.transition_to(SessionPhase.PRECHECK)
+        self.state.transition_to(SessionPhase.AUTOSAVING)
 
     async def advance(self, cancel_event: asyncio.Event | None = None) -> None:
         """Execute one FSM step: dispatch the current phase to its handler."""
@@ -594,7 +595,11 @@ class SessionRunUseCase(_SessionRunCompletionMixin):
             self.state.transition_to(SessionPhase.STOPPED, reason=reason)
             return
         self.append_assistant_message(response)
-        self._pending = PendingStep(response=response, latency=latency)
+        self._pending = PendingStep(
+            response=response,
+            latency=latency,
+            started_at=start,
+        )
         self.state.transition_to(SessionPhase.HANDLING_RESPONSE)
 
     async def handle_pending_response(self) -> None:
