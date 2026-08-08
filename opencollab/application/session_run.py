@@ -34,6 +34,7 @@ from opencollab.application.ports import (
     TracePort,
 )
 from opencollab.application.tool_execution import ToolExecutionUseCase
+from opencollab.domain.events import SessionRuntimeEvent
 from opencollab.domain.session import SessionPhase, SessionState
 
 __all__ = [
@@ -521,6 +522,16 @@ class SessionRunUseCase(_SessionRunCompletionMixin):
         self._trace_brake_trip(budget_spent, watchdog_tripped, low_yield_tripped)
         if budget_spent:
             self.state.budget_reserve_consumed = True
+            await self.event_publisher.emit(
+                SessionRuntimeEvent(
+                    type="budget_reserve_allocated",
+                    data={
+                        "aid": self.state.aid,
+                        "used_tokens": self.state.used_tokens,
+                        "reserve": self._commit_reserve,
+                    },
+                )
+            )
         self._enter_wind_down()
         self.state.transition_to(SessionPhase.CALLING_LLM)
         return True
