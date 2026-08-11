@@ -372,11 +372,11 @@ def test_terminal_phase_is_committed_by_final_autosave(
         agent=FakeAgent(),
         llm=TerminalLLM(),
         auto_save_path=str(path),
-        max_budget_tokens=100,
+        max_budget_tokens=500,
     )
     asyncio.run(session.add_user_message("go"))
     if mode == "stopped":
-        session.state.set_used_tokens(100)
+        session.state.set_used_tokens(500)
 
     if mode == "error":
         with pytest.raises(RuntimeError, match="provider failed"):

@@ -316,7 +316,7 @@ def test_invalid_provider_usage_does_not_change_token_counters(
             )
         ]
     )
-    runner = build_runner(state=state, llm=llm, max_budget_tokens=100)
+    runner = build_runner(state=state, llm=llm, max_budget_tokens=500)
 
     with pytest.raises(ValueError, match="usage"):
         run(runner.run_loop())
@@ -337,7 +337,7 @@ def test_inconsistent_reported_total_cannot_undercharge_usage():
             )
         ]
     )
-    runner = build_runner(state=state, llm=llm, max_budget_tokens=100)
+    runner = build_runner(state=state, llm=llm, max_budget_tokens=500)
 
     assert run(runner.run_loop()) == "done"
     assert state.used_tokens == 7

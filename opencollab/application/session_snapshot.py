@@ -124,4 +124,3 @@ def _restore_pending_row(value: object) -> PendingRow | None:
         started_at=value.get("started_at"),
         finished_at=finished_at,
     )
-

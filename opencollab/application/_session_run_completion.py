@@ -22,10 +22,12 @@ from opencollab.application.steering import (
     build_steering_block,
     fold_steering,
 )
+from opencollab.application.tool_execution import TERMINAL_CAPTURE_SKIP_MESSAGE
 from opencollab.domain.agent import DEFAULT_MAX_TOKENS_PER_STEP
 from opencollab.domain.pending import PendingEventTable, PendingRow, RowKind, RowStatus
 from opencollab.domain.session import SessionPhase
 from opencollab.domain.token_estimation import request_tokens_upper_bound
+from opencollab.domain.tools import ToolProcessingResult
 
 logger = logging.getLogger(__name__)
 
@@ -188,6 +190,123 @@ class _SessionRunCompletionMixin:
                     extras.append(message)
         ordered = [by_id[tc["id"]] for tc in tool_calls if tc.get("id") in by_id]
         return ordered + extras
+
+    async def execute_pending_tools(self) -> None:
+        """Run the pending response's tool calls.
+
+        Synchronous batches proceed directly to autosave. Batches containing a
+        deferrable tool are buffered as a unit so their result block preserves
+        provider call order while the session waits for outstanding work.
+        """
+        pending = self._pending
+        if pending is None:
+            self.state.fail()
+            raise RuntimeError("Cannot execute tools before calling LLM")
+
+        original_tool_calls = list(pending.response.tool_calls)
+        preflight = getattr(self.tool_execution, "preflight_tool_batch", None)
+        rejected_batch = getattr(
+            self.tool_execution,
+            "preflight_rejection_result",
+            None,
+        )
+        if callable(preflight) and callable(rejected_batch):
+            preflight_errors = preflight(original_tool_calls)
+            if any(preflight_errors):
+                rejected_batch(
+                    original_tool_calls,
+                    preflight_errors,
+                ).apply_to(self.state)
+                self._pending_tool_allowlist = None
+                self._pending_tool_gate_label = None
+                self.state.transition_to(SessionPhase.AUTOSAVING)
+                return
+        tool_calls, blocked_messages = self._apply_pending_tool_allowlist(
+            original_tool_calls
+        )
+        _immediate, deferred = self._split_tool_calls(tool_calls)
+
+        if not deferred:
+            result = (
+                await self.tool_execution.process(tool_calls)
+                if tool_calls
+                else ToolProcessingResult()
+            )
+            result.messages_to_append = self._ordered_tool_messages(
+                original_tool_calls,
+                result.messages_to_append,
+                blocked_messages,
+            )
+            result.apply_to(self.state)
+            self._pending_tool_allowlist = None
+            self._pending_tool_gate_label = None
+            self.state.transition_to(SessionPhase.AUTOSAVING)
+            return
+
+        table = self.state.pending_events
+        order = {tc["id"]: i for i, tc in enumerate(original_tool_calls)}
+        completed_messages = list(blocked_messages)
+        observations = ToolProcessingResult()
+        terminal_capture_accepted = False
+        for tc in tool_calls:
+            if terminal_capture_accepted:
+                completed_messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tc["id"],
+                        "content": TERMINAL_CAPTURE_SKIP_MESSAGE,
+                    }
+                )
+                continue
+            if tc.get("function", {}).get("name") in self.deferrable_tool_names:
+                await self._execute_deferred_tools(table, order, [tc])
+                continue
+
+            proc = await self.tool_execution.process([tc])
+            proc.apply_hashes_to(self.state)
+            observations.reads_executed += proc.reads_executed
+            observations.write_succeeded |= proc.write_succeeded
+            observations.read_write_signals.extend(proc.read_write_signals)
+            observations.evidence_signals.extend(proc.evidence_signals)
+            observations.evidence_cards.extend(proc.evidence_cards)
+            observations.loop_detections.extend(proc.loop_detections)
+            observations.tool_step_attempted |= proc.tool_step_attempted
+            completed_messages.extend(proc.messages_to_append)
+            terminal_capture_accepted = proc.terminal_capture_accepted
+
+        observations.apply_read_write_counter_to(self.state)
+        observations.apply_evidence_counter_to(self.state)
+        self._buffer_completed_rows(table, order, completed_messages)
+
+        self._pending_tool_allowlist = None
+        self._pending_tool_gate_label = None
+        if table.is_complete():
+            for message in table.ordered_results():
+                self.state.append_message(message)
+            table.clear()
+            self.state.transition_to(SessionPhase.AUTOSAVING)
+            return
+
+        self.clear_pending_step()
+        self.state.transition_to(SessionPhase.AWAITING_EVENTS)
+
+    @staticmethod
+    def _buffer_completed_rows(
+        table: PendingEventTable,
+        order: dict[str, int],
+        messages: list[dict],
+    ) -> None:
+        for message in messages:
+            tool_call_id = message["tool_call_id"]
+            table.add(
+                PendingRow(
+                    tool_call_id=tool_call_id,
+                    kind=RowKind.IMMEDIATE,
+                    order=order[tool_call_id],
+                    status=RowStatus.DONE,
+                    result=message["content"],
+                )
+            )
 
     async def call_llm(self, tools: list[dict] | None) -> CompletionResponse:
         """Complete against the shaped view of history.
