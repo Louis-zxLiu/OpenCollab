@@ -86,7 +86,6 @@ def test_targeted_cancel_event_stops_only_addressed_agent_and_scheduler_reuses_i
 
     run(scenario())
 
-
 def test_targeted_cancel_event_settles_suspended_descendants_before_they_finish():
     child_started = asyncio.Event()
     release_child = asyncio.Event()
@@ -178,4 +177,3 @@ def test_targeted_cancel_event_settles_suspended_descendants_before_they_finish(
         assert await scheduler.run("retry") == "retry answer"
 
     run(scenario())
-

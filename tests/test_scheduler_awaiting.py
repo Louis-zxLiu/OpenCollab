@@ -170,7 +170,6 @@ def test_last_child_completion_in_parent_return_tail_still_resumes():
             pytest.fail("parent resume task was never scheduled")
 
     run(scenario())
-
     assert lead.state.phase is SessionPhase.DONE
     assert lead.state.pending_events.is_empty()
     assert scheduler.table.get(0).result == "resumed: done"
@@ -737,4 +736,3 @@ def test_external_turns_for_different_agents_start_concurrently():
         assert results == ["lead answer", "child answer"]
 
     run(scenario())
-
