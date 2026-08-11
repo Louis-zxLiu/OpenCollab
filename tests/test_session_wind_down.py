@@ -170,21 +170,21 @@ def test_hard_budget_preempts_new_turn_wind_down(
 def test_budget_wind_down_is_not_regranted_on_a_new_user_turn():
     state = SessionState(
         messages=[{"role": "user", "content": "first"}],
-        used_tokens=80,
+        used_tokens=80_000,
     )
     llm = FakeLLM([llm_response(content="first protected answer", total_tokens=5)])
     runner = build_runner(
         state=state,
         agent=_agent_with_submit(),
         llm=llm,
-        max_budget_tokens=100,
+        max_budget_tokens=100_000,
         enforcement_strength=ENFORCEMENT_ON,
-        commit_reserve=20,
+        commit_reserve=25_000,
     )
 
     run(runner.run_loop())
     assert len(llm.calls) == 1
-    assert state.used_tokens == 85
+    assert state.used_tokens == 80_005
 
     state.reset_for_user_turn()
     runner.reset_runtime_for_user_turn()
