@@ -10,13 +10,15 @@ import json
 import re
 from typing import Any
 
-from opencollab.adapters.llm.retry import with_retry
+from opencollab.adapters.llm.retry import RetryTimeBudget, with_retry
 from opencollab.adapters.llm.types import (
     LLMResponse,
     Usage,
     estimate_messages_tokens,
     model_capabilities,
     rescue_empty_turn,
+    to_plain_data,
+    usage_to_dict,
 )
 
 # ``extra_body`` is merged into the OpenAI SDK's request payload after the
@@ -295,7 +297,7 @@ def _parse_usage(
     would double-count. The additive cache fix applies only to Anthropic.
     """
     usage = getattr(resp, "usage", None)
-    raw_usage = _usage_to_dict(usage)
+    raw_usage = usage_to_dict(usage)
     input_tokens = _usage_int(raw_usage, "prompt_tokens")
     output_tokens = _usage_int(raw_usage, "completion_tokens")
     prompt_details = raw_usage.get("prompt_tokens_details") or {}
@@ -331,40 +333,9 @@ def _usage_int(source: Any, key: str) -> int:
     return max(0, parsed)
 
 
-def _usage_to_dict(value: Any) -> dict[str, Any]:
-    plain = _usage_to_plain(value)
-    return plain if isinstance(plain, dict) else {}
-
-
-def _usage_to_plain(value: Any) -> Any:
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    if isinstance(value, dict):
-        return {str(k): _usage_to_plain(v) for k, v in value.items() if v is not None}
-    if isinstance(value, (list, tuple)):
-        return [_usage_to_plain(v) for v in value]
-    if hasattr(value, "model_dump"):
-        try:
-            return _usage_to_plain(value.model_dump(exclude_none=True))
-        except TypeError:
-            return _usage_to_plain(value.model_dump())
-    if hasattr(value, "dict"):
-        try:
-            return _usage_to_plain(value.dict(exclude_none=True))
-        except TypeError:
-            return _usage_to_plain(value.dict())
-    if hasattr(value, "__dict__"):
-        return {
-            str(k): _usage_to_plain(v)
-            for k, v in vars(value).items()
-            if not k.startswith("_") and v is not None
-        }
-    return str(value)
-
-
 def _estimate_output_tokens(message: Any) -> int:
     """Estimate output tokens from all serialized assistant response fields."""
-    plain_message = _usage_to_plain(message)
+    plain_message = to_plain_data(message)
     if not isinstance(plain_message, dict):
         return 0
     return estimate_messages_tokens([{"role": "assistant", **plain_message}])
@@ -382,6 +353,7 @@ async def complete_openai(
     tool_choice: str | None = None,
     top_p: float | None = None,
     max_output_tokens: int | None = None,
+    provider_error_time_budget: RetryTimeBudget | None = None,
 ) -> LLMResponse:
     """Single-shot completion against an OpenAI-compatible endpoint."""
     kwargs = _build_request_kwargs(
@@ -398,5 +370,6 @@ async def complete_openai(
     resp = await with_retry(
         lambda: client.chat.completions.create(**kwargs),
         max_retries=max_retries,
+        retry_time_budget=provider_error_time_budget,
     )
     return _parse_response(resp, kwargs["messages"], kwargs.get("tools"))

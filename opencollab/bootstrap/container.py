@@ -110,7 +110,12 @@ def _build_initial_state(
     return SessionState(messages=messages)
 
 
-def _resolve_llm(agent: Agent, llm: LLMPort | None, llm_timeout: float) -> LLMPort:
+def _resolve_llm(
+    agent: Agent,
+    llm: LLMPort | None,
+    llm_timeout: float,
+    provider_retry_budget: Any | None = None,
+) -> LLMPort:
     """The injected ``llm`` if given, else a fresh ``LLMClient`` for the agent."""
     if llm is not None:
         return llm
@@ -119,7 +124,15 @@ def _resolve_llm(agent: Agent, llm: LLMPort | None, llm_timeout: float) -> LLMPo
         api_key=agent.api_key,
         base_url=agent.base_url,
         provider=agent.provider,
+        wire_protocol=getattr(agent, "wire_protocol", "chat_completions"),
+        max_retries=getattr(agent, "llm_max_retries", 3),
         request_timeout=llm_timeout,
+        connect_timeout=getattr(agent, "llm_connect_timeout", 30.0),
+        first_event_timeout=getattr(agent, "llm_first_event_timeout", 180.0),
+        stream_idle_timeout=getattr(agent, "llm_stream_idle_timeout", 180.0),
+        context_window=getattr(agent, "context_window", None),
+        provider_error_time_budget=getattr(agent, "provider_error_time_budget", 0.0),
+        provider_retry_budget=provider_retry_budget,
     )
 
 
@@ -129,6 +142,7 @@ def _build_summarizer(
     resolved_llm: LLMPort,
     llm_timeout: float,
     auto_save_path: str | None,
+    provider_retry_budget: Any | None = None,
 ) -> ReadTimeSummarizer:
     """Build the read-time summarizer that powers ``AutoCompactShaper``.
 
@@ -138,10 +152,20 @@ def _build_summarizer(
     its async HTTP client never crosses event loops; an injected ``llm`` is
     reused as-is.
     """
+    reasoning_effort = getattr(agent, "reasoning_effort", None)
+    summary_extra = (
+        {"reasoning_effort": reasoning_effort}
+        if reasoning_effort is not None
+        else {}
+    )
     if llm is not None:
 
         async def _summary_complete(request: list[dict[str, Any]]) -> Any:
-            return await resolved_llm.complete(request, temperature=0.0)
+            return await resolved_llm.complete(
+                request,
+                temperature=0.0,
+                **summary_extra,
+            )
     else:
 
         async def _summary_complete(request: list[dict[str, Any]]) -> Any:
@@ -150,11 +174,23 @@ def _build_summarizer(
                 api_key=agent.api_key,
                 base_url=agent.base_url,
                 provider=agent.provider,
+                wire_protocol=getattr(agent, "wire_protocol", "chat_completions"),
+                max_retries=getattr(agent, "llm_max_retries", 3),
                 request_timeout=llm_timeout,
+                connect_timeout=getattr(agent, "llm_connect_timeout", 30.0),
+                first_event_timeout=getattr(agent, "llm_first_event_timeout", 180.0),
+                stream_idle_timeout=getattr(agent, "llm_stream_idle_timeout", 180.0),
+                context_window=getattr(agent, "context_window", None),
+                provider_error_time_budget=getattr(agent, "provider_error_time_budget", 0.0),
+                provider_retry_budget=provider_retry_budget,
             )
             primary_failure: BaseException | None = None
             try:
-                return await client.complete(request, temperature=0.0)
+                return await client.complete(
+                    request,
+                    temperature=0.0,
+                    **summary_extra,
+                )
             except BaseException as exc:
                 primary_failure = exc
                 raise
@@ -239,6 +275,7 @@ def build_session_runtime(
     safety_policy: SafetyPolicyPort | None = None,
     llm: LLMPort | None = None,
     llm_timeout: float = 600.0,
+    provider_retry_budget: Any | None = None,
     store: SessionStorePort | None = None,
     auto_save_callback: Callable[[], None] | None = None,
     auto_save_prepare_callback: Callable[
@@ -280,7 +317,7 @@ def build_session_runtime(
     )
     state.aid = aid
 
-    resolved_llm = _resolve_llm(agent, llm, llm_timeout)
+    resolved_llm = _resolve_llm(agent, llm, llm_timeout, provider_retry_budget)
 
     tool_execution = ToolExecutionUseCase(
         agent=agent,
@@ -292,7 +329,14 @@ def build_session_runtime(
         ask_policy=ask_policy,
         safety_policy=safety_policy,
     )
-    summarizer = _build_summarizer(agent, llm, resolved_llm, llm_timeout, auto_save_path)
+    summarizer = _build_summarizer(
+        agent,
+        llm,
+        resolved_llm,
+        llm_timeout,
+        auto_save_path,
+        provider_retry_budget,
+    )
     resolved_shaper: ShaperPort = (
         shaper if shaper is not None else _build_default_shaper(resolved_llm, summarizer)
     )

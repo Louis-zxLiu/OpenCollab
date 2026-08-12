@@ -15,6 +15,14 @@ silently force-compacted.
 
 from __future__ import annotations
 
+
+class TransientProviderError(RuntimeError):
+    """A provider failure for which repeating the same request can succeed."""
+
+
+class TransientEmptyOutputError(TransientProviderError):
+    """A provider completed a request without usable model output."""
+
 # Status codes a context overflow takes. Anthropic and OpenAI-compatible
 # providers both surface it as an HTTP 400 (BadRequest).
 _OVERFLOW_STATUS_CODES = frozenset({400})

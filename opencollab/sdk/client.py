@@ -131,6 +131,7 @@ class OpenCollab:
         public_keys = (
             "model",
             "provider",
+            "wire_protocol",
             "budget",
             "llm_timeout",
             "temperature",
@@ -138,6 +139,10 @@ class OpenCollab:
             "max_output_tokens",
             "thinking",
             "thinking_params",
+            "reasoning_effort",
+            "llm_connect_timeout",
+            "llm_first_event_timeout",
+            "llm_stream_idle_timeout",
         )
         public = {
             key: copy.deepcopy(self._config[key])
