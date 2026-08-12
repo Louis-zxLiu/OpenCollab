@@ -139,10 +139,12 @@ class WorkflowSessionFactory:
             raise ValueError("workflow agent isolation is not available")
         use_thinking = self._thinking if thinking is None else thinking
         use_reasoning_effort = None if thinking is False else self._reasoning_effort
+        reasoning_effort_policy = "suppressed" if thinking is False else "configured"
         capabilities = model_capabilities(self._model)
         if self._thinking and not capabilities.honors_workflow_thinking_override:
             use_thinking = True
             use_reasoning_effort = self._reasoning_effort
+            reasoning_effort_policy = "configured"
         agent = Agent(
             name="workflow_agent",
             system_prompt=self._system_prompt,
@@ -159,6 +161,7 @@ class WorkflowSessionFactory:
             thinking=use_thinking,
             thinking_params=self._thinking_params,
             reasoning_effort=use_reasoning_effort,
+            reasoning_effort_policy=reasoning_effort_policy,
             llm_max_retries=self._llm_max_retries,
             llm_connect_timeout=self._llm_connect_timeout,
             llm_first_event_timeout=self._llm_first_event_timeout,

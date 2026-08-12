@@ -681,6 +681,11 @@ class _SessionRunCompletionMixin:
             reasoning_effort = getattr(self.agent, "reasoning_effort", None)
             if reasoning_effort is not None:
                 payload["reasoning_effort"] = reasoning_effort
+            payload["reasoning_effort_policy"] = getattr(
+                self.agent,
+                "reasoning_effort_policy",
+                "configured",
+            )
             provider_model = getattr(response, "provider_model", None)
             if provider_model is not None:
                 payload["provider_model"] = provider_model

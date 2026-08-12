@@ -49,6 +49,9 @@ def test_agent_new_retry_fields_follow_the_legacy_positional_fields():
 
     assert names.index("tool_choice") < names.index("llm_max_retries")
     assert names.index("tool_choice") < names.index("provider_error_time_budget")
+    assert names.index("provider_error_time_budget") < names.index(
+        "reasoning_effort_policy"
+    )
 
 
 def test_workflow_sessions_and_summarizers_share_one_provider_retry_budget(

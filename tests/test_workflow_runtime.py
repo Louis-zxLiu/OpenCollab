@@ -108,7 +108,9 @@ def test_explicit_thinking_false_disables_responses_reasoning_effort(monkeypatch
     )
 
     assert default_session.agent.reasoning_effort == "xhigh"
+    assert default_session.agent.reasoning_effort_policy == "configured"
     assert corrective_session.agent.reasoning_effort is None
+    assert corrective_session.agent.reasoning_effort_policy == "suppressed"
 
 
 @pytest.mark.asyncio
