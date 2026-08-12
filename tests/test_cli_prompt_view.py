@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import fcntl
+import io
 import os
 import struct
 import termios
@@ -15,6 +16,7 @@ from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.output import DummyOutput
 from prompt_toolkit.output.vt100 import Vt100_Output
+from rich.console import Console
 
 from opencollab.adapters.cli import main as cli_main
 from opencollab.adapters.cli.prompt_view import (
@@ -362,3 +364,39 @@ async def test_repl_reports_stopped_turn_and_accepts_next_input(monkeypatch):
         "Agent 2 stopped: token budget exhausted",
     ]
     assert len(dividers) == 2
+
+
+@pytest.mark.asyncio
+async def test_repl_prints_partial_answer_as_literal_rich_text(monkeypatch):
+    tui = _FakeTUI()
+    lines = iter(["first", "second", None])
+    monkeypatch.setattr(
+        cli_main,
+        "_read_command",
+        lambda *_args, **_kwargs: asyncio.sleep(0, result=next(lines)),
+    )
+    output = io.StringIO()
+    monkeypatch.setattr(
+        cli_main,
+        "console",
+        Console(file=output, force_terminal=False, color_system=None),
+    )
+    calls: list[str] = []
+
+    async def handle_turn(line: str, _aid: int) -> None:
+        calls.append(line)
+        if line == "first":
+            raise SchedulerTurnError(
+                0,
+                SessionPhase.STOPPED,
+                "token budget exhausted",
+                "Here is malformed rich: [bold]x[/red]",
+            )
+
+    tui.print_turn_divider = lambda: None
+
+    await cli_main._repl_loop(tui, handle_turn, object())
+
+    assert calls == ["first", "second"]
+    assert "Here is malformed rich: [bold]x[/red]" in output.getvalue()
+    assert "Agent 0 stopped: token budget exhausted" in output.getvalue()

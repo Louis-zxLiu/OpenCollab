@@ -503,6 +503,11 @@ class Session:
         phase = _restore_phase(raw_state.get("phase", SessionPhase.IDLE.value))
         if phase is SessionPhase.AWAITING_EVENTS:
             self._complete_missing_pending_rows(restored)
+            if restored_turn_start is None:
+                # Legacy and malformed snapshots may not carry a valid answer
+                # cursor. Future messages begin at the restored transcript end,
+                # which excludes prior answers while retaining the resumed one.
+                restored_turn_start = len(restored.messages)
         # In-flight provider/tool phases depend on process-local coroutines that
         # cannot survive restart. AWAITING_EVENTS is recoverable because pending
         # child rows above are converted to explicit FAILED tool results.

@@ -1,6 +1,7 @@
 """Regression coverage for restoring a reused session runtime."""
 
 import asyncio
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -121,6 +122,54 @@ def test_restore_reused_session_rearms_empty_response_retry(tmp_path):
     assert reused.runner._empty_stop_retried is False
     assert run(reused.run_loop()) == "restored recovered"
     assert len(llm.calls) == 4
+
+
+@pytest.mark.parametrize("cursor", [None, 10_000])
+def test_restore_awaiting_legacy_cursor_returns_resumed_answer(tmp_path, cursor):
+    agent = FakeAgent()
+    source = Session(agent=agent, llm=FakeLLMClient())
+    source.state.replace_messages([
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "old question"},
+        {"role": "assistant", "content": "old answer"},
+        {"role": "user", "content": "current question"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{
+                "id": "child-current",
+                "type": "function",
+                "function": {"name": "spawn_agent", "arguments": "{}"},
+            }],
+        },
+    ])
+    source.state.set_phase(SessionPhase.AWAITING_EVENTS)
+    source.state.active_turn_start_message_index = 4
+    source.state.pending_events.add(PendingRow(
+        tool_call_id="child-current",
+        kind=RowKind.CHILD_AGENT,
+        order=0,
+        ref=1,
+        status=RowStatus.DONE,
+        result="child result",
+    ))
+    path = tmp_path / "awaiting-legacy-cursor.json"
+    source.save(str(path))
+    snapshot = json.loads(path.read_text(encoding="utf-8"))
+    if cursor is None:
+        snapshot["session_state"].pop("active_turn_start_message_index")
+    else:
+        snapshot["session_state"]["active_turn_start_message_index"] = cursor
+    path.write_text(json.dumps(snapshot), encoding="utf-8")
+
+    restored = Session(
+        agent=agent,
+        llm=FakeLLMClient([llm_response(content="answer after legacy restore")]),
+    )
+    restored.restore(str(path))
+
+    assert restored.state.active_turn_start_message_index == 5
+    assert run(restored.run_loop()) == "answer after legacy restore"
 
 
 def test_restore_rejects_a_session_with_an_active_turn(tmp_path):

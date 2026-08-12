@@ -297,7 +297,7 @@ async def _repl_loop(tui: Any, handle_turn, lead: Any, bottom_toolbar: Any = Non
             result = await handle_turn(line, target_aid)
         except SchedulerTurnError as exc:
             if exc.partial_answer:
-                console.print(exc.partial_answer)
+                console.print(Text(exc.partial_answer))
             reason = exc.terminal_reason or exc.phase.value
             style = "yellow" if exc.phase.value == "stopped" else "red"
             console.print(
