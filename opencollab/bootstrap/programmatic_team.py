@@ -14,6 +14,7 @@ from typing import Any, Literal
 
 from opencollab.adapters.trace import Tracer
 from opencollab.application.exception_notes import add_exception_note
+from opencollab.application.scheduler_types import SchedulerTurnError
 from opencollab.bootstrap import programmatic as _programmatic
 from opencollab.bootstrap.programmatic import (
     DEFAULT_TEAM_CLEANUP_TIMEOUT_SECONDS,
@@ -22,6 +23,7 @@ from opencollab.bootstrap.programmatic import (
 )
 from opencollab.bootstrap.runtime_context import build_runtime_context
 from opencollab.bootstrap.team_config import load_team_config
+from opencollab.domain.session import SessionPhase
 
 
 async def run_team(
@@ -82,6 +84,15 @@ async def run_team(
         except TimeoutError as exc:
             status = "stopped"
             reason = "timeout"
+            failure = exc
+        except SchedulerTurnError as exc:
+            output = exc.partial_answer
+            status = (
+                "stopped"
+                if exc.phase is SessionPhase.STOPPED
+                else "failed"
+            )
+            reason = exc.terminal_reason or exc.phase.value
             failure = exc
         except asyncio.CancelledError as exc:
             cancellation = exc

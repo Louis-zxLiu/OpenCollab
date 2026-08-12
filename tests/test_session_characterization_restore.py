@@ -345,6 +345,7 @@ def test_restore_awaiting_turn_never_returns_previous_turn_answer(tmp_path):
     assert restored.state.active_turn_start_message_index == 4
     assert run(restored.run_loop()) == ""
 
+
 def test_scheduler_init_preserves_and_drains_restored_awaiting_phase(tmp_path):
     from opencollab.application.scheduler import LaunchSpec, Scheduler
 

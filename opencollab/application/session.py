@@ -393,6 +393,8 @@ class Session:
 
     def restore(self, path: str) -> None:
         """Restore a complete snapshot while accepting legacy message-only stores."""
+        if self._turn_lock.locked() or self.pending_cleanup_tasks:
+            raise SessionBusyError("session cannot be restored while runtime work is active")
         if isinstance(self.store, SnapshotStorePort):
             snapshot = self.store.load_snapshot(path, self.agent.system_prompt)
         else:
@@ -501,6 +503,11 @@ class Session:
         phase = _restore_phase(raw_state.get("phase", SessionPhase.IDLE.value))
         if phase is SessionPhase.AWAITING_EVENTS:
             self._complete_missing_pending_rows(restored)
+            if restored_turn_start is None:
+                # Legacy and malformed snapshots may not carry a valid answer
+                # cursor. Future messages begin at the restored transcript end,
+                # which excludes prior answers while retaining the resumed one.
+                restored_turn_start = len(restored.messages)
         # In-flight provider/tool phases depend on process-local coroutines that
         # cannot survive restart. AWAITING_EVENTS is recoverable because pending
         # child rows above are converted to explicit FAILED tool results.
@@ -559,6 +566,7 @@ class Session:
 
     def _publish_restored_state(self, restored: SessionState) -> None:
         """Publish one fully validated restore while retaining shared identity."""
+        self.runner.reset_for_restore()
         self.state.__dict__.clear()
         self.state.__dict__.update(restored.__dict__)
 

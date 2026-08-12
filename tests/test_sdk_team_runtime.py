@@ -14,6 +14,9 @@ from test_sdk_runtime import (
     sdk_client,
 )
 
+from opencollab.application.scheduler_types import SchedulerTurnError
+from opencollab.domain.session import SessionPhase
+
 
 async def test_team_config_preflight_does_not_claim_artifact_directory(
     tmp_path: Path,
@@ -131,6 +134,85 @@ async def test_shared_team_runtime_always_cleans_scheduler(
     assert result.status == "completed"
     assert result.tokens == 8
     assert result.metrics == {"steps": 2, "sessions": 1}
+
+
+@pytest.mark.parametrize(
+    ("phase", "terminal_reason", "partial_answer", "expected_status", "expected_reason"),
+    [
+        (
+            SessionPhase.STOPPED,
+            "token budget exhausted",
+            "partial answer",
+            "stopped",
+            "token budget exhausted",
+        ),
+        (
+            SessionPhase.ERROR,
+            "provider failed",
+            "partial answer",
+            "failed",
+            "provider failed",
+        ),
+        (SessionPhase.STOPPED, None, None, "stopped", "stopped"),
+    ],
+)
+async def test_team_result_preserves_scheduler_turn_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    phase: SessionPhase,
+    terminal_reason: str | None,
+    partial_answer: str | None,
+    expected_status: str,
+    expected_reason: str,
+) -> None:
+    turn_error = SchedulerTurnError(
+        0,
+        phase,
+        terminal_reason,
+        partial_answer,
+    )
+
+    class FakeScheduler:
+        cleaned = False
+        used_tokens = 8
+        table = SimpleNamespace(entries={0: object()})
+        lead_session = SimpleNamespace(
+            phase=phase,
+            state=SimpleNamespace(terminal_reason=terminal_reason),
+            step_count=2,
+        )
+
+        async def run(self, _prompt: str) -> str:
+            raise turn_error
+
+        async def cleanup(self, *, cleanup_timeout: float) -> None:
+            assert cleanup_timeout > 0
+            self.cleaned = True
+
+    scheduler = FakeScheduler()
+    monkeypatch.setattr(
+        programmatic,
+        "build_scheduler",
+        lambda *_args, **_kwargs: scheduler,
+    )
+
+    result = await programmatic.run_team(
+        prompt="solve",
+        config={"model": "model", "provider": "openai", "budget": 50},
+        workspace=str(tmp_path),
+        team_config_path=None,
+        max_tokens=50,
+        timeout=None,
+        artifacts=None,
+        trace=False,
+        use_worktrees=False,
+    )
+
+    assert scheduler.cleaned is True
+    assert result.status == expected_status
+    assert result.output == partial_answer
+    assert result.reason == expected_reason
+    assert result.error is turn_error
 
 
 async def test_team_result_exposes_sanitized_child_failures(

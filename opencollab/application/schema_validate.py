@@ -41,11 +41,9 @@ _TYPE_CHECKS = {
     "null": lambda v: v is None,
 }
 
-_SUPPORTED_KEYWORDS = frozenset({
+_VALIDATION_KEYWORDS = frozenset({
     "additionalProperties",
-    "description",
     "enum",
-    "examples",
     "items",
     "maxItems",
     "maxLength",
@@ -57,9 +55,21 @@ _SUPPORTED_KEYWORDS = frozenset({
     "pattern",
     "properties",
     "required",
-    "title",
     "type",
 })
+
+_ANNOTATION_KEYWORDS = frozenset({
+    "default",
+    "deprecated",
+    "description",
+    "examples",
+    "format",
+    "readOnly",
+    "title",
+    "writeOnly",
+})
+
+_SUPPORTED_KEYWORDS = _VALIDATION_KEYWORDS | _ANNOTATION_KEYWORDS | {"$schema"}
 
 
 def validate_schema(schema: Any) -> list[str]:
@@ -86,9 +96,14 @@ def _validate_schema(schema: Any, path: str, errors: list[str]) -> None:
     if not isinstance(schema, dict):
         errors.append(f"{path}: schema node must be an object")
         return
-    for keyword in schema:
+    for keyword, keyword_value in schema.items():
         if keyword not in _SUPPORTED_KEYWORDS:
             errors.append(f"{path}.{keyword}: unsupported schema keyword")
+        elif keyword == "$schema":
+            if path != "$schema":
+                errors.append(f"{path}.$schema: dialect declaration is only allowed at the root")
+            elif not isinstance(keyword_value, str) or not keyword_value.strip():
+                errors.append(f"{path}.$schema: dialect declaration must be a non-empty string")
     expected_type = schema.get("type")
     if expected_type is not None:
         members = (

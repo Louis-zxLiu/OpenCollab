@@ -55,6 +55,47 @@ def test_validate_schema_accepts_nonempty_json_enum():
     assert validate_schema(schema) == []
 
 
+def test_validate_schema_accepts_annotations_without_weakening_constraints():
+    schema = {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "title": "Third-party tool arguments",
+        "description": "A representative provider schema",
+        "required": ["email"],
+        "properties": {
+            "email": {
+                "type": "string",
+                "default": "user@example.com",
+                "examples": ["admin@example.com"],
+                "format": "email",
+                "deprecated": False,
+                "readOnly": False,
+                "writeOnly": False,
+            }
+        },
+    }
+
+    assert validate_schema(schema) == []
+    assert validate({"email": "not-checked-as-a-format"}, schema) == []
+    assert validate({}, schema) == ["$.email: required property is missing"]
+
+
+def test_validate_schema_rejects_nested_dialect_declaration():
+    errors = validate_schema({
+        "type": "object",
+        "properties": {
+            "value": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "string",
+            }
+        },
+    })
+
+    assert errors == [
+        "$schema.properties.value.$schema: dialect declaration is only allowed at the root"
+    ]
+
+
 def test_validate_nested_object_and_array():
     schema = {
         "type": "object",
