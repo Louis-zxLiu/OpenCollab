@@ -178,6 +178,16 @@ class SessionRunUseCase(_SessionRunCompletionMixin):
         self._pending_tool_allowlist = None
         self._pending_tool_gate_label = None
 
+    def reset_for_restore(self) -> None:
+        """Discard process-local turn state before publishing a snapshot."""
+        self.reset_runtime_for_user_turn()
+        self._pending = None
+        self._empty_stop_retried = False
+        self._last_steering_level = None
+        self._turn_start_message_index = None
+        self._llm_step_started = False
+        self._late_provider_usage = ()
+
     @property
     def pending_cleanup_tasks(self) -> tuple[asyncio.Task[Any], ...]:
         return tuple(
@@ -265,8 +275,7 @@ class SessionRunUseCase(_SessionRunCompletionMixin):
         if entry_phase is SessionPhase.IDLE:
             self.state.consume_queued_external_user_turn()
         if entry_phase is SessionPhase.AWAITING_EVENTS:
-            if self._turn_start_message_index is None:
-                self._turn_start_message_index = self.state.active_turn_start_message_index
+            self._turn_start_message_index = self.state.active_turn_start_message_index
         elif entry_phase is SessionPhase.DONE:
             # Re-entering an already-completed session is a compatibility
             # read-only query for its final answer, not a restored active turn.
