@@ -255,12 +255,76 @@ def test_secret_history_accepts_clean_commits_and_special_names(tmp_path):
 def test_secret_history_rejects_zero_file_scan(tmp_path, monkeypatch, capsys):
     repository, base, scanner = _repository(tmp_path)
     module = _script_module()
-    monkeypatch.setattr(module, "_materialize_tree", lambda *_args: [])
+    monkeypatch.setattr(module, "_scannable_blobs", lambda *_args: [])
 
     result = module.check_secret_history(repository, base, base, [str(scanner)])
 
     assert result == 1
     assert "has no files to scan" in capsys.readouterr().out
+
+
+def test_secret_history_scans_each_path_and_blob_pair_once(tmp_path, monkeypatch):
+    repository, base, scanner = _repository(tmp_path)
+    (repository / "first.txt").write_text("first version\n", encoding="utf-8")
+    _git(repository, "add", "first.txt")
+    _git(repository, "commit", "-m", "add first file")
+    (repository / "second.txt").write_text("second version\n", encoding="utf-8")
+    _git(repository, "add", "second.txt")
+    _git(repository, "commit", "-m", "add second file")
+
+    module = _script_module()
+    scanned_batches: list[list[tuple[str, str]]] = []
+
+    def record_scan(
+        _repository: Path,
+        _commit: str,
+        blobs: list[tuple[str, str]],
+        _scanner: list[str],
+        _trusted_baseline: bytes,
+        _root: Path,
+    ) -> int:
+        scanned_batches.append(blobs)
+        return 0
+
+    monkeypatch.setattr(module, "_scan_materialized_blobs", record_scan)
+
+    result = module.check_secret_history(repository, base, "HEAD", [str(scanner)])
+
+    assert result == 0
+    scanned_paths = [path for batch in scanned_batches for path, _object_id in batch]
+    assert scanned_paths == ["first.txt", "second.txt"]
+
+
+def test_secret_history_rescans_same_blob_at_a_new_path(tmp_path, monkeypatch):
+    repository, base, scanner = _repository(tmp_path)
+    (repository / "first.txt").write_text("shared contents\n", encoding="utf-8")
+    _git(repository, "add", "first.txt")
+    _git(repository, "commit", "-m", "add first path")
+    _git(repository, "mv", "first.txt", "second.txt")
+    _git(repository, "commit", "-m", "rename path")
+
+    module = _script_module()
+    scanned_batches: list[list[tuple[str, str]]] = []
+
+    def record_scan(
+        _repository: Path,
+        _commit: str,
+        blobs: list[tuple[str, str]],
+        _scanner: list[str],
+        _trusted_baseline: bytes,
+        _root: Path,
+    ) -> int:
+        scanned_batches.append(blobs)
+        return 0
+
+    monkeypatch.setattr(module, "_scan_materialized_blobs", record_scan)
+
+    result = module.check_secret_history(repository, base, "HEAD", [str(scanner)])
+
+    assert result == 0
+    scanned = [(path, object_id) for batch in scanned_batches for path, object_id in batch]
+    assert [path for path, _object_id in scanned] == ["first.txt", "second.txt"]
+    assert scanned[0][1] == scanned[1][1]
 
 
 def test_trusted_tree_uses_the_baseline_from_the_same_tree(tmp_path):

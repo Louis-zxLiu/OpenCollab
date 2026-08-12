@@ -51,14 +51,22 @@ def _tree_blobs(repository: Path, commit: str) -> list[tuple[str, str]]:
     return entries
 
 
-def _materialize_tree(repository: Path, commit: str, destination: Path) -> list[str]:
+def _materialize_blobs(
+    repository: Path,
+    blobs: list[tuple[str, str]],
+    destination: Path,
+) -> list[str]:
     paths: list[str] = []
-    for relative, object_id in _tree_blobs(repository, commit):
+    for relative, object_id in blobs:
         target = destination.joinpath(*PurePosixPath(relative).parts)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(_git(repository, "cat-file", "blob", object_id))
         paths.append(relative)
     return paths
+
+
+def _scannable_blobs(repository: Path, commit: str) -> list[tuple[str, str]]:
+    return [blob for blob in _tree_blobs(repository, commit) if blob[0] != BASELINE_PATH]
 
 
 def _secret_fingerprints(payload: bytes) -> set[tuple[str, str, str]]:
@@ -83,20 +91,17 @@ def _introduced_secrets(trusted_baseline: bytes, scanned_baseline: Path) -> set[
     return _secret_fingerprints(scanned_baseline.read_bytes()) - _secret_fingerprints(trusted_baseline)
 
 
-def _scan_materialized_tree(
+def _scan_materialized_blobs(
     repository: Path,
     commit: str,
+    blobs: list[tuple[str, str]],
     scanner: list[str],
     trusted_baseline: bytes,
     root: Path,
 ) -> int:
     tree = root / commit
     tree.mkdir()
-    paths = [
-        path
-        for path in _materialize_tree(repository, commit, tree)
-        if path != BASELINE_PATH
-    ]
+    paths = _materialize_blobs(repository, blobs, tree)
     if not paths:
         print(f"::error::Proposed commit {commit} has no files to scan.")
         return 1
@@ -169,16 +174,37 @@ def check_secret_history(
     trusted_baseline = _git(repository, "show", f"{base}:{BASELINE_PATH}")
     with tempfile.TemporaryDirectory(prefix="opencollab-secret-history-") as temporary:
         root = Path(temporary)
+        scanned = set(_scannable_blobs(repository, base))
+        cache_hits = 0
+        scanned_versions = 0
+        scanner_runs = 0
         for commit in _commits(repository, base, head):
-            result = _scan_materialized_tree(
+            current = _scannable_blobs(repository, commit)
+            if not current:
+                print(f"::error::Proposed commit {commit} has no files to scan.")
+                return 1
+            pending = [blob for blob in current if blob not in scanned]
+            cache_hits += len(current) - len(pending)
+            if not pending:
+                continue
+            result = _scan_materialized_blobs(
                 repository,
                 commit,
+                pending,
                 scanner,
                 trusted_baseline,
                 root,
             )
             if result:
                 return result
+            scanned.update(pending)
+            scanned_versions += len(pending)
+            scanner_runs += 1
+    print(
+        "Secret scan cache summary: "
+        f"scanned_versions={scanned_versions}, cache_hits={cache_hits}, "
+        f"scanner_runs={scanner_runs}."
+    )
     print("Secret history checks passed.")
     return 0
 
@@ -188,9 +214,10 @@ def check_trusted_tree(repository: Path, commit: str, scanner: list[str]) -> int
     commit = _git(repository, "rev-parse", "--verify", f"{commit}^{{commit}}").decode("ascii").strip()
     trusted_baseline = _git(repository, "show", f"{commit}:{BASELINE_PATH}")
     with tempfile.TemporaryDirectory(prefix="opencollab-secret-tree-") as temporary:
-        result = _scan_materialized_tree(
+        result = _scan_materialized_blobs(
             repository,
             commit,
+            _scannable_blobs(repository, commit),
             scanner,
             trusted_baseline,
             Path(temporary),
