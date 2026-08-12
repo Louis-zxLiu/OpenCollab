@@ -9,38 +9,43 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from opencollab.adapters.llm.errors import TransientEmptyOutputError, TransientProviderError
+from opencollab.adapters.llm.responses_structured import (
+    ForcedTextTool,
+    forced_text_format,
+    forced_text_tool,
+    project_forced_text_tool,
+)
+from opencollab.adapters.llm.responses_usage import parse_responses_usage
 from opencollab.adapters.llm.retry import RetryTimeBudget, with_retry
 from opencollab.adapters.llm.types import (
     LLMResponse,
-    Usage,
-    estimate_messages_tokens,
-    estimate_tokens,
     model_capabilities,
     rescue_empty_turn,
     to_plain_data,
-    usage_to_dict,
 )
 
 _OUTPUT_ITEM_TYPES = frozenset({"message", "reasoning", "function_call"})
-_PASSIVE_EVENT_TYPES = frozenset({
-    "response.created",
-    "response.in_progress",
-    "response.queued",
-    "response.output_item.added",
-    "response.content_part.added",
-    "response.content_part.done",
-    "response.output_text.delta",
-    "response.output_text.done",
-    "response.output_text.annotation.added",
-    "response.refusal.delta",
-    "response.refusal.done",
-    "response.reasoning_summary_part.added",
-    "response.reasoning_summary_part.done",
-    "response.reasoning_summary_text.delta",
-    "response.reasoning_summary_text.done",
-    "response.reasoning_text.delta",
-    "response.reasoning_text.done",
-})
+_PASSIVE_EVENT_TYPES = frozenset(
+    {
+        "response.created",
+        "response.in_progress",
+        "response.queued",
+        "response.output_item.added",
+        "response.content_part.added",
+        "response.content_part.done",
+        "response.output_text.delta",
+        "response.output_text.done",
+        "response.output_text.annotation.added",
+        "response.refusal.delta",
+        "response.refusal.done",
+        "response.reasoning_summary_part.added",
+        "response.reasoning_summary_part.done",
+        "response.reasoning_summary_text.delta",
+        "response.reasoning_summary_text.done",
+        "response.reasoning_text.delta",
+        "response.reasoning_text.done",
+    }
+)
 
 
 class ResponsesProtocolError(RuntimeError):
@@ -157,11 +162,13 @@ def _messages_to_input(messages: list[dict[str, Any]]) -> tuple[str | None, list
             if call_id in answered_ids:
                 raise ResponsesProtocolError(f"duplicate function_call_output for {call_id!r}")
             answered_ids.add(call_id)
-            items.append({
-                "type": "function_call_output",
-                "call_id": call_id,
-                "output": _message_text(message.get("content")),
-            })
+            items.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": _message_text(message.get("content")),
+                }
+            )
             continue
         replay = message.get("response_items")
         if replay is not None:
@@ -191,12 +198,14 @@ def _messages_to_input(messages: list[dict[str, Any]]) -> tuple[str | None, list
             if call_id in call_ids:
                 raise ResponsesProtocolError(f"duplicate legacy call_id {call_id!r}")
             call_ids.add(call_id)
-            items.append({
-                "type": "function_call",
-                "call_id": call_id,
-                "name": function.get("name"),
-                "arguments": function.get("arguments") or "{}",
-            })
+            items.append(
+                {
+                    "type": "function_call",
+                    "call_id": call_id,
+                    "name": function.get("name"),
+                    "arguments": function.get("arguments") or "{}",
+                }
+            )
     return ("\n\n".join(instructions) or None), items
 
 
@@ -233,6 +242,24 @@ def _responses_tool_choice(value: Any) -> Any:
     return value
 
 
+def _forced_text_tool(
+    model: str,
+    converted_tools: list[dict[str, Any]],
+    tool_choice: Any,
+) -> ForcedTextTool | None:
+    """Bind one named tool through ``text.format`` when forcing is unsupported."""
+    choice = _responses_tool_choice(tool_choice)
+    try:
+        return forced_text_tool(
+            converted_tools,
+            choice,
+            supports_forced_tool_choice=(model_capabilities(model).supports_forced_tool_choice),
+            supports_json_schema=model_capabilities(model).supports_responses_json_schema,
+        )
+    except ValueError as exc:
+        raise ResponsesProtocolError(str(exc)) from exc
+
+
 def _build_request_kwargs(
     model: str,
     messages: list[dict[str, Any]],
@@ -261,15 +288,15 @@ def _build_request_kwargs(
         kwargs["instructions"] = instructions
     converted_tools = _responses_tools(tools)
     if converted_tools:
-        kwargs["tools"] = converted_tools
-        choice = _responses_tool_choice(tool_choice)
-        if (
-            not model_capabilities(model).supports_forced_tool_choice
-            and choice is not None
-            and choice != "auto"
-        ):
-            choice = "auto"
-        kwargs["tool_choice"] = choice
+        text_tool = _forced_text_tool(model, converted_tools, tool_choice)
+        if text_tool is not None:
+            kwargs["text"] = forced_text_format(text_tool)
+        else:
+            kwargs["tools"] = converted_tools
+            choice = _responses_tool_choice(tool_choice)
+            if not model_capabilities(model).supports_forced_tool_choice and choice is not None and choice != "auto":
+                choice = "auto"
+            kwargs["tool_choice"] = choice
     if top_p is not None:
         kwargs["top_p"] = top_p
     if max_output_tokens is not None:
@@ -289,9 +316,7 @@ async def _next_event(iterator: Any, timeout: float, *, stage: str) -> Any:
     except asyncio.TimeoutError as exc:
         raise ResponsesProtocolError(f"Responses {stage} timeout after {timeout:g}s") from exc
     except StopAsyncIteration as exc:
-        raise ResponsesStreamInterruptedError(
-            "Responses stream ended before response.completed"
-        ) from exc
+        raise ResponsesStreamInterruptedError("Responses stream ended before response.completed") from exc
 
 
 def _event_type(event: Any) -> str:
@@ -321,12 +346,7 @@ def _event_error_data(event: Any) -> Any:
 def _event_error(event: Any) -> str:
     error = _event_error_data(event)
     if isinstance(error, dict):
-        return str(
-            error.get("message")
-            or error.get("code")
-            or error.get("reason")
-            or "unknown Responses error"
-        )
+        return str(error.get("message") or error.get("code") or error.get("reason") or "unknown Responses error")
     return str(error or "unknown Responses error")
 
 
@@ -340,8 +360,7 @@ def _accept_output_item(event: Any, state: _StreamState) -> None:
         if not isinstance(call_id, str) or not call_id:
             raise ResponsesProtocolError("function_call is missing call_id")
         if any(
-            prior.get("type") == "function_call" and prior.get("call_id") == call_id
-            for prior in state.output_items
+            prior.get("type") == "function_call" and prior.get("call_id") == call_id for prior in state.output_items
         ):
             raise ResponsesProtocolError(f"duplicate function_call call_id {call_id!r}")
         if not isinstance(arguments, str):
@@ -366,9 +385,7 @@ def _validate_completed_response(response: Any, expected_model: str | None) -> s
         raise ResponsesProtocolError(f"completed Responses object contains error {error!r}")
     incomplete = to_plain_data(getattr(response, "incomplete_details", None))
     if incomplete is not None:
-        raise ResponsesProtocolError(
-            f"completed Responses object contains incomplete details {incomplete!r}"
-        )
+        raise ResponsesProtocolError(f"completed Responses object contains incomplete details {incomplete!r}")
     actual_model = getattr(response, "model", None)
     if not isinstance(actual_model, str) or not actual_model:
         raise ResponsesProtocolError("completed Responses object is missing model identity")
@@ -459,9 +476,7 @@ async def _create_and_consume_stream(
             timeout=first_event_timeout,
         )
     except asyncio.TimeoutError as exc:
-        raise ResponsesProtocolError(
-            f"Responses first-event timeout after {first_event_timeout:g}s"
-        ) from exc
+        raise ResponsesProtocolError(f"Responses first-event timeout after {first_event_timeout:g}s") from exc
 
     remaining = deadline - loop.time()
     if remaining <= 0:
@@ -470,9 +485,7 @@ async def _create_and_consume_stream(
             result = close()
             if asyncio.iscoroutine(result):
                 await result
-        raise ResponsesProtocolError(
-            f"Responses first-event timeout after {first_event_timeout:g}s"
-        )
+        raise ResponsesProtocolError(f"Responses first-event timeout after {first_event_timeout:g}s")
     return await _consume_stream(
         event_stream,
         remaining,
@@ -509,11 +522,14 @@ def _semantic_output_item(item: dict[str, Any]) -> tuple[Any, ...]:
     """Return the stable meaning shared by streamed and terminal output items."""
     item_type = item.get("type")
     if item_type == "function_call":
-        return (item_type, *_function_call_identity(
-            item.get("call_id"),
-            item.get("name"),
-            item.get("arguments"),
-        ))
+        return (
+            item_type,
+            *_function_call_identity(
+                item.get("call_id"),
+                item.get("name"),
+                item.get("arguments"),
+            ),
+        )
     if item_type == "message":
         role = item.get("role")
         if not isinstance(role, str) or not role:
@@ -550,11 +566,7 @@ def _output_items_agree(streamed: dict[str, Any], terminal: dict[str, Any]) -> b
     for value in (streamed_encrypted, terminal_encrypted):
         if value is not None and not isinstance(value, str):
             raise ResponsesProtocolError("reasoning output contains invalid encrypted content")
-    return (
-        streamed_encrypted is None
-        or terminal_encrypted is None
-        or streamed_encrypted == terminal_encrypted
-    )
+    return streamed_encrypted is None or terminal_encrypted is None or streamed_encrypted == terminal_encrypted
 
 
 def _merge_terminal_projection(
@@ -570,100 +582,68 @@ def _merge_terminal_projection(
     return streamed
 
 
-def _optional_usage_int(source: Any, key: str) -> int | None:
-    if not isinstance(source, dict) or source.get(key) is None:
-        return None
-    if isinstance(source[key], bool):
-        return None
-    try:
-        value = int(source[key])
-    except (TypeError, ValueError, OverflowError):
-        return None
-    return value if value >= 0 else None
-
-
-def _positive_usage_int(source: Any, key: str) -> int | None:
-    value = _optional_usage_int(source, key)
-    return value if value is not None and value > 0 else None
-
-
-def _parse_usage(
-    response: Any,
-    messages: list[dict[str, Any]],
-    content: str | None,
-    tool_calls: list[dict[str, Any]],
-) -> Usage:
-    raw = usage_to_dict(getattr(response, "usage", None))
-    input_tokens = _positive_usage_int(raw, "input_tokens")
-    output_tokens = _positive_usage_int(raw, "output_tokens")
-    input_details = raw.get("input_tokens_details") or {}
-    output_details = raw.get("output_tokens_details") or {}
-    cache_creation_tokens = _optional_usage_int(input_details, "cache_write_tokens")
-    if cache_creation_tokens is None:
-        cache_creation_tokens = _optional_usage_int(raw, "cache_write_tokens")
-    estimated = input_tokens is None or output_tokens is None
-    if input_tokens is None:
-        input_tokens = estimate_messages_tokens(messages)
-    if output_tokens is None:
-        text = content or ""
-        for call in tool_calls:
-            function = call["function"]
-            text += str(function.get("name") or "") + str(function.get("arguments") or "")
-        output_tokens = estimate_tokens(text) if text else 0
-    return Usage(
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
-        cache_read_tokens=_optional_usage_int(input_details, "cached_tokens"),
-        cache_creation_tokens=cache_creation_tokens,
-        reasoning_tokens=_optional_usage_int(output_details, "reasoning_tokens"),
-        estimated=estimated,
-        raw_usage=raw,
-    )
-
-
 def _parse_stream(
     state: _StreamState,
     messages: list[dict[str, Any]],
     expected_model: str | None = None,
+    forced_text_tool: ForcedTextTool | None = None,
 ) -> LLMResponse:
     actual_model = _validate_completed_response(state.completed_response, expected_model)
     final_output = to_plain_data(getattr(state.completed_response, "output", None))
     final_items = _validated_response_items(final_output)
-    if (
-        len(final_items) != len(state.output_items)
-        or not all(
-            _output_items_agree(streamed, terminal)
-            for streamed, terminal in zip(state.output_items, final_items, strict=True)
-        )
+    if len(final_items) != len(state.output_items) or not all(
+        _output_items_agree(streamed, terminal)
+        for streamed, terminal in zip(state.output_items, final_items, strict=True)
     ):
-        raise ResponsesProtocolError(
-            "response.completed output disagrees with streamed output items"
-        )
+        raise ResponsesProtocolError("response.completed output disagrees with streamed output items")
     state.output_items = [
         _merge_terminal_projection(streamed, terminal)
         for streamed, terminal in zip(state.output_items, final_items, strict=True)
     ]
     content = "".join(_output_text(item) for item in state.output_items) or None
-    reasoning = "\n".join(
-        text for text in (_reasoning_text(item) for item in state.output_items) if text
-    ) or None
+    reasoning = "\n".join(text for text in (_reasoning_text(item) for item in state.output_items) if text) or None
     tool_calls: list[dict[str, Any]] = []
     for item in state.output_items:
         if item.get("type") == "function_call":
-            tool_calls.append({
-                "id": item["call_id"],
-                "type": "function",
-                "function": {"name": item.get("name"), "arguments": item["arguments"]},
-            })
+            tool_calls.append(
+                {
+                    "id": item["call_id"],
+                    "type": "function",
+                    "function": {"name": item.get("name"), "arguments": item["arguments"]},
+                }
+            )
+    if forced_text_tool is not None:
+        if tool_calls:
+            raise ResponsesProtocolError("JSON Schema tool response unexpectedly contained function calls")
+        if not content:
+            raise ResponsesEmptyOutputError("JSON Schema tool response contained no output text")
+        response_id = getattr(state.completed_response, "id", None)
+        if not isinstance(response_id, str) or not response_id:
+            raise ResponsesProtocolError("JSON Schema tool response is missing response identity")
+        try:
+            tool_call, synthetic_item = project_forced_text_tool(
+                forced_text_tool,
+                content,
+                response_identity=response_id,
+            )
+        except ValueError as exc:
+            raise ResponsesProtocolError(str(exc)) from exc
+        tool_calls = [tool_call]
+        state.output_items = [item for item in state.output_items if item.get("type") == "reasoning"]
+        state.output_items.append(synthetic_item)
+        content = None
     content = rescue_empty_turn(content, tool_calls, reasoning)
     if not content and not tool_calls:
-        raise ResponsesEmptyOutputError(
-            "response.completed contained no message or function call"
-        )
+        raise ResponsesEmptyOutputError("response.completed contained no message or function call")
     return LLMResponse(
         content=content,
         tool_calls=tool_calls,
-        usage=_parse_usage(state.completed_response, messages, content, tool_calls),
+        usage=parse_responses_usage(
+            state.completed_response,
+            messages,
+            content,
+            tool_calls,
+        ),
         finish_reason="tool_calls" if tool_calls else "stop",
         reasoning=reasoning,
         provider_items=state.output_items,
@@ -676,6 +656,7 @@ def parse_responses_response(
     messages: list[dict[str, Any]],
     *,
     expected_model: str,
+    forced_text_tool: ForcedTextTool | None = None,
 ) -> LLMResponse:
     """Parse one completed non-streaming Responses object."""
     _validate_completed_response(response, expected_model)
@@ -686,7 +667,7 @@ def parse_responses_response(
     for item in output:
         event = type("OutputItemEvent", (), {"item": item, "output_index": len(state.output_items)})()
         _accept_output_item(event, state)
-    return _parse_stream(state, messages, expected_model)
+    return _parse_stream(state, messages, expected_model, forced_text_tool)
 
 
 async def complete_responses(
@@ -710,6 +691,8 @@ async def complete_responses(
     stream: bool = True,
 ) -> LLMResponse:
     """Run one locally replayable Responses request and require typed completion."""
+    converted_tools = _responses_tools(tools)
+    forced_text_tool = _forced_text_tool(model, converted_tools, tool_choice)
     kwargs = _build_request_kwargs(
         model,
         messages,
@@ -727,7 +710,12 @@ async def complete_responses(
         if not stream:
             kwargs["stream"] = False
             response = await client.responses.create(**kwargs)
-            return parse_responses_response(response, messages, expected_model=model)
+            return parse_responses_response(
+                response,
+                messages,
+                expected_model=model,
+                forced_text_tool=forced_text_tool,
+            )
 
         state = await _create_and_consume_stream(
             client,
@@ -736,7 +724,7 @@ async def complete_responses(
             stream_idle_timeout,
             model,
         )
-        return _parse_stream(state, messages, model)
+        return _parse_stream(state, messages, model, forced_text_tool)
 
     if provider_error_time_budget is not None:
 
@@ -746,9 +734,7 @@ async def complete_responses(
             try:
                 return await asyncio.wait_for(request_once(), timeout=round_timeout)
             except asyncio.TimeoutError as exc:
-                raise TransientProviderError(
-                    f"Responses request timeout after {round_timeout:g}s"
-                ) from exc
+                raise TransientProviderError(f"Responses request timeout after {round_timeout:g}s") from exc
 
         return await with_retry(
             bounded_request_once,
@@ -764,6 +750,4 @@ async def complete_responses(
             return await run()
         return await asyncio.wait_for(run(), timeout=round_timeout)
     except asyncio.TimeoutError as exc:
-        raise ResponsesProtocolError(
-            f"Responses round deadline exceeded after {round_timeout:g}s"
-        ) from exc
+        raise ResponsesProtocolError(f"Responses round deadline exceeded after {round_timeout:g}s") from exc

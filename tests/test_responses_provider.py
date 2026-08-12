@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 from responses_provider_test_support import (
@@ -23,18 +24,21 @@ from opencollab.adapters.llm.responses_provider import (
     complete_responses,
     parse_responses_response,
 )
+from opencollab.application.structured_output import StructuredOutputTool
 
 
 @pytest.mark.asyncio
 async def test_stream_text_requires_matching_completed_output():
     item = message_item("OK")
     response = completed_response(output=[item])
-    stream = FakeStream([
-        ns(type="response.created"),
-        ns(type="response.output_text.delta", delta="OK", output_index=0),
-        ns(type="response.output_item.done", output_index=0, item=item),
-        ns(type="response.completed", response=response),
-    ])
+    stream = FakeStream(
+        [
+            ns(type="response.created"),
+            ns(type="response.output_text.delta", delta="OK", output_index=0),
+            ns(type="response.output_item.done", output_index=0, item=item),
+            ns(type="response.completed", response=response),
+        ]
+    )
 
     state = await _consume_stream(stream, 1, 1)
     parsed = _parse_stream(
@@ -57,18 +61,20 @@ async def test_stream_text_requires_matching_completed_output():
 async def test_stream_aggregates_multiple_tool_calls_and_validates_arguments():
     first = function_item("call_1", "read_file", '{"path":"a.py"}')
     second = function_item("call_2", "read_file", '{"path":"b.py"}')
-    stream = FakeStream([
-        ns(type="response.function_call_arguments.delta", output_index=0, delta='{"path":'),
-        ns(type="response.function_call_arguments.delta", output_index=0, delta='"a.py"}'),
-        ns(
-            type="response.function_call_arguments.done",
-            output_index=0,
-            arguments='{"path":"a.py"}',
-        ),
-        ns(type="response.output_item.done", output_index=0, item=first),
-        ns(type="response.output_item.done", output_index=1, item=second),
-        ns(type="response.completed", response=completed_response(output=[first, second])),
-    ])
+    stream = FakeStream(
+        [
+            ns(type="response.function_call_arguments.delta", output_index=0, delta='{"path":'),
+            ns(type="response.function_call_arguments.delta", output_index=0, delta='"a.py"}'),
+            ns(
+                type="response.function_call_arguments.done",
+                output_index=0,
+                arguments='{"path":"a.py"}',
+            ),
+            ns(type="response.output_item.done", output_index=0, item=first),
+            ns(type="response.output_item.done", output_index=1, item=second),
+            ns(type="response.completed", response=completed_response(output=[first, second])),
+        ]
+    )
 
     state = await _consume_stream(stream, 1, 1)
     parsed = _parse_stream(state, [{"role": "user", "content": "Read both"}], "gpt-fake")
@@ -80,10 +86,12 @@ async def test_stream_aggregates_multiple_tool_calls_and_validates_arguments():
 @pytest.mark.asyncio
 async def test_stream_rejects_duplicate_call_id():
     call = function_item("duplicate", "read_file", "{}")
-    stream = FakeStream([
-        ns(type="response.output_item.done", output_index=0, item=call),
-        ns(type="response.output_item.done", output_index=1, item=call),
-    ])
+    stream = FakeStream(
+        [
+            ns(type="response.output_item.done", output_index=0, item=call),
+            ns(type="response.output_item.done", output_index=1, item=call),
+        ]
+    )
 
     with pytest.raises(ResponsesProtocolError, match="duplicate function_call"):
         await _consume_stream(stream, 1, 1)
@@ -97,12 +105,14 @@ async def test_stream_rejects_missing_completion_and_unknown_events():
         await _consume_stream(FakeStream([ns(type="response.future_event")]), 1, 1)
     with pytest.raises(ResponsesProtocolError, match="provider rejected request"):
         await _consume_stream(
-            FakeStream([
-                ns(
-                    type="error",
-                    error={"code": "bad_request", "message": "provider rejected request"},
-                )
-            ]),
+            FakeStream(
+                [
+                    ns(
+                        type="error",
+                        error={"code": "bad_request", "message": "provider rejected request"},
+                    )
+                ]
+            ),
             1,
             1,
         )
@@ -144,13 +154,15 @@ async def test_transient_stream_failure_reissues_without_replaying_partial_items
             if calls == 1:
                 return BrokenStream()
             item = message_item("recovered")
-            return FakeStream([
-                ns(type="response.output_item.done", output_index=0, item=item),
-                ns(
-                    type="response.completed",
-                    response=completed_response(output=[item]),
-                ),
-            ])
+            return FakeStream(
+                [
+                    ns(type="response.output_item.done", output_index=0, item=item),
+                    ns(
+                        type="response.completed",
+                        response=completed_response(output=[item]),
+                    ),
+                ]
+            )
 
     result = await complete_responses(
         ns(responses=Responses()),
@@ -170,13 +182,15 @@ async def test_transient_stream_failure_reissues_without_replaying_partial_items
 @pytest.mark.asyncio
 async def test_clean_premature_eof_retries_and_discards_partial_items(monkeypatch):
     calls = 0
-    first = FakeStream([
-        ns(
-            type="response.output_item.done",
-            output_index=0,
-            item=function_item("abandoned", "write_file", '{"path":"old"}'),
-        )
-    ])
+    first = FakeStream(
+        [
+            ns(
+                type="response.output_item.done",
+                output_index=0,
+                item=function_item("abandoned", "write_file", '{"path":"old"}'),
+            )
+        ]
+    )
 
     async def skip_delay(_seconds):
         return None
@@ -190,10 +204,12 @@ async def test_clean_premature_eof_retries_and_discards_partial_items(monkeypatc
             if calls == 1:
                 return first
             item = message_item("recovered")
-            return FakeStream([
-                ns(type="response.output_item.done", output_index=0, item=item),
-                ns(type="response.completed", response=completed_response(output=[item])),
-            ])
+            return FakeStream(
+                [
+                    ns(type="response.output_item.done", output_index=0, item=item),
+                    ns(type="response.completed", response=completed_response(output=[item])),
+                ]
+            )
 
     result = await complete_responses(
         ns(responses=Responses()),
@@ -227,16 +243,20 @@ async def test_completed_empty_output_retries_entire_request(monkeypatch, stream
             if calls == 1:
                 if not stream:
                     return completed_response()
-                return FakeStream([
-                    ns(type="response.completed", response=completed_response()),
-                ])
+                return FakeStream(
+                    [
+                        ns(type="response.completed", response=completed_response()),
+                    ]
+                )
             item = message_item("recovered")
             if not stream:
                 return completed_response(output=[item])
-            return FakeStream([
-                ns(type="response.output_item.done", output_index=0, item=item),
-                ns(type="response.completed", response=completed_response(output=[item])),
-            ])
+            return FakeStream(
+                [
+                    ns(type="response.output_item.done", output_index=0, item=item),
+                    ns(type="response.completed", response=completed_response(output=[item])),
+                ]
+            )
 
     result = await complete_responses(
         ns(responses=Responses()),
@@ -265,9 +285,11 @@ async def test_completed_empty_output_exhausts_retry_budget(monkeypatch):
         async def create(self, **_kwargs):
             nonlocal calls
             calls += 1
-            return FakeStream([
-                ns(type="response.completed", response=completed_response()),
-            ])
+            return FakeStream(
+                [
+                    ns(type="response.completed", response=completed_response()),
+                ]
+            )
 
     with pytest.raises(ResponsesEmptyOutputError, match="no message or function call"):
         await complete_responses(
@@ -295,10 +317,12 @@ async def test_completed_empty_output_exhausts_retry_budget(monkeypatch):
     ],
 )
 async def test_stream_rejects_invalid_completed_terminal(response, match):
-    stream = FakeStream([
-        ns(type="response.output_item.done", output_index=0, item=message_item("unsafe")),
-        ns(type="response.completed", response=response),
-    ])
+    stream = FakeStream(
+        [
+            ns(type="response.output_item.done", output_index=0, item=message_item("unsafe")),
+            ns(type="response.completed", response=response),
+        ]
+    )
     with pytest.raises(ResponsesProtocolError, match=match):
         await _consume_stream(stream, 1, 1, "gpt-fake")
 
@@ -342,18 +366,22 @@ async def test_typed_transient_error_event_retries_request(monkeypatch):
             nonlocal calls
             calls += 1
             if calls == 1:
-                return FakeStream([
-                    ns(
-                        type="error",
-                        code="server_error",
-                        message="temporary upstream failure",
-                    )
-                ])
+                return FakeStream(
+                    [
+                        ns(
+                            type="error",
+                            code="server_error",
+                            message="temporary upstream failure",
+                        )
+                    ]
+                )
             item = message_item("recovered")
-            return FakeStream([
-                ns(type="response.output_item.done", output_index=0, item=item),
-                ns(type="response.completed", response=completed_response(output=[item])),
-            ])
+            return FakeStream(
+                [
+                    ns(type="response.output_item.done", output_index=0, item=item),
+                    ns(type="response.completed", response=completed_response(output=[item])),
+                ]
+            )
 
     result = await complete_responses(
         ns(responses=Responses()),
@@ -372,13 +400,15 @@ async def test_typed_transient_error_event_retries_request(monkeypatch):
 async def test_stream_accepts_provider_resolved_model_alias():
     item = message_item("done")
     state = await _consume_stream(
-        FakeStream([
-            ns(type="response.output_item.done", output_index=0, item=item),
-            ns(
-                type="response.completed",
-                response=completed_response(output=[item], model="other-model"),
-            ),
-        ]),
+        FakeStream(
+            [
+                ns(type="response.output_item.done", output_index=0, item=item),
+                ns(
+                    type="response.completed",
+                    response=completed_response(output=[item], model="other-model"),
+                ),
+            ]
+        ),
         1,
         1,
         "gpt-fake",
@@ -394,13 +424,15 @@ async def test_stream_rejects_final_output_drift():
     streamed = message_item("streamed")
     final = message_item("different")
     state = await _consume_stream(
-        FakeStream([
-            ns(type="response.output_item.done", output_index=0, item=streamed),
-            ns(
-                type="response.completed",
-                response=completed_response(output=[final]),
-            ),
-        ]),
+        FakeStream(
+            [
+                ns(type="response.output_item.done", output_index=0, item=streamed),
+                ns(
+                    type="response.completed",
+                    response=completed_response(output=[final]),
+                ),
+            ]
+        ),
         1,
         1,
         "gpt-fake",
@@ -431,10 +463,12 @@ async def test_stream_rejects_bad_json_and_incomplete_argument_fragments():
         )
     with pytest.raises(ResponsesProtocolError, match="incomplete tool arguments"):
         await _consume_stream(
-            FakeStream([
-                ns(type="response.function_call_arguments.delta", output_index=0, delta="{"),
-                ns(type="response.completed", response=completed_response()),
-            ]),
+            FakeStream(
+                [
+                    ns(type="response.function_call_arguments.delta", output_index=0, delta="{"),
+                    ns(type="response.completed", response=completed_response()),
+                ]
+            ),
             1,
             1,
         )
@@ -499,11 +533,13 @@ async def test_response_header_timeout_retries_the_same_request():
             if calls == 1:
                 await asyncio.sleep(10)
             item = message_item("OK")
-            return FakeStream([
-                ns(type="response.created"),
-                ns(type="response.output_item.done", output_index=0, item=item),
-                ns(type="response.completed", response=completed_response(output=[item])),
-            ])
+            return FakeStream(
+                [
+                    ns(type="response.created"),
+                    ns(type="response.output_item.done", output_index=0, item=item),
+                    ns(type="response.completed", response=completed_response(output=[item])),
+                ]
+            )
 
     result = await complete_responses(
         ns(responses=Responses()),
@@ -557,11 +593,13 @@ def test_item_replay_binds_function_call_output_to_original_call_id():
         {"role": "user", "content": "Find the number."},
         {
             "role": "assistant",
-            "tool_calls": [{
-                "id": "call_exact",
-                "type": "function",
-                "function": {"name": "get_number", "arguments": '{"name":"answer"}'},
-            }],
+            "tool_calls": [
+                {
+                    "id": "call_exact",
+                    "type": "function",
+                    "function": {"name": "get_number", "arguments": '{"name":"answer"}'},
+                }
+            ],
             "response_items": [reasoning, function],
         },
         {"role": "tool", "tool_call_id": "call_exact", "content": "42"},
@@ -606,17 +644,19 @@ def test_item_replay_rejects_orphan_and_duplicate_call_ids(messages, match):
 
 
 def test_item_replay_rejects_tool_call_identity_drift():
-    messages = [{
-        "role": "assistant",
-        "tool_calls": [{
-            "id": "call_exact",
-            "type": "function",
-            "function": {"name": "get_number", "arguments": '{"name":"changed"}'},
-        }],
-        "response_items": [
-            function_item("call_exact", "get_number", '{"name":"answer"}')
-        ],
-    }]
+    messages = [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "call_exact",
+                    "type": "function",
+                    "function": {"name": "get_number", "arguments": '{"name":"changed"}'},
+                }
+            ],
+            "response_items": [function_item("call_exact", "get_number", '{"name":"answer"}')],
+        }
+    ]
     with pytest.raises(ResponsesProtocolError, match="response_items disagree"):
         _messages_to_input(messages)
 
@@ -628,19 +668,21 @@ def test_request_maps_instructions_tools_reasoning_and_sampling():
             {"role": "system", "content": "You are a coder."},
             {"role": "user", "content": "Fix it."},
         ],
-        [{
-            "type": "function",
-            "function": {
-                "name": "write_file",
-                "description": "Write one file.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"path": {"type": "string"}},
-                    "required": ["path"],
+        [
+            {
+                "type": "function",
+                "function": {
+                    "name": "write_file",
+                    "description": "Write one file.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                        "required": ["path"],
+                    },
+                    "strict": True,
                 },
-                "strict": True,
-            },
-        }],
+            }
+        ],
         1.0,
         tool_choice={"type": "function", "function": {"name": "write_file"}},
         top_p=0.95,
@@ -662,22 +704,208 @@ def test_request_maps_instructions_tools_reasoning_and_sampling():
 
 
 @pytest.mark.parametrize("model", ["deepseek-v4-flash", "deepseek-v4-flash-0731"])
-def test_deepseek_flash_degrades_forced_tool_choice_to_auto(model):
+def test_deepseek_flash_binds_structured_output_with_json_schema(model):
+    schema = {
+        "type": "object",
+        "properties": {"status": {"type": "string", "enum": ["ok"]}},
+        "required": ["status"],
+        "additionalProperties": False,
+    }
     kwargs = _build_request_kwargs(
         model,
         [{"role": "user", "content": "Use the tool."}],
-        [{
-            "type": "function",
-            "function": {
-                "name": "write_file",
-                "parameters": {"type": "object", "properties": {}},
-            },
-        }],
+        [
+            {
+                "type": "function",
+                "function": {
+                    "name": "structured_output",
+                    "description": "Return the result.",
+                    "parameters": schema,
+                },
+            }
+        ],
+        1.0,
+        tool_choice={"type": "function", "function": {"name": "structured_output"}},
+    )
+
+    assert "tools" not in kwargs
+    assert "tool_choice" not in kwargs
+    assert kwargs["text"] == {
+        "format": {
+            "type": "json_schema",
+            "name": "structured_output",
+            "description": "Return the result.",
+            "schema": schema,
+            "strict": True,
+        }
+    }
+
+
+@pytest.mark.parametrize("model", ["k3", "kimi-for-coding"])
+def test_models_without_verified_json_schema_support_keep_auto_tool_choice(model):
+    kwargs = _build_request_kwargs(
+        model,
+        [{"role": "user", "content": "Use the tool."}],
+        [
+            {
+                "type": "function",
+                "function": {
+                    "name": "write_file",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ],
         1.0,
         tool_choice={"type": "function", "function": {"name": "write_file"}},
     )
 
     assert kwargs["tool_choice"] == "auto"
+    assert "text" not in kwargs
+
+
+def test_deepseek_flash_auto_multi_tool_request_is_unchanged():
+    tools = [
+        {
+            "type": "function",
+            "function": {"name": name, "parameters": {"type": "object"}},
+        }
+        for name in ("read_file", "grep")
+    ]
+
+    kwargs = _build_request_kwargs(
+        "deepseek-v4-flash",
+        [{"role": "user", "content": "Inspect the code."}],
+        tools,
+        1.0,
+        tool_choice="auto",
+    )
+
+    assert [tool["name"] for tool in kwargs["tools"]] == ["read_file", "grep"]
+    assert kwargs["tool_choice"] == "auto"
+    assert "text" not in kwargs
+
+
+def test_deepseek_flash_other_named_single_tool_keeps_legacy_auto_fallback():
+    kwargs = _build_request_kwargs(
+        "deepseek-v4-flash",
+        [{"role": "user", "content": "Submit findings."}],
+        [
+            {
+                "type": "function",
+                "function": {
+                    "name": "submit_findings",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ],
+        1.0,
+        tool_choice={
+            "type": "function",
+            "function": {"name": "submit_findings"},
+        },
+    )
+
+    assert kwargs["tool_choice"] == "auto"
+    assert kwargs["tools"][0]["name"] == "submit_findings"
+    assert "text" not in kwargs
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [True, False])
+async def test_json_schema_text_projects_to_valid_structured_output_tool_call(stream):
+    schema = {
+        "type": "object",
+        "properties": {"status": {"type": "string", "enum": ["ok"]}},
+        "required": ["status"],
+        "additionalProperties": False,
+    }
+    item = message_item('{"status":"ok"}')
+    terminal = completed_response(response_id="resp_schema", output=[item])
+
+    class Responses:
+        async def create(self, **kwargs):
+            assert kwargs["text"]["format"]["schema"] == schema
+            assert "tools" not in kwargs
+            assert "tool_choice" not in kwargs
+            if not stream:
+                return terminal
+            return FakeStream(
+                [
+                    ns(type="response.output_item.done", output_index=0, item=item),
+                    ns(type="response.completed", response=terminal),
+                ]
+            )
+
+    result = await complete_responses(
+        ns(responses=Responses()),
+        "deepseek-v4-flash",
+        [{"role": "user", "content": "Return the result."}],
+        [
+            {
+                "type": "function",
+                "function": {
+                    "name": "structured_output",
+                    "description": "Return the result.",
+                    "parameters": schema,
+                },
+            }
+        ],
+        1.0,
+        0,
+        tool_choice={
+            "type": "function",
+            "function": {"name": "structured_output"},
+        },
+        stream=stream,
+    )
+
+    assert result.content is None
+    assert result.finish_reason == "tool_calls"
+    assert len(result.tool_calls) == 1
+    assert result.provider_items[-1]["type"] == "function_call"
+    arguments = json.loads(result.tool_calls[0]["function"]["arguments"])
+    capture = StructuredOutputTool(schema)
+    await capture.execute_with_runtime(arguments, None)  # type: ignore[arg-type]
+    assert capture.captured == {"status": "ok"}
+
+
+@pytest.mark.asyncio
+async def test_json_schema_text_rejects_incomplete_response():
+    class Responses:
+        async def create(self, **_kwargs):
+            return FakeStream(
+                [
+                    ns(
+                        type="response.incomplete",
+                        response=completed_response(
+                            status="incomplete",
+                            incomplete_details={"reason": "max_output_tokens"},
+                        ),
+                    )
+                ]
+            )
+
+    with pytest.raises(ResponsesProtocolError, match="max_output_tokens"):
+        await complete_responses(
+            ns(responses=Responses()),
+            "deepseek-v4-flash",
+            [{"role": "user", "content": "Return the result."}],
+            [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "structured_output",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            ],
+            1.0,
+            0,
+            tool_choice={
+                "type": "function",
+                "function": {"name": "structured_output"},
+            },
+        )
 
 
 def test_prompt_cache_key_is_stable_within_one_run_and_isolated_between_runs():

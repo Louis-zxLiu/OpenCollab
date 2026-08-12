@@ -133,6 +133,7 @@ class ModelCapabilities:
 
     context_window: int | None = None
     supports_forced_tool_choice: bool = True
+    supports_responses_json_schema: bool = False
     honors_workflow_thinking_override: bool = True
 
 
@@ -158,6 +159,7 @@ _EXACT_MODEL_CAPABILITIES: dict[str, ModelCapabilities] = {
     "deepseek-v4-flash": ModelCapabilities(
         context_window=128_000,
         supports_forced_tool_choice=False,
+        supports_responses_json_schema=True,
     ),
     "k3": ModelCapabilities(
         context_window=1_048_576,

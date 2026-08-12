@@ -64,7 +64,7 @@ def _build_request_kwargs(
     temperature: float,
     thinking: bool = False,
     thinking_params: dict | None = None,
-    tool_choice: str | None = None,
+    tool_choice: Any = None,
     top_p: float | None = None,
     max_output_tokens: int | None = None,
 ) -> dict[str, Any]:
@@ -350,7 +350,7 @@ async def complete_openai(
     max_retries: int,
     thinking: bool = False,
     thinking_params: dict | None = None,
-    tool_choice: str | None = None,
+    tool_choice: Any = None,
     top_p: float | None = None,
     max_output_tokens: int | None = None,
     provider_error_time_budget: RetryTimeBudget | None = None,

@@ -270,7 +270,7 @@ class WorkflowSessionFactoryPort(Protocol):
         tools: Sequence[Any] | None = None,
         isolation: bool = False,
         label: str | None = None,
-        tool_choice: str | None = None,
+        tool_choice: Any = None,
         thinking: bool | None = None,
     ) -> Any:
         ...    # ``thinking`` None -> factory default; False -> force reasoning off.
@@ -405,7 +405,7 @@ class LLMPort(Protocol):
         thinking: bool = False,
         thinking_params: dict[str, Any] | None = None,
         reasoning_effort: str | None = None,
-        tool_choice: str | None = None,
+        tool_choice: Any = None,
         top_p: float | None = None,
         max_output_tokens: int | None = None,
         response_session_id: str | None = None,

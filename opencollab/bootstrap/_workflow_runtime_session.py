@@ -132,15 +132,17 @@ class WorkflowSessionFactory:
         tools: Sequence[Any] | None = None,
         isolation: bool = False,
         label: str | None = None,
-        tool_choice: str | None = None,
+        tool_choice: Any = None,
         thinking: bool | None = None,
     ) -> Any:
         if isolation:
             raise ValueError("workflow agent isolation is not available")
         use_thinking = self._thinking if thinking is None else thinking
+        use_reasoning_effort = None if thinking is False else self._reasoning_effort
         capabilities = model_capabilities(self._model)
         if self._thinking and not capabilities.honors_workflow_thinking_override:
             use_thinking = True
+            use_reasoning_effort = self._reasoning_effort
         agent = Agent(
             name="workflow_agent",
             system_prompt=self._system_prompt,
@@ -156,7 +158,7 @@ class WorkflowSessionFactory:
             context_window=self._context_window,
             thinking=use_thinking,
             thinking_params=self._thinking_params,
-            reasoning_effort=self._reasoning_effort,
+            reasoning_effort=use_reasoning_effort,
             llm_max_retries=self._llm_max_retries,
             llm_connect_timeout=self._llm_connect_timeout,
             llm_first_event_timeout=self._llm_first_event_timeout,

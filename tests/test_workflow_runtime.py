@@ -30,10 +30,12 @@ def test_workflow_runtime_public_module_uses_plain_reexports():
     assert workflow_runtime.WorkflowSessionFactory is workflow_session.WorkflowSessionFactory
     assert workflow_runtime.build_workflow_context is workflow_session.build_workflow_context
 
+
 def test_build_workflow_context_returns_context(monkeypatch):
     _patch_build_session(monkeypatch)
     ctx = workflow_runtime.build_workflow_context(cfg=_cfg())
     assert isinstance(ctx, WorkflowContext)
+
 
 @pytest.mark.asyncio
 async def test_built_context_agent_runs_session_with_resolved_llm(monkeypatch):
@@ -87,12 +89,32 @@ def test_concrete_factory_rejects_unsupported_isolation_before_building_session(
     assert calls == []
 
 
+def test_explicit_thinking_false_disables_responses_reasoning_effort(monkeypatch):
+    _patch_build_session(monkeypatch)
+    factory = workflow_runtime.WorkflowSessionFactory(
+        model="deepseek-v4-flash",
+        provider="openai",
+        wire_protocol="responses",
+        api_key="fake",  # pragma: allowlist secret
+        base_url="https://example.test",
+        reasoning_effort="xhigh",
+    )
+
+    default_session = factory.build_workflow_session(prompt="analyze", budget=100_000)
+    corrective_session = factory.build_workflow_session(
+        prompt="commit",
+        budget=100_000,
+        thinking=False,
+    )
+
+    assert default_session.agent.reasoning_effort == "xhigh"
+    assert corrective_session.agent.reasoning_effort is None
+
+
 @pytest.mark.asyncio
 async def test_built_context_injects_sampling_and_output_limits(monkeypatch):
     calls = _patch_build_session(monkeypatch)
-    ctx = workflow_runtime.build_workflow_context(
-        cfg=_cfg(temperature=1.0, top_p=1.0, max_output_tokens=32_768)
-    )
+    ctx = workflow_runtime.build_workflow_context(cfg=_cfg(temperature=1.0, top_p=1.0, max_output_tokens=32_768))
 
     await ctx.agent("solve")
 
@@ -105,9 +127,7 @@ async def test_built_context_injects_sampling_and_output_limits(monkeypatch):
 @pytest.mark.asyncio
 async def test_built_context_preserves_explicit_empty_thinking_params(monkeypatch):
     calls = _patch_build_session(monkeypatch)
-    ctx = workflow_runtime.build_workflow_context(
-        cfg=_cfg(thinking=True, thinking_params={})
-    )
+    ctx = workflow_runtime.build_workflow_context(cfg=_cfg(thinking=True, thinking_params={}))
 
     await ctx.agent("solve")
 
@@ -132,17 +152,17 @@ async def test_built_context_threads_session_limits_and_system_prompt(monkeypatc
         "Evaluation system prompt",
     ]
 
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model", ["k3", "kimi-for-coding"])
 async def test_kimi_global_thinking_applies_to_fast_structured_roles(monkeypatch, model):
     calls = _patch_build_session(monkeypatch)
-    ctx = workflow_runtime.build_workflow_context(
-        cfg=_cfg(model=model, provider="openai", thinking=True)
-    )
+    ctx = workflow_runtime.build_workflow_context(cfg=_cfg(model=model, provider="openai", thinking=True))
 
     await ctx.agent("solve", thinking=False)
 
     assert calls[0]["agent"].thinking is True
+
 
 @pytest.mark.asyncio
 async def test_other_models_can_disable_thinking_for_fast_roles(monkeypatch):
@@ -155,6 +175,7 @@ async def test_other_models_can_disable_thinking_for_fast_roles(monkeypatch):
 
     assert calls[0]["agent"].thinking is False
 
+
 @pytest.mark.asyncio
 async def test_built_context_threads_caller_tools(monkeypatch):
     calls = _patch_build_session(monkeypatch)
@@ -165,6 +186,7 @@ async def test_built_context_threads_caller_tools(monkeypatch):
 
     # The caller's tools become the one-shot agent's toolset.
     assert sentinel_tool in calls[0]["agent"].tools
+
 
 @pytest.mark.asyncio
 async def test_run_workflow_invokes_fn_with_context_and_args(monkeypatch):
@@ -213,9 +235,7 @@ async def test_run_workflow_aggregates_session_metrics(monkeypatch):
 
     def fake_build_session(*, agent, **_kwargs):
         session = _FakeSession(agent, agent.tools)
-        session.used_tokens, session.step_count, session.markup_recovered = values[
-            fake_build_session.calls
-        ]
+        session.used_tokens, session.step_count, session.markup_recovered = values[fake_build_session.calls]
         fake_build_session.calls += 1
         return session
 
@@ -240,6 +260,7 @@ async def test_run_workflow_aggregates_session_metrics(monkeypatch):
     assert details.steps == 5
     assert details.markup_recovered == 3
 
+
 @pytest.mark.asyncio
 async def test_run_workflow_accepts_a_workflow_spec(monkeypatch):
     _patch_build_session(monkeypatch)
@@ -249,10 +270,9 @@ async def test_run_workflow_accepts_a_workflow_spec(monkeypatch):
     async def fn(ctx, args):
         return "spec-ran"
 
-    result = await workflow_runtime.run_workflow(
-        fn.__workflow_spec__, {}, cfg=_cfg()
-    )
+    result = await workflow_runtime.run_workflow(fn.__workflow_spec__, {}, cfg=_cfg())
     assert result == "spec-ran"
+
 
 @pytest.mark.asyncio
 async def test_run_workflow_returns_structured_budget_exceeded(monkeypatch):
@@ -276,6 +296,7 @@ async def test_run_workflow_returns_structured_budget_exceeded(monkeypatch):
     assert result["budget_total"] == 40
     # No session spent anything in this fn, so the live snapshot is 0.
     assert result["tokens_spent"] == 0
+
 
 @pytest.mark.asyncio
 async def test_run_workflow_reports_live_spend_on_budget_exceeded(monkeypatch):
@@ -329,6 +350,7 @@ async def test_run_workflow_marks_collection_budget_exhaustion_stopped(
     assert details.stop_reason == "budget_exceeded"
     assert details.output["status"] == "budget_exceeded"
 
+
 @pytest.mark.asyncio
 async def test_run_workflow_other_exceptions_propagate(monkeypatch):
     """Only WorkflowBudgetExceeded is caught; everything else still raises."""
@@ -339,6 +361,7 @@ async def test_run_workflow_other_exceptions_propagate(monkeypatch):
 
     with pytest.raises(RuntimeError, match="boom"):
         await workflow_runtime.run_workflow(fn, {}, cfg=_cfg())
+
 
 @pytest.mark.parametrize(
     "cleanup_timeout",
@@ -370,6 +393,7 @@ async def test_run_workflow_rejects_invalid_cleanup_timeout_before_side_effects(
         )
     assert built is False
 
+
 @pytest.mark.asyncio
 async def test_no_save_dir_keeps_sessions_ephemeral(monkeypatch):
     """Without a save_dir, build_session gets auto_save_path=None (no autosave)."""
@@ -380,6 +404,7 @@ async def test_no_save_dir_keeps_sessions_ephemeral(monkeypatch):
     await ctx.agent("two")
 
     assert [c["auto_save_path"] for c in calls] == [None, None]
+
 
 @pytest.mark.asyncio
 async def test_save_dir_threads_sequential_per_session_paths(monkeypatch, tmp_path):
@@ -395,6 +420,7 @@ async def test_save_dir_threads_sequential_per_session_paths(monkeypatch, tmp_pa
         os.path.join(save_dir, "000.json"),
         os.path.join(save_dir, "001.json"),
     ]
+
 
 @pytest.mark.asyncio
 async def test_save_dir_slugs_agent_label_into_filename(monkeypatch, tmp_path):
@@ -415,6 +441,7 @@ async def test_save_dir_slugs_agent_label_into_filename(monkeypatch, tmp_path):
         os.path.join(save_dir, "000_analyst.json"),
         os.path.join(save_dir, "001_coder-s1r2.json"),
     ]
+
 
 def test_slug_sanitizes_and_caps_labels():
     assert slug_label("coder:s1r2") == "coder-s1r2"

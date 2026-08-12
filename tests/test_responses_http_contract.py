@@ -209,3 +209,80 @@ async def test_real_http_stream_replays_reasoning_function_call_and_output(monke
         "call_id": "call_exact",
         "output": "42",
     }
+
+
+@pytest.mark.asyncio
+async def test_real_http_deepseek_named_tool_uses_json_schema_text_binding():
+    schema = {
+        "type": "object",
+        "required": ["findings"],
+        "properties": {
+            "findings": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["path", "summary"],
+                    "properties": {
+                        "path": {"type": "string"},
+                        "summary": {"type": "string"},
+                    },
+                },
+            }
+        },
+    }
+    message = {
+        "id": "msg_schema",
+        "type": "message",
+        "role": "assistant",
+        "status": "completed",
+        "content": [
+            {
+                "type": "output_text",
+                "text": '{"findings":[{"path":"a.py","summary":"ok"}]}',
+                "annotations": [],
+            }
+        ],
+    }
+    scripts = [[
+        {"type": "response.created", "sequence_number": 0, "response": _response("resp_schema")},
+        _item_event(message, 0),
+        _completed_event("resp_schema", 2, [message]),
+    ]]
+    with fake_responses_server(scripts) as (base_url, requests):
+        client = LLMClient(
+            model="deepseek-v4-flash",
+            api_key="fake-key",  # pragma: allowlist secret
+            base_url=base_url,
+            wire_protocol="responses",
+            max_retries=0,
+            request_timeout=5,
+            first_event_timeout=2,
+            stream_idle_timeout=2,
+        )
+        result = await client.complete(
+            [{"role": "user", "content": "Return findings."}],
+            tools=[{
+                "type": "function",
+                "function": {
+                    "name": "structured_output",
+                    "description": "Return the findings.",
+                    "parameters": schema,
+                },
+            }],
+            temperature=1.0,
+            tool_choice={
+                "type": "function",
+                "function": {"name": "structured_output"},
+            },
+        )
+        await client.close()
+
+    request = requests[0]
+    assert request["text"]["format"]["schema"] == schema
+    assert request["text"]["format"]["strict"] is True
+    assert "tools" not in request
+    assert "tool_choice" not in request
+    assert "reasoning" not in request
+    assert result.content is None
+    assert result.tool_calls[0]["function"]["name"] == "structured_output"
+    assert result.provider_items[-1]["type"] == "function_call"

@@ -11,6 +11,7 @@ def ns(**values: Any) -> SimpleNamespace:
 
 def completed_response(
     *,
+    response_id: str = "resp_test",
     output: list[dict[str, Any]] | None = None,
     status: str = "completed",
     error: Any = None,
@@ -18,6 +19,7 @@ def completed_response(
     model: str = "gpt-fake",
 ) -> SimpleNamespace:
     return ns(
+        id=response_id,
         status=status,
         error=error,
         incomplete_details=incomplete_details,

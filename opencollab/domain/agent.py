@@ -7,6 +7,7 @@ Agent holds NO state. State lives in Session.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 from opencollab.domain.identity import validate_role_identity
 from opencollab.domain.tools import (
@@ -60,7 +61,7 @@ class Agent:
     llm_connect_timeout: float = 30.0
     llm_first_event_timeout: float = 180.0
     llm_stream_idle_timeout: float = 180.0
-    tool_choice: str | None = None
+    tool_choice: Any = None
     llm_max_retries: int = 3
     provider_error_time_budget: float = 0.0
 

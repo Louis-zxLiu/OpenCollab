@@ -23,7 +23,7 @@ class WorkflowContext(Protocol):
         tools: Sequence[Tool] | None = None,
         budget: int | None = None,
         timeout: float | None = None,
-        tool_choice: str | None = None,
+        tool_choice: Any = None,
         thinking: bool | None = None,
         over_budget_ok: bool = False,
     ) -> str | dict[str, Any] | None: ...
