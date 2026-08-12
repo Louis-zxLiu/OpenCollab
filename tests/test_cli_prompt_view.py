@@ -21,6 +21,8 @@ from opencollab.adapters.cli.prompt_view import (
     build_agent_navigation_bindings,
     build_agent_prompt,
 )
+from opencollab.application.scheduler_types import SchedulerTurnError
+from opencollab.domain.session import SessionPhase
 
 
 class _FakeTUI:
@@ -319,3 +321,44 @@ async def test_repl_routes_input_to_selected_agent(monkeypatch):
     await cli_main._repl_loop(tui, handle_turn, object())
 
     assert calls == [(2, "message selected agent")]
+
+
+@pytest.mark.asyncio
+async def test_repl_reports_stopped_turn_and_accepts_next_input(monkeypatch):
+    tui = _FakeTUI()
+    tui.selected_aid = 2
+    lines = iter(["first", "second", None])
+    monkeypatch.setattr(
+        cli_main,
+        "_read_command",
+        lambda *_args, **_kwargs: asyncio.sleep(0, result=next(lines)),
+    )
+    printed: list[str] = []
+    monkeypatch.setattr(
+        cli_main,
+        "console",
+        SimpleNamespace(print=lambda value: printed.append(str(value))),
+    )
+    calls: list[tuple[int, str]] = []
+
+    async def handle_turn(line: str, aid: int) -> None:
+        calls.append((aid, line))
+        if line == "first":
+            raise SchedulerTurnError(
+                aid,
+                SessionPhase.STOPPED,
+                "token budget exhausted",
+                "partial answer",
+            )
+
+    dividers: list[None] = []
+    tui.print_turn_divider = lambda: dividers.append(None)
+
+    await cli_main._repl_loop(tui, handle_turn, object())
+
+    assert calls == [(2, "first"), (2, "second")]
+    assert printed == [
+        "partial answer",
+        "Agent 2 stopped: token budget exhausted",
+    ]
+    assert len(dividers) == 2

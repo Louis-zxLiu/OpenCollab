@@ -44,6 +44,7 @@ from opencollab.adapters.safe_files import read_regular_text
 from opencollab.adapters.tui.theme import BRAND_VIOLET
 from opencollab.application.async_timeout import run_with_bounded_shutdown
 from opencollab.application.exception_notes import add_exception_note
+from opencollab.application.scheduler_types import SchedulerTurnError
 
 app = typer.Typer(
     name="opencollab",
@@ -292,7 +293,21 @@ async def _repl_loop(tui: Any, handle_turn, lead: Any, bottom_toolbar: Any = Non
         except KeyError:
             pass
         target_aid = tui.selected_aid
-        result = await handle_turn(line, target_aid)
+        try:
+            result = await handle_turn(line, target_aid)
+        except SchedulerTurnError as exc:
+            if exc.partial_answer:
+                console.print(exc.partial_answer)
+            reason = exc.terminal_reason or exc.phase.value
+            style = "yellow" if exc.phase.value == "stopped" else "red"
+            console.print(
+                Text(
+                    f"Agent {exc.aid} {exc.phase.value}: {reason}",
+                    style=style,
+                )
+            )
+            tui.print_turn_divider()
+            continue
         if result is False:
             break
         tui.print_turn_divider()
