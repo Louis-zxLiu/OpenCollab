@@ -26,6 +26,7 @@ from opencollab.application._session_run_shared import (
     _submit_tool_choice,
     _TokenBudgetStop,
 )
+from opencollab.application._session_run_usage import _normalize_completion_usage
 from opencollab.application.events import SessionEventFactory, default_session_event_factory
 from opencollab.application.ports import (
     EventPublisherPort,
@@ -34,6 +35,7 @@ from opencollab.application.ports import (
     TracePort,
 )
 from opencollab.application.tool_execution import ToolExecutionUseCase
+from opencollab.domain.events import SessionRuntimeEvent
 from opencollab.domain.session import SessionPhase, SessionState
 
 __all__ = [
@@ -53,31 +55,6 @@ __all__ = [
     "_WIND_DOWN_NUDGE",
     "_WIND_DOWN_RETRY",
 ]
-
-
-def _nonnegative_usage_int(value: Any, field: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise ValueError(f"provider usage {field} must be a non-negative integer")
-    return value
-
-
-def _normalize_completion_usage(usage: Any) -> tuple[int, int]:
-    """Validate provider counters atomically and prevent total undercharging."""
-    input_tokens = _nonnegative_usage_int(
-        getattr(usage, "input_tokens", None),
-        "input_tokens",
-    )
-    reported_total = _nonnegative_usage_int(
-        getattr(usage, "total_tokens", None),
-        "total_tokens",
-    )
-    raw_output = getattr(usage, "output_tokens", None)
-    output_tokens = (
-        max(0, reported_total - input_tokens)
-        if raw_output is None
-        else _nonnegative_usage_int(raw_output, "output_tokens")
-    )
-    return input_tokens, max(reported_total, input_tokens + output_tokens)
 
 
 class SessionRunUseCase(_SessionRunCompletionMixin):
@@ -227,13 +204,29 @@ class SessionRunUseCase(_SessionRunCompletionMixin):
         except BaseException:
             pass
 
-    def _record_late_provider_result(self, task: asyncio.Future[Any]) -> None:
+    def _mark_budget_reserve_consumed(self, *, protected_call: bool | None = None) -> None:
+        """Keep late and ordinary protected-call accounting on one invariant."""
+        if protected_call is None:
+            protected_call = self.state.wind_down_done
+        if (
+            protected_call
+            and self.state.used_tokens >= self.max_budget_tokens - self._commit_reserve
+        ):
+            self.state.budget_reserve_consumed = True
+
+    def _record_late_provider_result(
+        self,
+        task: asyncio.Future[Any],
+        *,
+        protected_call: bool = False,
+    ) -> None:
         """Charge a provider response that survived cancellation after timeout."""
         try:
             response = task.result()
             _input_tokens, total_tokens = _normalize_completion_usage(response.usage)
             self._late_provider_usage += (total_tokens,)
             self.state.add_used_tokens(total_tokens)
+            self._mark_budget_reserve_consumed(protected_call=protected_call)
         except BaseException:
             pass
         finally:
@@ -496,8 +489,25 @@ class SessionRunUseCase(_SessionRunCompletionMixin):
         brake = budget_spent or watchdog_tripped or low_yield_tripped
         if not brake or not self.state.pending_events.is_empty():
             return False
+        if budget_spent and self.state.budget_reserve_consumed:
+            await self._stop_precheck(
+                "budget reserve exhausted: protected commit turn already used"
+            )
+            return True
 
         self._trace_brake_trip(budget_spent, watchdog_tripped, low_yield_tripped)
+        if budget_spent:
+            self.state.budget_reserve_consumed = True
+            await self.event_publisher.emit(
+                SessionRuntimeEvent(
+                    type="budget_reserve_allocated",
+                    data={
+                        "aid": self.state.aid,
+                        "used_tokens": self.state.used_tokens,
+                        "reserve": self._commit_reserve,
+                    },
+                )
+            )
         self._enter_wind_down()
         self.state.transition_to(SessionPhase.CALLING_LLM)
         return True
@@ -575,6 +585,7 @@ class SessionRunUseCase(_SessionRunCompletionMixin):
         latency = time.monotonic() - start
         input_tokens, total_tokens = _normalize_completion_usage(response.usage)
         self.state.add_used_tokens(total_tokens)
+        self._mark_budget_reserve_consumed()
         self.state.add_markup_recovered(getattr(response.usage, "markup_recovered", 0))
         self.state.set_context_tokens(input_tokens)
 
