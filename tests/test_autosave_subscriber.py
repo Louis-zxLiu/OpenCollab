@@ -5,13 +5,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
 import time
 
 import pytest
 
 # Reuse the fakes from the characterization test file (same tests/ directory,
 # added to sys.path by pytest's rootdir discovery).
-from test_session_characterization import FakeAgent, FakeLLMClient
+from test_session_characterization import FakeAgent, FakeLLMClient, llm_response
 
 from opencollab.adapters.storage import SessionStore
 from opencollab.application.autosave import SAVE_TRIGGERS, AutoSaveSubscriber
@@ -175,6 +176,17 @@ class _CountingSessionStore(SessionStore):
         return super()._append_journal_record(path, record)
 
 
+class _SwitchableCheckpointStore(SessionStore):
+    def __init__(self, error: Exception):
+        self.error = error
+        self.fail_checkpoint = False
+
+    def checkpoint_snapshot(self, *args, **kwargs):
+        if self.fail_checkpoint:
+            raise self.error
+        return super().checkpoint_snapshot(*args, **kwargs)
+
+
 @pytest.mark.parametrize("trigger", sorted(SAVE_TRIGGERS))
 def test_autosave_journal_recovers_every_trigger_with_linear_write_growth(
     tmp_path,
@@ -335,6 +347,192 @@ def test_session_with_auto_save_path_writes_on_user_message(tmp_path):
     assert path.exists()
     contents = path.read_text()
     assert "hello" in contents
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_phase"),
+    [("done", "done"), ("stopped", "stopped"), ("error", "error")],
+)
+def test_terminal_phase_is_committed_by_final_autosave(
+    tmp_path, mode, expected_phase
+):
+    class TerminalLLM:
+        async def complete(self, **_kwargs):
+            if isinstance(response, Exception):
+                raise response
+            return response
+
+    path = tmp_path / f"{mode}.json"
+    response = (
+        RuntimeError("provider failed")
+        if mode == "error"
+        else llm_response(content="done")
+    )
+    session = Session(
+        agent=FakeAgent(),
+        llm=TerminalLLM(),
+        auto_save_path=str(path),
+        max_budget_tokens=500,
+    )
+    asyncio.run(session.add_user_message("go"))
+    if mode == "stopped":
+        session.state.set_used_tokens(500)
+
+    if mode == "error":
+        with pytest.raises(RuntimeError, match="provider failed"):
+            asyncio.run(session.run_loop())
+    else:
+        asyncio.run(session.run_loop())
+
+    snapshot = json.loads(path.read_text(encoding="utf-8"))
+    assert snapshot["session_state"]["phase"] == expected_phase
+
+
+def test_terminal_checkpoint_failure_does_not_mask_provider_error(tmp_path):
+    provider_error = RuntimeError("provider failed")
+    checkpoint_error = OSError("checkpoint failed")
+
+    class FailingLLM:
+        async def complete(self, **_kwargs):
+            raise provider_error
+
+    async def scenario():
+        store = _SwitchableCheckpointStore(checkpoint_error)
+        session = Session(
+            agent=FakeAgent(),
+            llm=FailingLLM(),
+            auto_save_path=str(tmp_path / "provider-error.json"),
+            store=store,
+        )
+        await session.add_user_message("go")
+        if session.pending_cleanup_tasks:
+            await asyncio.gather(*session.pending_cleanup_tasks)
+        store.fail_checkpoint = True
+
+        with pytest.raises(RuntimeError, match="provider failed") as caught:
+            await session.run_loop()
+
+        assert caught.value is provider_error
+        assert any(
+            "terminal checkpoint also failed: OSError: checkpoint failed" in note
+            for note in getattr(caught.value, "__notes__", ())
+        )
+        assert session.persistence_errors == (checkpoint_error,)
+
+    asyncio.run(scenario())
+
+
+def test_terminal_checkpoint_failure_does_not_mask_cancellation(tmp_path):
+    cancellation = asyncio.CancelledError("caller cancelled")
+    checkpoint_error = OSError("checkpoint failed")
+
+    async def scenario():
+        store = _SwitchableCheckpointStore(checkpoint_error)
+        session = Session(
+            agent=FakeAgent(),
+            llm=FakeLLMClient(),
+            auto_save_path=str(tmp_path / "cancelled.json"),
+            store=store,
+        )
+        await session.add_user_message("go")
+        if session.pending_cleanup_tasks:
+            await asyncio.gather(*session.pending_cleanup_tasks)
+        store.fail_checkpoint = True
+
+        async def cancelled_runner(_cancel_event=None):
+            session.state.cancel("caller cancelled")
+            raise cancellation
+
+        session.runner.run_loop = cancelled_runner
+        with pytest.raises(asyncio.CancelledError) as caught:
+            await session.run_loop()
+
+        assert caught.value is cancellation
+        assert any(
+            "terminal checkpoint also failed: OSError: checkpoint failed" in note
+            for note in getattr(caught.value, "__notes__", ())
+        )
+        assert session.persistence_errors == (checkpoint_error,)
+
+    asyncio.run(scenario())
+
+
+def test_terminal_checkpoint_failure_surfaces_without_primary_error(tmp_path):
+    checkpoint_error = OSError("checkpoint failed")
+
+    class CompletingLLM:
+        async def complete(self, **_kwargs):
+            return llm_response(content="done")
+
+    async def scenario():
+        store = _SwitchableCheckpointStore(checkpoint_error)
+        session = Session(
+            agent=FakeAgent(),
+            llm=CompletingLLM(),
+            auto_save_path=str(tmp_path / "completed.json"),
+            store=store,
+        )
+        await session.add_user_message("go")
+        if session.pending_cleanup_tasks:
+            await asyncio.gather(*session.pending_cleanup_tasks)
+        store.fail_checkpoint = True
+
+        with pytest.raises(OSError, match="checkpoint failed") as caught:
+            await session.run_loop()
+
+        assert caught.value is checkpoint_error
+        assert session.persistence_errors == (checkpoint_error,)
+
+    asyncio.run(scenario())
+
+
+def test_cancelling_terminal_checkpoint_waits_for_owned_write(tmp_path):
+    class BlockingCheckpointStore(SessionStore):
+        def __init__(self):
+            self.block_checkpoint = False
+            self.checkpoint_started = threading.Event()
+            self.release_checkpoint = threading.Event()
+
+        def checkpoint_snapshot(self, *args, **kwargs):
+            if self.block_checkpoint:
+                self.checkpoint_started.set()
+                if not self.release_checkpoint.wait(timeout=2):
+                    raise TimeoutError("test checkpoint was not released")
+            return super().checkpoint_snapshot(*args, **kwargs)
+
+    class CompletingLLM:
+        async def complete(self, **_kwargs):
+            return llm_response(content="done")
+
+    async def scenario():
+        store = BlockingCheckpointStore()
+        path = tmp_path / "cancel-during-checkpoint.json"
+        session = Session(
+            agent=FakeAgent(),
+            llm=CompletingLLM(),
+            auto_save_path=str(path),
+            store=store,
+        )
+        await session.add_user_message("go")
+        if session.pending_cleanup_tasks:
+            await asyncio.gather(*session.pending_cleanup_tasks)
+        session._next_auto_save_checkpoint = 1_000
+        store.block_checkpoint = True
+
+        run_task = asyncio.create_task(session.run_loop())
+        assert await asyncio.to_thread(store.checkpoint_started.wait, 1)
+        run_task.cancel()
+        await asyncio.sleep(0)
+        assert not run_task.done()
+        store.release_checkpoint.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await run_task
+        assert not session.pending_cleanup_tasks
+        snapshot = json.loads(path.read_text(encoding="utf-8"))
+        assert snapshot["session_state"]["phase"] == "done"
+
+    asyncio.run(scenario())
 
 
 def test_session_without_auto_save_path_does_not_subscribe():

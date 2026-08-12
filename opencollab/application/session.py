@@ -7,8 +7,10 @@ import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable
 
+from opencollab.application.async_timeout import await_owned_operation
 from opencollab.application.autosave import AutoSaveSubscriber
 from opencollab.application.event_bus import EventBus
+from opencollab.application.exception_notes import add_exception_note
 from opencollab.application.ports import (
     EnvironmentPort,
     JournalSnapshotStorePort,
@@ -20,6 +22,15 @@ from opencollab.application.ports import (
     TracePort,
 )
 from opencollab.application.session_run import SessionRunUseCase
+from opencollab.application.session_snapshot import (
+    _restore_active_turn_start,
+    _restore_pending_row,
+    _restore_phase,
+    _restore_queued_external_user_turn,
+    _serialize_pending_row,
+    _snapshot_int,
+    _snapshot_nonnegative_int,
+)
 from opencollab.application.tool_execution import ToolExecutionUseCase
 from opencollab.domain.agent import Agent
 from opencollab.domain.events import SessionRuntimeEvent as SessionEvent
@@ -83,7 +94,8 @@ class Session:
         self._permission_policy = permission_policy
         self._safety_policy = safety_policy
         self._auto_save_path = auto_save_path
-        self._launch_applied = False
+        self._launch_state = "not_applied"
+        self._applied_launch: object | None = None
         # The public facade owns turn admission. The runner protects its own
         # cleanup, but callers can otherwise interleave a new message or a
         # second run with the same mutable FSM.
@@ -101,6 +113,7 @@ class Session:
         self._owns_llm = runtime.owns_llm
         self._llm_closed = False
         self._llm_close_error: BaseException | None = None
+        self._terminal_checkpoint_error: Exception | None = None
         self._auto_save_sequence = 0
         self._auto_save_message_count = 0
         self._auto_save_rewrite_from: int | None = 0
@@ -182,10 +195,15 @@ class Session:
     def persistence_errors(self) -> tuple[Exception, ...]:
         """Sticky subscriber persistence failures visible to run boundaries."""
         errors: list[Exception] = []
+        seen: set[int] = set()
         for subscriber in self.event_bus.subscribers:
             error = getattr(subscriber, "last_error", None)
-            if isinstance(error, Exception):
+            if isinstance(error, Exception) and id(error) not in seen:
                 errors.append(error)
+                seen.add(id(error))
+        error = self._terminal_checkpoint_error
+        if isinstance(error, Exception) and id(error) not in seen:
+            errors.append(error)
         return tuple(errors)
 
     async def aclose(self) -> None:
@@ -268,7 +286,54 @@ class Session:
         if self._turn_lock.locked() or self.runner.pending_cleanup_tasks:
             raise SessionBusyError("session already has an active turn")
         async with self._turn_lock:
-            return await self.runner.run_loop(cancel_event)
+            primary_error: BaseException | None = None
+            try:
+                return await self.runner.run_loop(cancel_event)
+            except BaseException as exc:
+                primary_error = exc
+                raise
+            finally:
+                try:
+                    await self._checkpoint_terminal_snapshot()
+                except Exception as checkpoint_error:
+                    if primary_error is None:
+                        raise
+                    add_exception_note(
+                        primary_error,
+                        "terminal checkpoint also failed: "
+                        f"{type(checkpoint_error).__name__}: {checkpoint_error}",
+                    )
+
+    async def _checkpoint_terminal_snapshot(self) -> None:
+        if not self.state.phase.is_terminal():
+            return
+        owner = self.enqueue_auto_save()
+        if owner is not None:
+            await await_owned_operation(
+                owner,
+                propagate_cancellation=True,
+            )
+        # Journal-backed autosave normally appends a delta. A terminal turn
+        # must also publish a self-contained base snapshot: callers and crash
+        # recovery may read the base file directly, without replaying its
+        # sidecar journal.
+        if (
+            not self._auto_save_path
+            or not isinstance(self.store, JournalSnapshotStorePort)
+        ):
+            return
+
+        async def checkpoint() -> None:
+            try:
+                await asyncio.to_thread(self.save, self._auto_save_path)
+            except Exception as exc:
+                self._terminal_checkpoint_error = exc
+                raise
+
+        await await_owned_operation(
+            checkpoint(),
+            propagate_cancellation=True,
+        )
 
     async def add_user_message(self, content: str) -> None:
         if (
@@ -281,6 +346,7 @@ class Session:
         async with self._turn_lock:
             self.state.append_queued_external_user_turn(content)
             self.state.reset_for_user_turn()
+            self.runner.reset_runtime_for_user_turn()
             await self.event_bus.emit(SessionEvent(type="user_message_appended"))
 
     def apply_launch(self, launch: "LaunchSpec") -> None:
@@ -292,23 +358,37 @@ class Session:
         re-truncated. The ongoing per-event ``AutoSaveSubscriber`` (wired at
         construction) is a separate concern and unaffected.
         """
-        if self._launch_applied:
+        if self._launch_state == "applied":
+            if launch != self._applied_launch:
+                raise ValueError(
+                    "session already applied a different launch specification"
+                )
             return
-        self._launch_applied = True
-        resumable = bool(
-            launch.session_file
-            and (
-                os.path.exists(launch.session_file)
-                or (
-                    isinstance(self.store, JournalSnapshotStorePort)
-                    and self.store.has_snapshot(launch.session_file)
+        if self._launch_state == "applying":
+            raise SessionBusyError("session launch persistence is already applying")
+
+        self._launch_state = "applying"
+        try:
+            resumable = bool(
+                launch.session_file
+                and (
+                    os.path.exists(launch.session_file)
+                    or (
+                        isinstance(self.store, JournalSnapshotStorePort)
+                        and self.store.has_snapshot(launch.session_file)
+                    )
                 )
             )
-        )
-        if launch.session_file and resumable:
-            self.restore(launch.session_file)
-        elif launch.auto_save_path:
-            self.save(launch.auto_save_path)
+            if launch.session_file and resumable:
+                self.restore(launch.session_file)
+            elif launch.auto_save_path:
+                self.save(launch.auto_save_path)
+        except BaseException:
+            self._launch_state = "not_applied"
+            raise
+        else:
+            self._applied_launch = launch
+            self._launch_state = "applied"
 
     def restore(self, path: str) -> None:
         """Restore a complete snapshot while accepting legacy message-only stores."""
@@ -368,6 +448,9 @@ class Session:
         )
         self.state.turn.reads_since_last_edit = _snapshot_nonnegative_int(
             raw_state.get("reads_since_last_edit")
+        )
+        self.state.turn.has_landed_write = bool(
+            raw_state.get("has_landed_write", False)
         )
         self.state.turn.low_yield_since_progress = _snapshot_nonnegative_int(
             raw_state.get("low_yield_since_progress")
@@ -430,14 +513,15 @@ class Session:
             # provider protocol; keeping the stale sidecar rows would make the
             # scheduler's quiescence check wait forever after the resumed turn.
             self.state.pending_events.clear()
-        self.state.terminal_reason = (
-            str(raw_state["terminal_reason"])
-            if raw_state.get("terminal_reason") is not None
-            else None
-        )
         if self.state.phase is SessionPhase.AWAITING_EVENTS and self.state.pending_events.is_empty():
             self.state.set_phase(SessionPhase.IDLE)
             self._append_restore_results_for_open_tool_calls()
+        self.state.terminal_reason = (
+            str(raw_state["terminal_reason"])
+            if self.state.phase.is_terminal()
+            and raw_state.get("terminal_reason") is not None
+            else None
+        )
         self._restore_auto_save_tracking(snapshot)
         self._checkpoint_restored_auto_save_target(path)
 
@@ -551,6 +635,7 @@ class Session:
                 "markup_recovered": self.state.markup_recovered,
                 "recent_call_hashes": list(self.state.turn.recent_call_hashes),
                 "reads_since_last_edit": self.state.turn.reads_since_last_edit,
+                "has_landed_write": self.state.turn.has_landed_write,
                 "low_yield_since_progress": self.state.turn.low_yield_since_progress,
                 "distinct_evidence_count": self.state.turn.distinct_evidence_count,
                 "seen_result_hashes": sorted(self.state.turn.seen_result_hashes),
@@ -649,130 +734,11 @@ class Session:
             self.save(self._auto_save_path)
 
 
-# Legacy phase strings from snapshots written before the Lane S1 terminal
-# collapse: the four graceful terminals folded into STOPPED and the pure-
-# transitional SCHEDULED was removed. Migrating them here keeps a pre-collapse
-# snapshot's disposition instead of silently degrading it to IDLE via the
-# unknown-value fallback.
-_LEGACY_TERMINAL_PHASES = frozenset(
-    {"cancelled", "budget_exceeded", "step_limit_exceeded", "context_overflow"}
-)
-
-
 def _same_snapshot_path(left: str | None, right: str | None) -> bool:
     if left is None or right is None:
         return False
     return os.path.normcase(os.path.abspath(os.fspath(left))) == os.path.normcase(
         os.path.abspath(os.fspath(right))
-    )
-
-
-def _restore_phase(raw: object) -> SessionPhase:
-    value = str(raw)
-    if value in _LEGACY_TERMINAL_PHASES:
-        return SessionPhase.STOPPED
-    if value == "scheduled":  # pre-collapse enqueue phase, now folded into IDLE
-        return SessionPhase.IDLE
-    try:
-        return SessionPhase(value)
-    except ValueError:
-        return SessionPhase.IDLE
-
-
-def _restore_queued_external_user_turn(
-    value: object, messages: list[dict[str, Any]]
-) -> dict[str, Any] | None:
-    """Validate a queued external turn against the restored transcript."""
-    if not isinstance(value, dict) or value.get("status") != "queued":
-        return None
-    content = value.get("content")
-    turn_id = value.get("turn_id")
-    index = value.get("message_index")
-    if (
-        not isinstance(content, str)
-        or not isinstance(turn_id, str)
-        or not turn_id
-        or isinstance(index, bool)
-        or not isinstance(index, int)
-        or not 0 <= index < len(messages)
-    ):
-        return None
-    message = messages[index]
-    if message.get("role") != "user" or message.get("content") != content:
-        return None
-    return {
-        "turn_id": turn_id,
-        "status": "queued",
-        "content": content,
-        "message_index": index,
-    }
-
-
-def _restore_active_turn_start(
-    value: object, messages: list[dict[str, Any]]
-) -> int | None:
-    """Return a valid suspended-turn answer boundary, else leave it unknown."""
-    if isinstance(value, bool) or not isinstance(value, int):
-        return None
-    return value if 0 <= value <= len(messages) else None
-
-
-def _snapshot_nonnegative_int(value: object) -> int:
-    try:
-        return max(0, int(value))
-    except (TypeError, ValueError, OverflowError):
-        return 0
-
-
-def _snapshot_int(value: object, *, default: int) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError, OverflowError):
-        return default
-
-
-def _serialize_pending_row(row: PendingRow) -> dict[str, object]:
-    return {
-        "tool_call_id": row.tool_call_id,
-        "kind": row.kind.value,
-        "order": row.order,
-        "ref": row.ref,
-        "status": row.status.value,
-        "result": row.result,
-        "error": row.error,
-        "started_at": row.started_at,
-        "finished_at": row.finished_at,
-    }
-
-
-def _restore_pending_row(value: object) -> PendingRow | None:
-    if not isinstance(value, dict):
-        return None
-    try:
-        tool_call_id = str(value["tool_call_id"])
-        kind = RowKind(str(value["kind"]))
-        status = RowStatus(str(value.get("status", RowStatus.PENDING.value)))
-        order = int(value["order"])
-    except (KeyError, TypeError, ValueError, OverflowError):
-        return None
-    result = value.get("result")
-    error = value.get("error")
-    finished_at = value.get("finished_at")
-    if status is RowStatus.PENDING:
-        status = RowStatus.FAILED
-        error = "deferred child interrupted by session restore"
-        result = error
-        finished_at = None
-    return PendingRow(
-        tool_call_id=tool_call_id,
-        kind=kind,
-        order=order,
-        ref=value.get("ref"),
-        status=status,
-        result=str(result) if result is not None else None,
-        error=str(error) if error is not None else None,
-        started_at=value.get("started_at"),
-        finished_at=finished_at,
     )
 
 
