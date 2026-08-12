@@ -193,7 +193,7 @@ def test_exact_model_capabilities_centralize_provider_compatibility(model, conte
 def test_deepseek_flash_declares_verified_responses_json_schema_support():
     capabilities = model_capabilities("gateway/deepseek-v4-flash-0731")
 
-    assert capabilities.context_window == 128_000
+    assert capabilities.context_window == 1_048_576
     assert capabilities.supports_forced_tool_choice is False
     assert capabilities.supports_responses_json_schema is True
 

@@ -157,7 +157,7 @@ MODEL_CONTEXT_WINDOWS: dict[str, int] = {
 
 _EXACT_MODEL_CAPABILITIES: dict[str, ModelCapabilities] = {
     "deepseek-v4-flash": ModelCapabilities(
-        context_window=128_000,
+        context_window=1_048_576,
         supports_forced_tool_choice=False,
         supports_responses_json_schema=True,
     ),
