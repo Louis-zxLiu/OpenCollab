@@ -27,6 +27,7 @@ from opencollab.adapters.safe_files import (
     ensure_directory_no_symlinks,
     read_regular_text,
 )
+from opencollab.adapters.storage import SessionStore
 from opencollab.adapters.trace import Tracer
 from opencollab.application.async_timeout import await_owned_operation
 from opencollab.application.exception_notes import add_exception_note
@@ -39,8 +40,8 @@ from opencollab.bootstrap.agent_runtime import (
 from opencollab.bootstrap.agent_runtime import (
     run_agent as _run_agent,
 )
-from opencollab.bootstrap.runtime_context import build_runtime_context
-from opencollab.bootstrap.scheduler_factory import build_scheduler
+from opencollab.bootstrap.config import resolve_thinking_params
+from opencollab.bootstrap.scheduler_factory import build_scheduler  # noqa: F401
 from opencollab.bootstrap.tool_registry import build_tools_for_role
 from opencollab.bootstrap.workflow_runtime import (
     WORKFLOW_AGENT_PROMPT,
@@ -57,7 +58,7 @@ DEFAULT_AGENT_SYSTEM_PROMPT = (
     "You are an autonomous software-engineering agent. Complete the user task, "
     "use the available tools when needed, and report the verified result."
 )
-DEFAULT_CLEANUP_TIMEOUT_SECONDS = 2.0
+DEFAULT_TEAM_CLEANUP_TIMEOUT_SECONDS = 10.0
 
 _ARTIFACT_CLAIM_FILENAME = ".opencollab-run"
 _ARTIFACT_CLAIM = b"claimed\n"
@@ -220,6 +221,30 @@ def _require_json_object(path: Path, description: str) -> dict[str, Any]:
     return value
 
 
+def _settle_programmatic_workflow_manifest(
+    artifacts: Path | None,
+    *,
+    cleanup_succeeded: bool,
+) -> BaseException | None:
+    """Promote or downgrade the manifest after the outer environment owner."""
+    if artifacts is None:
+        return None
+    path = artifacts / "workflow.json"
+    try:
+        manifest = _require_json_object(path, "workflow manifest")
+        if cleanup_succeeded:
+            manifest["evidence_complete"] = True
+        else:
+            manifest["status"] = "failed"
+            manifest["reason"] = "environment_cleanup_failed"
+            manifest["failure_type"] = "ProgrammaticLifecycleError"
+            manifest["evidence_complete"] = False
+        SessionStore().save_manifest(path, manifest)
+    except BaseException as exc:
+        return exc
+    return None
+
+
 def _require_agent_evidence(
     result: AgentRuntimeResult,
     artifacts: Path | None,
@@ -314,7 +339,7 @@ async def run_agent(
         temperature=config.get("temperature", 0.2),
         top_p=config.get("top_p"),
         thinking=config.get("thinking", False),
-        thinking_params=dict(config.get("thinking_params") or {}),
+        thinking_params=resolve_thinking_params(config.get("thinking_params")),
     )
     _claim_artifacts(artifacts)
     owned_environment = environment is None
@@ -477,6 +502,9 @@ async def run_workflow(
                 system_prompt=system_prompt or WORKFLOW_AGENT_PROMPT,
                 return_details=True,
                 cleanup_environment=owned_environment,
+                defer_manifest_completion=(
+                    owned_environment and artifacts is not None
+                ),
             )
         except WorkflowDeadlineExceeded as exc:
             bootstrap_stopped_environment = True
@@ -507,13 +535,34 @@ async def run_workflow(
                 propagate_cancellation=True,
             )
             if not cleaned:
-                raise ProgrammaticLifecycleError(
+                manifest_failure = _settle_programmatic_workflow_manifest(
+                    artifacts,
+                    cleanup_succeeded=False,
+                )
+                failure = ProgrammaticLifecycleError(
                     "workflow-owned environment cleanup failed"
                 )
+                if manifest_failure is not None:
+                    add_exception_note(
+                        failure,
+                        "workflow manifest downgrade also failed: "
+                        f"{type(manifest_failure).__name__}: {manifest_failure}",
+                    )
+                    raise failure from manifest_failure
+                raise failure
             environment_cleanup_quiesced = True
             environment_quiesced = True
 
     _verify_artifact_claim(artifacts)
+    if owned_environment and artifacts is not None:
+        manifest_failure = _settle_programmatic_workflow_manifest(
+            artifacts,
+            cleanup_succeeded=True,
+        )
+        if manifest_failure is not None:
+            raise ProgrammaticLifecycleError(
+                "workflow manifest finalization failed"
+            ) from manifest_failure
     if stopped_error is not None:
         details = stopped_error.result
         metrics = _workflow_metrics(
@@ -585,6 +634,39 @@ def _close_tracer(tracer: Tracer | None) -> BaseException | None:
     return None
 
 
+def _team_agent_failures(scheduler: Any) -> tuple[dict[str, Any], ...]:
+    """Return bounded, message-free summaries for terminal child agents."""
+    failures: list[dict[str, Any]] = []
+    entries = getattr(getattr(scheduler, "table", None), "entries", {})
+    for aid, scb in sorted(entries.items()):
+        if aid == 0:
+            continue
+        state = getattr(scb, "state", None)
+        phase = getattr(getattr(state, "phase", None), "value", None)
+        if phase not in {"error", "stopped"}:
+            continue
+        exception_type = "AgentFailure" if phase == "error" else "AgentStopped"
+        reason = getattr(state, "terminal_reason", None)
+        if phase == "error" and isinstance(reason, str) and ":" in reason:
+            candidate = reason.split(":", 1)[0].strip()
+            if (
+                candidate
+                and len(candidate) <= 128
+                and all(char.isalnum() or char in "._-" for char in candidate)
+            ):
+                exception_type = candidate
+        label = str(getattr(getattr(scb, "agent", None), "name", "agent"))[:240]
+        failures.append(
+            {
+                "label": label,
+                "exception_type": exception_type,
+                "status_code": None,
+                "provider_error_type": None,
+            }
+        )
+    return tuple(failures)
+
+
 async def run_team(
     *,
     prompt: str,
@@ -593,119 +675,31 @@ async def run_team(
     team_config_path: str | os.PathLike[str] | None,
     max_tokens: int,
     timeout: float | None,
+    cleanup_timeout: float = DEFAULT_TEAM_CLEANUP_TIMEOUT_SECONDS,
     artifacts: Path | None,
     trace: bool,
     use_worktrees: bool,
 ) -> ProgrammaticResult:
     """Run the scheduler regime once, including bounded team cleanup."""
-    _claim_artifacts(artifacts)
-    run_config = dict(config)
-    run_config["budget"] = max_tokens
-    context = build_runtime_context(workspace, run_config, trace=False)
-    if artifacts is not None and trace:
-        context.tracer = Tracer(
-            run_id="team",
-            output_dir=str(artifacts),
-            filename="trajectory.jsonl",
-        )
-    try:
-        scheduler = build_scheduler(
-            context,
-            use_worktrees=use_worktrees,
-            interactive=False,
-            auto_save=artifacts is not None,
-            team_config_path=team_config_path,
-            save_dir=artifacts,
-        )
-    except BaseException as exc:
-        tracer_failure = _close_tracer(context.tracer)
-        if tracer_failure is not None:
-            add_exception_note(
-                exc,
-                "team tracer close also failed: "
-                f"{type(tracer_failure).__name__}: {tracer_failure}",
-            )
-        raise
-    output: str | None = None
-    status: Literal["completed", "stopped", "failed"] = "completed"
-    reason: str | None = None
-    failure: BaseException | None = None
-    cancellation: asyncio.CancelledError | None = None
-    try:
-        try:
-            if timeout is None:
-                output = await scheduler.run(prompt)
-            else:
-                output = await asyncio.wait_for(scheduler.run(prompt), timeout=timeout)
-        except TimeoutError as exc:
-            status = "stopped"
-            reason = "timeout"
-            failure = exc
-        except asyncio.CancelledError as exc:
-            cancellation = exc
-        except Exception as exc:
-            status = "failed"
-            reason = str(exc) or type(exc).__name__
-            failure = exc
-        if status == "completed":
-            lead = scheduler.lead_session
-            phase = getattr(getattr(lead, "phase", None), "value", None)
-            terminal_reason = getattr(getattr(lead, "state", None), "terminal_reason", None)
-            if phase == "stopped":
-                status = "stopped"
-                reason = terminal_reason
-            elif phase == "error":
-                status = "failed"
-                reason = terminal_reason or "team failed"
-    finally:
-        cleanup_failure: BaseException | None = None
-        try:
-            await scheduler.cleanup(
-                cleanup_timeout=DEFAULT_CLEANUP_TIMEOUT_SECONDS
-            )
-        except BaseException as exc:
-            cleanup_failure = exc
-        tracer_failure = _close_tracer(context.tracer)
-        if cancellation is not None:
-            if cleanup_failure is not None:
-                add_exception_note(
-                    cancellation,
-                    "team cleanup also failed: "
-                    f"{type(cleanup_failure).__name__}: {cleanup_failure}"
-                )
-            if tracer_failure is not None:
-                add_exception_note(
-                    cancellation,
-                    "team trace also failed: "
-                    f"{type(tracer_failure).__name__}: {tracer_failure}"
-                )
-            raise cancellation
-        lifecycle_failure = cleanup_failure or tracer_failure
-        if lifecycle_failure is not None:
-            raise ProgrammaticLifecycleError(
-                "team cleanup or trajectory persistence failed"
-            ) from lifecycle_failure
+    from opencollab.bootstrap.programmatic_team import run_team as _run_team
 
-    _verify_artifact_claim(artifacts)
-    if artifacts is not None:
-        _require_json_object(artifacts / "team.json", "team manifest")
-    lead = scheduler.lead_session
-    return ProgrammaticResult(
-        output=output,
-        status=status,
-        reason=reason,
-        tokens=scheduler.used_tokens,
+    return await _run_team(
+        prompt=prompt,
+        config=config,
+        workspace=workspace,
+        team_config_path=team_config_path,
+        max_tokens=max_tokens,
+        timeout=timeout,
+        cleanup_timeout=cleanup_timeout,
         artifacts=artifacts,
-        error=failure,
-        metrics={
-            "steps": int(getattr(lead, "step_count", 0)),
-            "sessions": len(scheduler.table.entries),
-        },
+        trace=trace,
+        use_worktrees=use_worktrees,
     )
 
 
 __all__ = [
     "DEFAULT_AGENT_SYSTEM_PROMPT",
+    "DEFAULT_TEAM_CLEANUP_TIMEOUT_SECONDS",
     "ProgrammaticLifecycleError",
     "ProgrammaticResult",
     "attach_container",

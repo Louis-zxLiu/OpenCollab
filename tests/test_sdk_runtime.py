@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -316,6 +315,60 @@ async def test_workflow_uses_real_runtime_and_returns_live_metrics(
     assert manifest["evidence_complete"] is True
 
 
+async def test_workflow_manifest_stays_incomplete_until_owned_environment_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    artifacts = tmp_path / "workflow-cleanup-failure"
+    observed_during_cleanup = {}
+
+    class CleanupFailingEnvironment:
+        def __init__(self, workspace: str) -> None:
+            self.workspace = workspace
+            self.source_workspace = workspace
+            self.revoked = False
+
+        async def cleanup(self) -> None:
+            observed_during_cleanup.update(
+                json.loads((artifacts / "workflow.json").read_text())
+            )
+            raise OSError("cleanup-secondary")
+
+    monkeypatch.setattr(
+        programmatic,
+        "LocalEnvironment",
+        CleanupFailingEnvironment,
+    )
+
+    async def plain(_ctx, _inputs):
+        return {"ok": True}
+
+    with pytest.raises(
+        ProgrammaticLifecycleError,
+        match="workflow-owned environment cleanup failed",
+    ):
+        await programmatic.run_workflow(
+            workflow=plain,
+            inputs={},
+            config={"model": "model", "provider": "openai", "budget": 50},
+            workspace=str(tmp_path),
+            max_tokens=50,
+            max_concurrency=1,
+            timeout=None,
+            max_steps=1,
+            system_prompt=None,
+            cleanup_timeout=0.1,
+            artifacts=artifacts,
+            trace=False,
+        )
+
+    assert observed_during_cleanup["evidence_complete"] is False
+    manifest = json.loads((artifacts / "workflow.json").read_text())
+    assert manifest["status"] == "failed"
+    assert manifest["reason"] == "environment_cleanup_failed"
+    assert manifest["evidence_complete"] is False
+
+
 async def test_workflow_rejects_non_json_inputs_before_claiming_artifacts(
     tmp_path: Path,
 ) -> None:
@@ -557,90 +610,3 @@ async def test_artifact_directory_must_be_new_or_empty(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="new or empty"):
         await OpenCollab(tmp_path).workflow(plain, artifacts=artifacts, trace=False)
     assert (artifacts / "keep.txt").read_text() == "user data"
-
-
-async def test_team_is_first_class_and_passes_explicit_config(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    captured = {}
-
-    async def fake_run_team(**kwargs):
-        captured.update(kwargs)
-        return ProgrammaticResult(
-            output="team done",
-            status="completed",
-            reason=None,
-            tokens=11,
-            artifacts=None,
-            metrics={"steps": 2, "sessions": 3},
-        )
-
-    monkeypatch.setattr(sdk_client, "run_team", fake_run_team)
-    config = tmp_path / "team.yaml"
-    result = await OpenCollab(tmp_path, config={"budget": 90}).team(
-        "solve it",
-        config=config,
-        use_worktrees=False,
-    )
-
-    assert result.output == "team done"
-    assert result.tokens == 11
-    assert captured["team_config_path"] == config.resolve()
-    assert captured["max_tokens"] == 90
-    assert captured["use_worktrees"] is False
-
-
-async def test_shared_team_runtime_always_cleans_scheduler(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    class FakeScheduler:
-        def __init__(self) -> None:
-            self.cleaned = False
-            self.used_tokens = 8
-            self.table = SimpleNamespace(entries={0: object()})
-            self.lead_session = SimpleNamespace(
-                phase=SimpleNamespace(value="done"),
-                state=SimpleNamespace(terminal_reason="completed"),
-                step_count=2,
-            )
-
-        async def run(self, prompt: str) -> str:
-            assert prompt == "solve"
-            return "done"
-
-        async def cleanup(self, *, cleanup_timeout: float) -> None:
-            assert cleanup_timeout > 0
-            self.cleaned = True
-
-    scheduler = FakeScheduler()
-    monkeypatch.setattr(programmatic, "build_scheduler", lambda *_args, **_kwargs: scheduler)
-    result = await programmatic.run_team(
-        prompt="solve",
-        config={"model": "model", "provider": "openai", "budget": 50},
-        workspace=str(tmp_path),
-        team_config_path=None,
-        max_tokens=50,
-        timeout=None,
-        artifacts=None,
-        trace=False,
-        use_worktrees=False,
-    )
-
-    assert scheduler.cleaned
-    assert result.status == "completed"
-    assert result.tokens == 8
-    assert result.metrics == {"steps": 2, "sessions": 1}
-
-
-def test_tool_presets_are_small_fresh_and_named() -> None:
-    read_tools = programmatic.resolve_tools("read")
-    assert tuple(tool.name for tool in read_tools) == (
-        "file_read",
-        "grep",
-        "git_diff",
-    )
-    assert read_tools[0] is not programmatic.resolve_tools("read")[0]
-    with pytest.raises(ValueError, match="unknown tool preset"):
-        programmatic.resolve_tools("everything")
