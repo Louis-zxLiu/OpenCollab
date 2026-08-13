@@ -183,8 +183,7 @@ async def test_non_git_copy_does_not_block_event_loop(tmp_path, monkeypatch) -> 
     timer = threading.Timer(0.15, release.set)
     timer.start()
     try:
-        await asyncio.sleep(0.02)
-        assert started.is_set()
+        assert await asyncio.to_thread(started.wait, 1.0)
         assert not owner.done()
     finally:
         release.set()
@@ -212,8 +211,7 @@ async def test_non_git_cleanup_does_not_block_event_loop(tmp_path, monkeypatch) 
     timer = threading.Timer(0.15, release.set)
     timer.start()
     try:
-        await asyncio.sleep(0.02)
-        assert started.is_set()
+        assert await asyncio.to_thread(started.wait, 1.0)
         assert not owner.done()
     finally:
         release.set()
