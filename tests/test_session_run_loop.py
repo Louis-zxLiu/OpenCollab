@@ -500,9 +500,10 @@ def test_run_loop_llm_step_events_trace_and_message_shape():
     assert tracer.steps[0] == {
         "step_type": "llm_call",
         "payload": {
-            "model": "fake-model",
-            "thinking": False,
-            "finish_reason": "tool_calls",
+                "model": "fake-model",
+                "thinking": False,
+                "reasoning_effort_policy": "configured",
+                "finish_reason": "tool_calls",
             "content": "need tool",
             "tool_calls": [{"id": "call-1", "name": "fake_tool", "arguments": '{"value": 1}'}],
             "usage": {
@@ -652,6 +653,32 @@ def test_llm_trace_records_effective_thinking_mode():
 
     llm_calls = [s for s in tracer.steps if s["step_type"] == "llm_call"]
     assert llm_calls[0]["payload"]["thinking"] is True
+
+
+def test_llm_trace_records_reasoning_effort_policy():
+    agent = FakeAgent()
+    agent.reasoning_effort = None
+    agent.reasoning_effort_policy = "suppressed"
+    tracer = FakeTracer()
+    runner = build_runner(agent=agent, tracer=tracer)
+
+    run(runner.run_loop())
+
+    llm_calls = [s for s in tracer.steps if s["step_type"] == "llm_call"]
+    assert llm_calls[0]["payload"]["reasoning_effort_policy"] == "suppressed"
+
+
+def test_llm_trace_records_verified_provider_model():
+    response = llm_response(content="answer")
+    response.provider_model = "gpt-verified"
+    tracer = FakeTracer()
+    runner = build_runner(llm=FakeLLM([response]), tracer=tracer)
+
+    run(runner.run_loop())
+
+    llm_calls = [step for step in tracer.steps if step["step_type"] == "llm_call"]
+    assert llm_calls[0]["payload"]["provider_model"] == "gpt-verified"
+
 
 def test_reasoning_is_preserved_in_assistant_tool_call_history():
     state = SessionState(messages=_convo())

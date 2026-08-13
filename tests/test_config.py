@@ -418,8 +418,16 @@ def test_foreign_provider_keys_do_not_satisfy_selected_provider(
 _ISOLATED_OUTPUT_ENV_NAMES = (
     "OPENCOLLAB_TOP_P",
     "OPENCOLLAB_MAX_OUTPUT_TOKENS",
+    "OPENCOLLAB_CONTEXT_WINDOW",
     "OPENCOLLAB_THINKING",
     "OPENCOLLAB_THINKING_PARAMS",
+    "OPENCOLLAB_WIRE_PROTOCOL",
+    "OPENCOLLAB_REASONING_EFFORT",
+    "OPENCOLLAB_LLM_MAX_RETRIES",
+    "OPENCOLLAB_LLM_CONNECT_TIMEOUT",
+    "OPENCOLLAB_LLM_FIRST_EVENT_TIMEOUT",
+    "OPENCOLLAB_LLM_STREAM_IDLE_TIMEOUT",
+    "OPENCOLLAB_PROVIDER_ERROR_TIME_BUDGET",
 )
 
 
@@ -455,4 +463,46 @@ def test_thinking_rejects_invalid_parameter_json(monkeypatch, raw):
     monkeypatch.setenv("OPENCOLLAB_THINKING_PARAMS", raw)
 
     with pytest.raises(Exception, match="OPENCOLLAB_THINKING_PARAMS"):
+        build_config()
+
+
+def test_responses_configuration_is_loaded_from_environment(monkeypatch):
+    monkeypatch.setenv("OPENCOLLAB_WIRE_PROTOCOL", "responses")
+    monkeypatch.setenv("OPENCOLLAB_REASONING_EFFORT", "xhigh")
+    monkeypatch.setenv("OPENCOLLAB_CONTEXT_WINDOW", "128000")
+    monkeypatch.setenv("OPENCOLLAB_LLM_MAX_RETRIES", "4")
+    monkeypatch.setenv("OPENCOLLAB_LLM_CONNECT_TIMEOUT", "12")
+    monkeypatch.setenv("OPENCOLLAB_LLM_FIRST_EVENT_TIMEOUT", "240")
+    monkeypatch.setenv("OPENCOLLAB_LLM_STREAM_IDLE_TIMEOUT", "90")
+    monkeypatch.setenv("OPENCOLLAB_PROVIDER_ERROR_TIME_BUDGET", "3600")
+
+    config = build_config()
+
+    assert config.wire_protocol == "responses"
+    assert config.reasoning_effort == "xhigh"
+    assert config.context_window == 128_000
+    assert config.llm_max_retries == 4
+    assert config.llm_connect_timeout == 12
+    assert config.llm_first_event_timeout == 240
+    assert config.llm_stream_idle_timeout == 90
+    assert config.provider_error_time_budget == 3600
+
+
+@pytest.mark.parametrize("value", ["none", "minimal", "low", "medium", "high", "xhigh", "max"])
+def test_responses_configuration_accepts_reasoning_effort(monkeypatch, value):
+    monkeypatch.setenv("OPENCOLLAB_REASONING_EFFORT", value)
+    assert build_config().reasoning_effort == value
+
+
+@pytest.mark.parametrize("value", ["responses-api", "auto", "unknown"])
+def test_unknown_wire_protocol_is_rejected(monkeypatch, value):
+    monkeypatch.setenv("OPENCOLLAB_WIRE_PROTOCOL", value)
+    with pytest.raises(ValueError, match="wire protocol"):
+        build_config()
+
+
+@pytest.mark.parametrize("value", ["ultra", "1"])
+def test_unknown_reasoning_effort_is_rejected(monkeypatch, value):
+    monkeypatch.setenv("OPENCOLLAB_REASONING_EFFORT", value)
+    with pytest.raises(ValueError, match="reasoning_effort"):
         build_config()

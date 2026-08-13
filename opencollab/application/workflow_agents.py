@@ -39,7 +39,7 @@ class WorkflowAgentsMixin:
         label: str | None,
         tools: Sequence[Any] | None,
         isolation: bool,
-        tool_choice: str | None,
+        tool_choice: Any,
         thinking: bool | None,
         timeout: float | None,
         budget: int | None,
