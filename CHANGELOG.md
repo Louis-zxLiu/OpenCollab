@@ -7,7 +7,7 @@ and the project aims to follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.5.0] - 2026-08-08
+## [0.5.0] - 2026-08-13
 
 ### Added
 - Added Mini Edict, a bilingual, tested Three Departments and Six Ministries
@@ -21,6 +21,9 @@ and the project aims to follow [Semantic Versioning](https://semver.org/).
 - Added `task_concurrency` to workflow runs and `cleanup_timeout` to team runs
   so callers can bound non-agent workflow units and scheduler shutdown
   independently.
+- Added a native OpenAI Responses API transport with typed streaming, encrypted
+  reasoning replay, exact function-call identity, structured-output projection,
+  provider usage accounting, and a shared provider-failure retry budget.
 
 ### Changed
 - Replaced changelog links that depended on the absent remote `v0.1.0` tag with
@@ -33,6 +36,8 @@ and the project aims to follow [Semantic Versioning](https://semver.org/).
   user turn while the hard budget and its protected reserve remain
   session-lifetime (with an allocation-time autosave), and useful partial
   compaction is retained.
+- DeepSeek V4 Flash model aliases now use the full 1,048,576-token context
+  window, and workflow calls can bind the supported `max` reasoning effort.
 
 ### Fixed
 - Capped structured-output corrective retries at 60 seconds while preserving
@@ -43,6 +48,9 @@ and the project aims to follow [Semantic Versioning](https://semver.org/).
 - Prevented truncated provider output, stale restored turns, unbounded teammate
   delivery, deferred-tool contract bypasses, and reviewer PASS results from
   masking failed or incomplete work.
+- Preserved Responses reasoning and function-call state across stateless tool
+  rounds while rejecting incomplete streams, mismatched terminal output, and
+  malformed or orphaned call identities.
 
 ## [0.4.1] - 2026-07-31
 
