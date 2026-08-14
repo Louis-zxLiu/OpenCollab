@@ -8,7 +8,14 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
-from opencollab.adapters.llm.errors import TransientEmptyOutputError, TransientProviderError
+from opencollab.adapters.llm.errors import TransientProviderError
+from opencollab.adapters.llm.responses_errors import (
+    ResponsesEmptyOutputError,
+    ResponsesProtocolError,
+    ResponsesStreamInterruptedError,
+    ResponsesTerminalEventError,
+    ResponsesTransientEventError,
+)
 from opencollab.adapters.llm.responses_structured import (
     ForcedTextTool,
     forced_text_format,
@@ -17,6 +24,12 @@ from opencollab.adapters.llm.responses_structured import (
 )
 from opencollab.adapters.llm.responses_usage import parse_responses_usage
 from opencollab.adapters.llm.retry import RetryTimeBudget, with_retry
+from opencollab.adapters.llm.tool_contracts import (
+    normalize_function_tools,
+    normalize_text_content,
+    normalize_tool_choice,
+    validate_tool_choice_target,
+)
 from opencollab.adapters.llm.types import (
     LLMResponse,
     model_capabilities,
@@ -48,22 +61,6 @@ _PASSIVE_EVENT_TYPES = frozenset(
 )
 
 
-class ResponsesProtocolError(RuntimeError):
-    """The Responses endpoint returned an incomplete or invalid event sequence."""
-
-
-class ResponsesEmptyOutputError(ResponsesProtocolError, TransientEmptyOutputError):
-    """A completed Responses request contained no usable assistant output."""
-
-
-class ResponsesStreamInterruptedError(ResponsesProtocolError, TransientProviderError):
-    """A Responses stream ended without its required terminal event."""
-
-
-class ResponsesTransientEventError(ResponsesProtocolError, TransientProviderError):
-    """A typed Responses error identified a temporary provider failure."""
-
-
 @dataclass
 class _StreamState:
     output_items: list[dict[str, Any]] = field(default_factory=list)
@@ -72,21 +69,10 @@ class _StreamState:
 
 
 def _message_text(content: Any) -> str:
-    if content is None:
-        return ""
-    if isinstance(content, str):
-        return content
-    if not isinstance(content, list):
-        return str(content)
-    parts: list[str] = []
-    for part in content:
-        if isinstance(part, str):
-            parts.append(part)
-        elif isinstance(part, dict):
-            text = part.get("text")
-            if isinstance(text, str):
-                parts.append(text)
-    return "\n".join(parts)
+    try:
+        return normalize_text_content(content)
+    except ValueError as exc:
+        raise ResponsesProtocolError(str(exc)) from exc
 
 
 def _validated_response_items(value: Any) -> list[dict[str, Any]]:
@@ -151,7 +137,10 @@ def _messages_to_input(messages: list[dict[str, Any]]) -> tuple[str | None, list
         if role == "system":
             text = _message_text(message.get("content"))
             if text:
-                instructions.append(text)
+                if message.get("compacted"):
+                    items.append({"role": "user", "content": text})
+                else:
+                    instructions.append(text)
             continue
         if role == "tool":
             call_id = message.get("tool_call_id")
@@ -210,36 +199,50 @@ def _messages_to_input(messages: list[dict[str, Any]]) -> tuple[str | None, list
 
 
 def _responses_tools(tools: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    try:
+        normalized_tools = normalize_function_tools(tools)
+    except ValueError as exc:
+        raise ResponsesProtocolError(str(exc)) from exc
     converted: list[dict[str, Any]] = []
-    for tool in tools or ():
-        function = tool.get("function") if isinstance(tool, dict) else None
-        if tool.get("type") != "function" or not isinstance(function, dict):
-            raise ResponsesProtocolError("Responses supports only OpenAI function tools")
+    for tool in normalized_tools:
+        function = tool["function"]
         item = {
             "type": "function",
-            "name": function.get("name"),
-            "parameters": function.get("parameters") or {"type": "object", "properties": {}},
+            "name": function["name"],
+            "parameters": function["parameters"],
         }
         if function.get("description") is not None:
             item["description"] = function["description"]
         if function.get("strict") is not None:
-            item["strict"] = bool(function["strict"])
+            item["strict"] = function["strict"]
         converted.append(item)
     return converted
 
 
-def _responses_tool_choice(value: Any) -> Any:
-    if value is None:
+def _responses_tool_choice(
+    value: Any,
+    converted_tools: list[dict[str, Any]],
+) -> Any:
+    try:
+        choice = normalize_tool_choice(value)
+        openai_tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": tool["name"],
+                    "parameters": tool["parameters"],
+                },
+            }
+            for tool in converted_tools
+        ]
+        validate_tool_choice_target(choice, openai_tools)
+    except ValueError as exc:
+        raise ResponsesProtocolError(str(exc)) from exc
+    if choice is None:
         return "auto"
-    if not isinstance(value, dict):
-        return value
-    function = value.get("function")
-    if value.get("type") == "function" and isinstance(function, dict):
-        name = function.get("name")
-        if not isinstance(name, str) or not name:
-            raise ResponsesProtocolError("function tool_choice is missing a name")
-        return {"type": "function", "name": name}
-    return value
+    if choice.mode == "named":
+        return {"type": "function", "name": choice.name}
+    return choice.mode
 
 
 def _forced_text_tool(
@@ -248,7 +251,7 @@ def _forced_text_tool(
     tool_choice: Any,
 ) -> ForcedTextTool | None:
     """Bind one named tool through ``text.format`` when forcing is unsupported."""
-    choice = _responses_tool_choice(tool_choice)
+    choice = _responses_tool_choice(tool_choice, converted_tools)
     try:
         return forced_text_tool(
             converted_tools,
@@ -287,13 +290,13 @@ def _build_request_kwargs(
     if instructions:
         kwargs["instructions"] = instructions
     converted_tools = _responses_tools(tools)
+    choice = _responses_tool_choice(tool_choice, converted_tools)
     if converted_tools:
         text_tool = _forced_text_tool(model, converted_tools, tool_choice)
         if text_tool is not None:
             kwargs["text"] = forced_text_format(text_tool)
         else:
             kwargs["tools"] = converted_tools
-            choice = _responses_tool_choice(tool_choice)
             if not model_capabilities(model).supports_forced_tool_choice and choice is not None and choice != "auto":
                 choice = "auto"
             kwargs["tool_choice"] = choice
@@ -376,31 +379,59 @@ def _accept_output_item(event: Any, state: _StreamState) -> None:
     state.output_items.append(item)
 
 
-def _validate_completed_response(response: Any, expected_model: str | None) -> str:
+def _validate_terminal_response(
+    response: Any,
+    expected_model: str | None,
+) -> tuple[str, str]:
     status = getattr(response, "status", None)
-    if status != "completed":
+    if status not in {"completed", "incomplete"}:
         raise ResponsesProtocolError(f"Responses request ended with status {status!r}")
     error = to_plain_data(getattr(response, "error", None))
     if error is not None:
-        raise ResponsesProtocolError(f"completed Responses object contains error {error!r}")
+        raise ResponsesProtocolError(f"terminal Responses object contains error {error!r}")
     incomplete = to_plain_data(getattr(response, "incomplete_details", None))
-    if incomplete is not None:
+    if status == "completed" and incomplete is not None:
         raise ResponsesProtocolError(f"completed Responses object contains incomplete details {incomplete!r}")
+    finish_reason = "stop"
+    if status == "incomplete":
+        reason = incomplete.get("reason") if isinstance(incomplete, dict) else None
+        if reason not in {"max_tokens", "max_output_tokens"}:
+            raise ResponsesProtocolError(
+                f"incomplete Responses object has unsupported reason {reason!r}"
+            )
+        finish_reason = "max_tokens"
     actual_model = getattr(response, "model", None)
     if not isinstance(actual_model, str) or not actual_model:
-        raise ResponsesProtocolError("completed Responses object is missing model identity")
-    return actual_model
+        raise ResponsesProtocolError("terminal Responses object is missing model identity")
+    return actual_model, finish_reason
 
 
 def _handle_event(event: Any, state: _StreamState, expected_model: str | None = None) -> bool:
     event_type = _event_type(event)
-    if event_type in {"error", "response.failed", "response.incomplete"}:
+    if event_type in {"error", "response.failed"}:
         error = _event_error_data(event)
         message = _event_error(event)
         code = error.get("code") if isinstance(error, dict) else None
         if code in {"rate_limit_exceeded", "server_error", "vector_store_timeout"}:
-            raise ResponsesTransientEventError(message)
-        raise ResponsesProtocolError(message)
+            status_code = 429 if code == "rate_limit_exceeded" else 503
+            raise ResponsesTransientEventError(
+                message,
+                code=code,
+                status_code=status_code,
+            )
+        status_code = 400 if code == "context_length_exceeded" else None
+        raise ResponsesTerminalEventError(
+            message,
+            code=code,
+            status_code=status_code,
+        )
+    if event_type == "response.incomplete":
+        response = getattr(event, "response", None)
+        if getattr(response, "status", None) != "incomplete":
+            raise ResponsesTerminalEventError(_event_error(event))
+        state.completed_response = response
+        _validate_terminal_response(response, expected_model)
+        return True
     if event_type == "response.function_call_arguments.delta":
         index = getattr(event, "output_index", None)
         delta = getattr(event, "delta", None)
@@ -424,7 +455,7 @@ def _handle_event(event: Any, state: _StreamState, expected_model: str | None = 
         state.completed_response = getattr(event, "response", None)
         if state.completed_response is None:
             raise ResponsesProtocolError("response.completed is missing the response object")
-        _validate_completed_response(state.completed_response, expected_model)
+        _validate_terminal_response(state.completed_response, expected_model)
         return True
     if event_type not in _PASSIVE_EVENT_TYPES:
         raise ResponsesProtocolError(f"unsupported Responses event {event_type!r}")
@@ -588,14 +619,26 @@ def _parse_stream(
     expected_model: str | None = None,
     forced_text_tool: ForcedTextTool | None = None,
 ) -> LLMResponse:
-    actual_model = _validate_completed_response(state.completed_response, expected_model)
+    actual_model, finish_reason = _validate_terminal_response(
+        state.completed_response,
+        expected_model,
+    )
+    if forced_text_tool is not None and finish_reason != "stop":
+        incomplete = to_plain_data(
+            getattr(state.completed_response, "incomplete_details", None)
+        )
+        raise ResponsesProtocolError(
+            f"JSON Schema tool response incomplete: {incomplete!r}"
+        )
     final_output = to_plain_data(getattr(state.completed_response, "output", None))
     final_items = _validated_response_items(final_output)
     if len(final_items) != len(state.output_items) or not all(
         _output_items_agree(streamed, terminal)
         for streamed, terminal in zip(state.output_items, final_items, strict=True)
     ):
-        raise ResponsesProtocolError("response.completed output disagrees with streamed output items")
+        raise ResponsesProtocolError(
+            "terminal Responses output disagrees with streamed output items"
+        )
     state.output_items = [
         _merge_terminal_projection(streamed, terminal)
         for streamed, terminal in zip(state.output_items, final_items, strict=True)
@@ -644,7 +687,9 @@ def _parse_stream(
             content,
             tool_calls,
         ),
-        finish_reason="tool_calls" if tool_calls else "stop",
+        finish_reason=(
+            "tool_calls" if tool_calls and finish_reason == "stop" else finish_reason
+        ),
         reasoning=reasoning,
         provider_items=state.output_items,
         provider_model=actual_model,
@@ -659,7 +704,7 @@ def parse_responses_response(
     forced_text_tool: ForcedTextTool | None = None,
 ) -> LLMResponse:
     """Parse one completed non-streaming Responses object."""
-    _validate_completed_response(response, expected_model)
+    _validate_terminal_response(response, expected_model)
     state = _StreamState(completed_response=response)
     output = to_plain_data(getattr(response, "output", None))
     if not isinstance(output, list):

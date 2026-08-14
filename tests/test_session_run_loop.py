@@ -714,7 +714,9 @@ def test_llm_trace_omits_reasoning_when_absent():
     llm_calls = [s for s in tracer.steps if s["step_type"] == "llm_call"]
     assert "reasoning" not in llm_calls[0]["payload"]
 
-@pytest.mark.parametrize("finish_reason", ["length", "max_tokens"])
+@pytest.mark.parametrize(
+    "finish_reason", ["length", "max_tokens", "model_context_window_exceeded"]
+)
 @pytest.mark.parametrize("content", [None, "partial answer"])
 def test_length_finish_reason_stops_with_partial_output(content, finish_reason):
     # A provider length stop is truncated regardless of whether it returned a

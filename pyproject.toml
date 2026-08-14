@@ -27,7 +27,7 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Application Frameworks",
 ]
 dependencies = [
-    "openai>=1.30",
+    "openai>=1.99.2",
     "anthropic>=0.78",
     "typer>=0.12",
     "rich>=13.0",

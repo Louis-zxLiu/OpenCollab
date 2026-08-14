@@ -640,7 +640,11 @@ class SessionRunUseCase(_SessionRunCompletionMixin):
         if has_content:
             await self.event_publisher.emit(self.event_factory.text_delta(response.content))
 
-        if response.finish_reason in {"length", "max_tokens"}:
+        if response.finish_reason in {
+            "length",
+            "max_tokens",
+            "model_context_window_exceeded",
+        }:
             reason = "output truncated: provider reached its generation limit"
             self.state.append_message(
                 {
