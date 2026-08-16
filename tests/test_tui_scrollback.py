@@ -193,3 +193,60 @@ def test_stop_live_settles_every_agent_but_prints_only_the_focused_one():
 
     tui.select_agent(1)
     assert "child notes" in _scrollback(tui)
+
+
+def test_focus_switch_scrolls_the_screen_away_instead_of_erasing_it():
+    """The redraw opens on row 1, and the rows it displaced stay in scrollback.
+
+    ``ESC[2J`` would also blank the screen, but erased rows never reach
+    scrollback — the previous agent's last screenful would be lost.
+    """
+    console = Console(
+        file=StringIO(), width=100, height=24, force_terminal=True, color_system=None
+    )
+    tui = TUI(console)
+    tui.record_user_message(0, "lead line")
+    tui.record_user_message(1, "child line")
+
+    tui.select_agent(1)
+
+    scrollback = _scrollback(tui)
+    scroll_to_top = "\n" * console.height + "\x1b[H"
+    assert scrollback.count(scroll_to_top) == 1
+    before, after = scrollback.split(scroll_to_top)
+    # Displaced, not erased: the lead's line is still above the switch.
+    assert "lead line" in before
+    assert "child line" in after
+    assert "\x1b[2J" not in scrollback and "\x1b[3J" not in scrollback
+
+
+def test_focus_switch_leaves_a_redirected_terminal_alone():
+    """Cursor control is meaningless in a file or a CI capture — emit none of it."""
+    tui = _make_tui()
+    tui.record_user_message(1, "child line")
+
+    tui.select_agent(1)
+
+    scrollback = _scrollback(tui)
+    assert "child line" in scrollback
+    assert "\x1b[" not in scrollback
+
+
+def test_focus_switch_scroll_is_gated_with_the_redraw_it_belongs_to():
+    """The scroll must reach the terminal through the same gate as the blocks.
+
+    Splitting them would let a prompt_toolkit redraw land between the scroll and
+    the agent it was making room for.
+    """
+    console = Console(
+        file=StringIO(), width=100, height=24, force_terminal=True, color_system=None
+    )
+    tui = TUI(console)
+    tui.record_user_message(1, "child line")
+    withheld: list[object] = []
+    tui.set_scrollback_gate(withheld.append)
+
+    tui.select_agent(1)
+
+    assert len(withheld) == 1
+    assert _scrollback(tui) == ""

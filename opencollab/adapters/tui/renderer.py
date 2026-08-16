@@ -24,7 +24,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from rich.console import Console
+from rich.console import Console, Group
+from rich.control import Control
 from rich.live import Live
 from rich.panel import Panel
 from rich.text import Text
@@ -169,6 +170,25 @@ class TUI(_RendererEventsMixin, _RendererDisplayMixin):
     def _print_blocks(self, blocks: list[Any]) -> None:
         for block in blocks:
             self.console.print(block)
+
+    def _scroll_to_screen_top(self) -> None:
+        """Push the visible screen into scrollback, then home the cursor.
+
+        A focus switch reads as a change of view, so the newly focused agent has
+        to open on the terminal's first row. Erasing (``ESC[2J``) would clear the
+        screen too, but erased rows never reach scrollback: the previous agent's
+        last screenful would vanish while its older rows survived, leaving a hole
+        in the very transcript this renderer exists to keep. Scrolling loses
+        nothing — the screen of blank rows is the separator between two agents.
+
+        One print, not two: Live wraps every print with a redraw of its own
+        region, so a redraw landing between the newlines and the home would
+        scroll a live region's worth of blank rows into scrollback.
+        """
+        height = self.console.height
+        if not self.console.is_terminal or height < 1:
+            return
+        self.console.print(Group(Text("\n" * (height - 1)), Control.home()), end="")
 
     def _track_agent_render_lifecycle(self, aid: int, state: str) -> None:
         if aid in self._terminal_summary_order:
@@ -349,12 +369,18 @@ class TUI(_RendererEventsMixin, _RendererDisplayMixin):
         return self._selected_aid
 
     def _reprint_focused_agent(self) -> None:
-        """Redraw the newly focused agent in full, under a labelled band.
+        """Redraw the newly focused agent from the top of the screen, under a
+        labelled band.
 
         A full redraw rather than only the unprinted tail: focus is how the user
         asks to look at an agent, and the answer to that has to be its whole
         retained trajectory, not whatever happened to accumulate since they last
         looked. Blocks evicted by the per-agent bound are named, not silently dropped.
+
+        The redraw opens at the first row (see ``_scroll_to_screen_top``) so the
+        agent the user asked for is the only one on screen. A trajectory taller
+        than the terminal still scrolls off the top — the guarantee is where the
+        redraw starts, not that all of it fits.
         """
         state = self._selected_state
         band = self._focus_band(self._selected_aid)
@@ -370,7 +396,11 @@ class TUI(_RendererEventsMixin, _RendererDisplayMixin):
                     style=self._STYLE_MUTED,
                 ),
             )
-        self._write_scrollback(lambda: self._print_blocks([band, *blocks]))
+        def emit() -> None:
+            self._scroll_to_screen_top()
+            self._print_blocks([band, *blocks])
+
+        self._write_scrollback(emit)
 
     def select_agent(self, aid: int) -> int:
         """Select an existing agent and return the resulting aid."""
