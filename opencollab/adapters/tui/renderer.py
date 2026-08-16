@@ -5,9 +5,14 @@ Ref:
 - opencode: processor.ts events — text_delta, tool_start, tool_end, etc.
 - openclaw: Rich terminal palette with dynamic updates
 
+Settled output goes to ordinary terminal scrollback the moment it settles, so
+the terminal's own scrollback is the transcript and nothing is ever erased. The
+Live region holds only in-flight chrome — streaming text, tool spinners, the
+wait indicator, and the roster footer — so it stays a few lines tall.
+
 Split by concern (``self`` is unchanged — mixins run on the one TUI instance):
 
-- ``renderer_events``  — event dispatch + timeline/status/roster updates
+- ``renderer_events``  — event dispatch + history/status/roster updates
 - ``renderer_display`` — Rich renderable building + style palette
 - this module          — ``TUI`` state, Live lifecycle, and turn-level API
 """
@@ -15,6 +20,7 @@ Split by concern (``self`` is unchanged — mixins run on the one TUI instance):
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -26,10 +32,7 @@ from rich.text import Text
 from opencollab.adapters.tui.brand_motion import MARK_HEX, PulseDot
 from opencollab.adapters.tui.keyboard import TabKeyNavigator
 from opencollab.adapters.tui.renderer_display import _RendererDisplayMixin
-from opencollab.adapters.tui.renderer_events import (
-    MAX_TIMELINE_BLOCKS,
-    _RendererEventsMixin,
-)
+from opencollab.adapters.tui.renderer_events import _RendererEventsMixin
 from opencollab.domain.session import TERMINAL_PHASES
 
 MAX_HISTORY_BLOCKS_PER_AGENT = 400
@@ -47,16 +50,20 @@ _TERMINAL_RENDER_STATES = frozenset(
 
 @dataclass
 class _AgentRenderState:
-    """Mutable live-render state owned by one scheduler agent."""
+    """Mutable live-render state owned by one scheduler agent.
+
+    ``history_blocks`` is the agent's bounded settled transcript; it is retained
+    after printing because switching focus reprints an agent in full.
+    ``printed_blocks`` is how much of it has already reached scrollback, so an
+    agent that holds focus streams incrementally instead of reprinting.
+    """
 
     current_text: str = ""
     active_tools: dict[str, dict] = field(default_factory=dict)
     status_lines: list[Text] = field(default_factory=list)
     history_blocks: list[Any] = field(default_factory=list)
     history_omitted_blocks: int = 0
-    timeline_blocks: list[Any] = field(default_factory=list)
-    turn_history_start: int = 0
-    history_revision: int = 0
+    printed_blocks: int = 0
     step: int = 0
     thinking: PulseDot | None = None
 
@@ -109,6 +116,10 @@ class TUI(_RendererEventsMixin, _RendererDisplayMixin):
         )
         self._keyboard_resume_pending = False
         self._holding_for_exit = False
+        # Settled blocks are written straight to the terminal. While a prompt is
+        # on screen that write has to be handed to prompt_toolkit instead, or it
+        # corrupts the prompt's redraw — the CLI swaps in ``run_in_terminal``.
+        self._scrollback_gate: Callable[[Callable[[], None]], Any] | None = None
 
     def _state_for(self, aid: int) -> _AgentRenderState:
         """Return one agent's render state, creating it on first observation."""
@@ -120,13 +131,44 @@ class TUI(_RendererEventsMixin, _RendererDisplayMixin):
         if overflow > 0:
             del state.history_blocks[:overflow]
             state.history_omitted_blocks += overflow
-            state.turn_history_start = max(0, state.turn_history_start - overflow)
+            state.printed_blocks = max(0, state.printed_blocks - overflow)
 
-    def _append_timeline_block(self, state: _AgentRenderState, block: Any) -> None:
-        state.timeline_blocks.append(block)
-        overflow = len(state.timeline_blocks) - MAX_TIMELINE_BLOCKS
-        if overflow > 0:
-            del state.timeline_blocks[:overflow]
+    def set_scrollback_gate(self, gate: Callable[[Callable[[], None]], Any] | None) -> None:
+        """Route scrollback writes through ``gate`` (``None`` writes directly).
+
+        Rich's Live renders ordinary prints above its own region, so a running
+        turn needs no gate. A prompt_toolkit prompt owns the screen instead, so
+        the CLI installs ``run_in_terminal`` for the duration of the prompt.
+        """
+        self._scrollback_gate = gate
+
+    def _write_scrollback(self, emit: Callable[[], None]) -> None:
+        gate = self._scrollback_gate
+        if gate is None:
+            emit()
+            return
+        try:
+            gate(emit)
+        except Exception:
+            # A gate can only fail when its owning prompt is already gone; the
+            # transcript is worth more than the redraw it was protecting.
+            emit()
+
+    def _drain_pending(self, aid: int | None = None) -> None:
+        """Print the focused agent's not-yet-printed settled blocks."""
+        target_aid = self._selected_aid if aid is None else aid
+        if target_aid != self._selected_aid:
+            return
+        state = self._state_for(target_aid)
+        pending = state.history_blocks[state.printed_blocks:]
+        if not pending:
+            return
+        state.printed_blocks = len(state.history_blocks)
+        self._write_scrollback(lambda: self._print_blocks(pending))
+
+    def _print_blocks(self, blocks: list[Any]) -> None:
+        for block in blocks:
+            self.console.print(block)
 
     def _track_agent_render_lifecycle(self, aid: int, state: str) -> None:
         if aid in self._terminal_summary_order:
@@ -201,10 +243,7 @@ class TUI(_RendererEventsMixin, _RendererDisplayMixin):
 
     @_current_text.setter
     def _current_text(self, value: str) -> None:
-        state = self._selected_state
-        if state.current_text != value:
-            state.current_text = value
-            state.history_revision += 1
+        self._selected_state.current_text = value
 
     @property
     def _active_tools(self) -> dict[str, dict]:
@@ -221,20 +260,6 @@ class TUI(_RendererEventsMixin, _RendererDisplayMixin):
     @_status_lines.setter
     def _status_lines(self, value: list[Text]) -> None:
         self._selected_state.status_lines = value
-
-    @property
-    def _timeline_blocks(self) -> list[Any]:
-        return self._selected_state.timeline_blocks
-
-    @_timeline_blocks.setter
-    def _timeline_blocks(self, value: list[Any]) -> None:
-        blocks = list(value)
-        self._selected_state.timeline_blocks = blocks[-MAX_TIMELINE_BLOCKS:]
-        self._selected_state.history_blocks = blocks[-MAX_HISTORY_BLOCKS_PER_AGENT:]
-        self._selected_state.history_omitted_blocks = max(
-            0, len(blocks) - MAX_HISTORY_BLOCKS_PER_AGENT
-        )
-        self._selected_state.history_revision += 1
 
     @property
     def _step(self) -> int:
@@ -283,12 +308,6 @@ class TUI(_RendererEventsMixin, _RendererDisplayMixin):
         """Compatibility view: configured-only roles are not input targets."""
         return None
 
-    @property
-    def selected_history_cache_key(self) -> tuple[int, int, int]:
-        """Stable Prompt Toolkit cache key for the current history rendering."""
-        state = self._selected_state
-        return self._selected_aid, state.history_revision, self.console.width
-
     def _focus_targets(self) -> list[_AgentFocusTarget]:
         """Return live agents in stable aid order.
 
@@ -325,8 +344,33 @@ class TUI(_RendererEventsMixin, _RendererDisplayMixin):
         changed = not self._focus_is_selected(target)
         self._selected_aid = target.aid
         if changed:
+            self._reprint_focused_agent()
             self._refresh()
         return self._selected_aid
+
+    def _reprint_focused_agent(self) -> None:
+        """Redraw the newly focused agent in full, under a labelled band.
+
+        A full redraw rather than only the unprinted tail: focus is how the user
+        asks to look at an agent, and the answer to that has to be its whole
+        retained trajectory, not whatever happened to accumulate since they last
+        looked. Blocks evicted by the per-agent bound are named, not silently dropped.
+        """
+        state = self._selected_state
+        band = self._focus_band(self._selected_aid)
+        blocks = list(state.history_blocks)
+        omitted = state.history_omitted_blocks
+        state.printed_blocks = len(state.history_blocks)
+        if omitted:
+            blocks.insert(
+                0,
+                Text(
+                    f"... {omitted} older history blocks omitted; "
+                    "full history remains in the run trace.",
+                    style=self._STYLE_MUTED,
+                ),
+            )
+        self._write_scrollback(lambda: self._print_blocks([band, *blocks]))
 
     def select_agent(self, aid: int) -> int:
         """Select an existing agent and return the resulting aid."""
@@ -358,13 +402,11 @@ class TUI(_RendererEventsMixin, _RendererDisplayMixin):
         return self.select_relative_agent(1)
 
     def record_user_message(self, aid: int, content: str) -> None:
-        """Add one user turn to the target's redrawable transcript."""
+        """Add one user turn to the target's transcript and settle it."""
         state = self._state_for(aid)
         self._flush_current_text_to_timeline(state)
-        block = self._user_block(content)
-        self._append_history_block(state, block)
-        self._append_timeline_block(state, block)
-        state.history_revision += 1
+        self._append_history_block(state, self._user_block(content))
+        self._drain_pending(aid)
 
     def _refresh(self) -> None:
         """Re-render the current state."""
@@ -445,14 +487,11 @@ class TUI(_RendererEventsMixin, _RendererDisplayMixin):
             self._keyboard_controller.start()
         self._keyboard_resume_pending = False
 
-    def stop_live(self, *, persist: bool = False, aid: int | None = None) -> None:
-        """Stop the live HUD while retaining each bounded recent transcript.
+    def stop_live(self) -> None:
+        """Stop the live HUD, settling whatever it still held.
 
-        Interactive transcripts stay inside the redrawable Prompt Toolkit view
-        with an explicit marker when older blocks were omitted. Full history
-        remains owned by the persistent transcript/trace. One-shot callers opt
-        into ``persist`` to print the target's settled turn to ordinary terminal
-        scrollback.
+        Everything settled during the turn already reached scrollback, so this
+        only has to commit the trailing streamed text and drop live-only chrome.
         """
         set_quit_callback = getattr(self._keyboard_controller, "set_quit_callback", None)
         if callable(set_quit_callback):
@@ -461,20 +500,14 @@ class TUI(_RendererEventsMixin, _RendererDisplayMixin):
         if self._keyboard_controller is not None:
             self._keyboard_controller.stop()
         self._keyboard_resume_pending = False
-        settled = None
-        if self._live:
-            if persist:
-                settled = self._build_settled_display(
-                    aid=self._selected_aid if aid is None else aid
-                )
-            self._live.stop()
-            self._live = None
-        if settled is not None:
-            self.console.print(settled)
-        self._live_paused = False
         for state in self._agent_states.values():
             self._flush_current_text_to_timeline(state)
             state.status_lines.clear()
+        if self._live:
+            self._live.stop()
+            self._live = None
+        self._live_paused = False
+        self._drain_pending()
 
     def print_welcome(
         self,
@@ -555,8 +588,6 @@ class TUI(_RendererEventsMixin, _RendererDisplayMixin):
             self._flush_current_text_to_timeline(state)
             state.active_tools.clear()
             state.status_lines.clear()
-            state.timeline_blocks.clear()
-            state.turn_history_start = len(state.history_blocks)
             state.step = 0
             state.thinking = None
         self._state_for(0)

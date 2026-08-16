@@ -140,18 +140,18 @@ def test_message_events_append_activity_lines():
     tui.event_handler(SchedulerEvent("agent_message_sent", {"from_aid": 0, "to_aid": 2}))
     tui.event_handler(SchedulerEvent("agent_message_delivered", {"to_aid": 2, "result_len": 10}))
 
-    sent_timeline = "\n".join(
+    sent_history = "\n".join(
         block.plain
-        for block in tui._state_for(0).timeline_blocks
+        for block in tui._state_for(0).history_blocks
         if hasattr(block, "plain")
     )
-    delivered_timeline = "\n".join(
+    delivered_history = "\n".join(
         block.plain
-        for block in tui._state_for(2).timeline_blocks
+        for block in tui._state_for(2).history_blocks
         if hasattr(block, "plain")
     )
-    assert "A0 → A2 message" in sent_timeline
-    assert "A2 received message" in delivered_timeline
+    assert "A0 → A2 message" in sent_history
+    assert "A2 received message" in delivered_history
 
 
 def test_status_lines_use_explicit_non_white_styles():
@@ -178,7 +178,7 @@ def test_status_chrome_renderables_avoid_default_text_color():
     )
     tui.event_handler(SchedulerEvent("agent_spawned", {"aid": 2, "parent_aid": 0, "role": "reviewer"}))
 
-    for block in tui._timeline_blocks:
+    for block in tui._selected_state.history_blocks:
         if isinstance(block, Text):
             _assert_visible_text_has_non_white_style(block)
 
@@ -252,7 +252,9 @@ def test_agent_status_is_pinned_to_terminal_bottom_when_content_is_short():
     rendered = console.render_lines(tui._build_live_display(), console.options, pad=False)
     rows = ["".join(segment.text for segment in line) for line in rendered]
 
-    assert len(rows) == console.height
+    # A short frame must claim only the rows it needs. Padding it out to the
+    # terminal height is what buried the settled transcript printed above it.
+    assert len(rows) < console.height
     assert "short body" in rows
     assert rows[-1].startswith("AGENTS")
     assert all(not row.startswith("AGENTS") for row in rows[:-1])
@@ -300,4 +302,6 @@ def test_reset_clears_live_state_but_preserves_agent_history_and_roster():
     assert tui.selected_aid == 1
     assert list(tui._agent_states) == [0, 1]
     assert tui._state_for(1).history_blocks == history
-    assert tui._state_for(1).timeline_blocks == []
+    assert tui._state_for(1).active_tools == {}
+    assert tui._state_for(1).status_lines == []
+    assert tui._state_for(1).thinking is None

@@ -102,6 +102,9 @@ def test_cli_preserves_nonblank_unicode_prompt():
 
 
 class FakeConsole:
+    # Chrome lines are truncated to the console width, as a real Console has.
+    width = 80
+
     def print(self, *args, **kwargs):
         return None
 

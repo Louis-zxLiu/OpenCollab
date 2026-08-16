@@ -34,10 +34,7 @@ from opencollab.adapters.cli.config_resolve import (
     print_missing_key_hint,
     resolve_config,
 )
-from opencollab.adapters.cli.prompt_view import (
-    build_agent_navigation_bindings,
-    build_agent_prompt,
-)
+from opencollab.adapters.cli.prompt_view import build_agent_navigation_bindings
 from opencollab.adapters.cli.toolbar import format_team_toolbar
 from opencollab.adapters.cli.workflow import app as workflow_app
 from opencollab.adapters.safe_files import read_regular_text
@@ -230,18 +227,51 @@ def _resolve_one_shot_prompt(prompt: str | None, prompt_file: str | None) -> str
 # ---------------------------------------------------------------------------
 
 
+def _prompt_scrollback_gate(emit: Any) -> None:
+    """Print above a live prompt via prompt_toolkit, which owns the screen."""
+    from prompt_toolkit.application import run_in_terminal
+
+    run_in_terminal(emit)
+
+
+def _print_hint(label: str, value: str) -> None:
+    """One hairline-led chrome line, home-shortened and kept to a single row.
+
+    Session and trajectory paths are long enough to wrap into three or four rows
+    and push real output off the top. The head is elided rather than the tail:
+    the run id and filename at the end are what identify the file.
+    """
+    home = os.path.expanduser("~")
+    if home != "~" and value.startswith(home):
+        value = "~" + value[len(home):]
+    prefix = f"─ {label} → "
+    budget = max(8, console.width - len(prefix))
+    if len(value) > budget:
+        value = "…" + value[-(budget - 1):]
+    line = Text()
+    line.append("─ ", style="grey46")
+    line.append(f"{label} → {value}", style="grey58")
+    console.print(line)
+
+
 async def _read_command(tui, bottom_toolbar: Any = None) -> str | None:
-    """Prompt for a user line, returning None on EOF/interrupt."""
+    """Prompt for a user line, returning None on EOF/interrupt.
+
+    Tab reprints the newly selected agent while this prompt is on screen, so the
+    TUI's scrollback writes are routed through prompt_toolkit for the duration.
+    """
     was_suspended = tui.suspend_live()
+    tui.set_scrollback_gate(_prompt_scrollback_gate)
     try:
         return await _read_line(
-            build_agent_prompt(tui, _PROMPT),
+            _PROMPT,
             bottom_toolbar=bottom_toolbar,
             key_bindings=build_agent_navigation_bindings(tui),
         )
     except (EOFError, KeyboardInterrupt):
         return None
     finally:
+        tui.set_scrollback_gate(None)
         tui.resume_live(was_suspended)
 
 
@@ -399,13 +429,9 @@ async def _run(
         tui.set_team_provider(scheduler.team_roster)
         lead = scheduler.lead_session
         if session_file and os.path.exists(session_file):
-            console.print(
-                f"[grey46]─[/grey46] [grey58]restored from {session_file}[/grey58]"
-            )
+            _print_hint("restored from", str(session_file))
         elif lead.auto_save_path:
-            console.print(
-                f"[grey46]─[/grey46] [grey58]session → {lead.auto_save_path}[/grey58]"
-            )
+            _print_hint("session", str(lead.auto_save_path))
 
         async def turn(line: str, target_aid: int) -> None:
             tui.select_agent(target_aid)
@@ -423,10 +449,7 @@ async def _run(
                     if completed and one_shot_prompt is not None and hold_after_run:
                         await tui.hold_live()
                 finally:
-                    tui.stop_live(
-                        persist=one_shot_prompt is not None,
-                        aid=target_aid,
-                    )
+                    tui.stop_live()
                     tui.print_stats(
                         scheduler.used_tokens,
                         scheduler.agent_step_count(target_aid),
@@ -461,10 +484,7 @@ async def _run(
                 )
             else:
                 try:
-                    console.print(
-                        f"[grey46]─[/grey46] "
-                        f"[grey58]trajectory → {ctx.tracer.path}[/grey58]"
-                    )
+                    _print_hint("trajectory", str(ctx.tracer.path))
                 except BaseException as exc:
                     tracer_failure = exc
     if file_event_sink is not None:

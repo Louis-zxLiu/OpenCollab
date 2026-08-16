@@ -16,17 +16,30 @@ from rich.text import Text
 
 from opencollab.adapters.tui import TUI
 from opencollab.adapters.tui import renderer as renderer_mod
-from opencollab.adapters.tui import renderer_events as renderer_events_mod
+from opencollab.adapters.tui import renderer_display as renderer_display_mod
 from opencollab.domain.events import SchedulerEvent, SessionRuntimeEvent
 
 
 def _make_tui() -> TUI:
-    return TUI()
+    return TUI(Console(file=StringIO(), width=100, color_system=None))
 
 
 def _status_plains(tui: TUI, aid: int | None = None) -> list[str]:
     state = tui._selected_state if aid is None else tui._state_for(aid)
     return [line.plain for line in state.status_lines]
+
+
+def _scrollback(tui: TUI) -> str:
+    """Everything the TUI has committed to the terminal so far."""
+    return tui.console.file.getvalue()
+
+
+def _history_plains(tui: TUI, aid: int) -> list[str]:
+    return [
+        block.plain
+        for block in tui._state_for(aid).history_blocks
+        if isinstance(block, Text)
+    ]
 
 
 
@@ -266,11 +279,7 @@ def test_follow_up_completion_is_not_labeled_as_another_spawn():
         )
     )
 
-    lines = [
-        block.plain
-        for block in tui._state_for(1).timeline_blocks
-        if isinstance(block, Text)
-    ]
+    lines = _history_plains(tui, 1)
     assert any("A1 completed" in line for line in lines)
     assert all("A1:spawn" not in line for line in lines)
 
@@ -437,50 +446,47 @@ def test_failed_agent_remains_selectable_with_retained_output_and_error():
 
     assert tui.select_agent(2) == 2
     assert any("model failed" in status for status in _status_plains(tui, 2))
+    # Streamed text that has not settled yet stays in the live frame...
+    tui.event_handler(SessionRuntimeEvent("text_delta", {"content": "still typing", "aid": 2}))
     with console.capture() as capture:
         console.print(tui._build_display())
-    rendered = capture.get()
-    assert "partial output" in rendered
-    assert "boom" in rendered
+    assert "still typing" in capture.get()
+    # ...while everything already settled reached scrollback when focus landed.
+    scrollback = _scrollback(tui)
+    assert "partial output" in scrollback
+    assert "boom" in scrollback
     assert "◆ A2 reviewer failed" in tui._build_team_panel().plain
 
 
-def test_live_timeline_cap_does_not_truncate_complete_agent_history():
-    console = Console(file=StringIO(), width=100, color_system=None)
+def test_live_frame_stays_bounded_while_full_history_reaches_scrollback():
+    console = Console(file=StringIO(), width=100, height=24, color_system=None)
     tui = TUI(console)
-    state = tui._state_for(1)
+    tui.select_agent(1)
 
     for index in range(100):
-        tui._append_activity(
-            (f"activity {index}", tui._STYLE_MUTED),
-            state=state,
-        )
+        tui._append_activity((f"activity {index}", tui._STYLE_MUTED))
 
-    assert len(state.timeline_blocks) == 80
-    assert len(state.history_blocks) == 100
-    tui.select_agent(1)
-    history = tui.render_selected_history()
-    assert "activity 0" in history
-    assert "activity 99" in history
+    frame = console.render_lines(tui._build_live_display(), console.options, pad=False)
+    assert len(frame) <= renderer_display_mod.MAX_LIVE_BODY_LINES
+    scrollback = _scrollback(tui)
+    assert "activity 0" in scrollback
+    assert "activity 99" in scrollback
 
 
-def test_all_timeline_append_paths_share_one_global_bound():
+def test_every_settled_block_path_reaches_scrollback_for_the_focused_agent():
     tui = TUI(Console(file=StringIO(), width=100, color_system=None))
-    state = tui._state_for(1)
+    tui.event_handler(SessionRuntimeEvent("text_delta", {"content": "assistant say", "aid": 1}))
+    assert tui.select_agent(1) == 1
 
-    for index in range(renderer_events_mod.MAX_TIMELINE_BLOCKS * 3):
-        tui.event_handler(
-            SessionRuntimeEvent(
-                "text_delta",
-                {"content": f"assistant {index}", "aid": 1},
-            )
-        )
-        tui.event_handler(
-            SessionRuntimeEvent("error", {"reason": f"failure {index}", "aid": 1})
-        )
-        tui.record_user_message(1, f"user {index}")
+    tui.event_handler(SessionRuntimeEvent("error", {"reason": "failure here", "aid": 1}))
+    tui.record_user_message(1, "user asks")
+    tui.event_handler(
+        SessionRuntimeEvent("tool_start", {"tool": "bash", "args": {"command": "pwd"}, "aid": 1})
+    )
 
-    assert len(state.timeline_blocks) == renderer_events_mod.MAX_TIMELINE_BLOCKS
+    scrollback = _scrollback(tui)
+    for expected in ("assistant say", "failure here", "user asks", "A1:bash started"):
+        assert expected in scrollback
 
 
 def test_agent_history_has_a_global_per_agent_bound():
@@ -495,10 +501,10 @@ def test_agent_history_has_a_global_per_agent_bound():
 
     assert len(state.history_blocks) == renderer_mod.MAX_HISTORY_BLOCKS_PER_AGENT
     tui.select_agent(1)
-    history = tui.render_selected_history()
-    assert "bounded activity 0" not in history
-    assert "20 older history blocks omitted" in history
-    assert f"bounded activity {renderer_mod.MAX_HISTORY_BLOCKS_PER_AGENT + 19}" in history
+    scrollback = _scrollback(tui)
+    assert "bounded activity 0" not in scrollback
+    assert "20 older history blocks omitted" in scrollback
+    assert f"bounded activity {renderer_mod.MAX_HISTORY_BLOCKS_PER_AGENT + 19}" in scrollback
 
 
 def test_completed_agent_render_states_have_a_global_bound():
@@ -590,27 +596,27 @@ def test_terminal_provider_entries_cannot_recreate_evicted_render_states(
     retained = len(tui._agent_states)
     for aid in range(1, total + 1):
         tui.select_agent(aid)
-        tui.render_selected_history()
 
     assert retained <= renderer_mod.MAX_TERMINAL_AGENT_STATES + 1
     assert len(tui._agent_states) == retained
 
 
-def test_user_message_is_recorded_only_in_target_history_and_revises_cache_key():
+def test_user_message_is_recorded_only_in_target_and_printed_only_when_focused():
     console = Console(file=StringIO(), width=100, color_system=None)
     tui = TUI(console)
-    before = tui._state_for(2).history_revision
 
     tui.record_user_message(2, "please inspect the renderer")
 
-    assert tui._state_for(2).history_revision == before + 1
     assert tui._state_for(0).history_blocks == []
+    assert len(tui._state_for(2).history_blocks) == 1
+    # Focus is still agent 0, so agent 2's line has not reached the terminal.
+    assert "please inspect the renderer" not in _scrollback(tui)
+
     tui.select_agent(2)
-    assert tui.selected_history_cache_key == (2, before + 1, 100)
-    assert "please inspect the renderer" in tui.render_selected_history()
+    assert "please inspect the renderer" in _scrollback(tui)
 
 
-def test_stop_live_preserves_child_final_text_and_error_for_prompt_view():
+def test_stop_live_settles_child_final_text_and_error_into_its_history():
     console = Console(file=StringIO(), width=100, color_system=None)
     tui = TUI(console)
     tui._live_paused = True
@@ -619,11 +625,11 @@ def test_stop_live_preserves_child_final_text_and_error_for_prompt_view():
 
     tui.stop_live()
     tui.select_agent(1)
-    history = tui.render_selected_history()
 
     assert tui._state_for(1).current_text == ""
-    assert "final child text" in history
-    assert "Error: child error" in history
+    scrollback = _scrollback(tui)
+    assert "final child text" in scrollback
+    assert "Error: child error" in scrollback
 
 
 def test_agent_history_accumulates_across_turn_resets():
@@ -637,30 +643,30 @@ def test_agent_history_accumulates_across_turn_resets():
     tui.stop_live()
     tui.select_agent(1)
 
-    history = tui.render_selected_history()
-    assert "turn one" in history
-    assert "turn two" in history
+    scrollback = _scrollback(tui)
+    assert "turn one" in scrollback
+    assert "turn two" in scrollback
 
 
-def test_lead_settled_display_contains_only_current_turn_after_reset():
+def test_scrollback_is_append_only_across_turns_for_the_focused_agent():
+    """A new turn must not reprint the previous one — the terminal already has it."""
     console = Console(file=StringIO(), width=100, color_system=None)
     tui = TUI(console)
     tui.event_handler(SessionRuntimeEvent("text_delta", {"content": "old answer", "aid": 0}))
-    tui._build_settled_display(aid=0)
+    tui.stop_live()
 
     tui.reset()
     tui.event_handler(SessionRuntimeEvent("text_delta", {"content": "new answer", "aid": 0}))
-    settled = tui._build_settled_display(aid=0)
-    with console.capture() as capture:
-        console.print(settled)
+    tui.stop_live()
 
-    output = capture.get()
-    assert "new answer" in output
-    assert "old answer" not in output
+    scrollback = _scrollback(tui)
+    assert scrollback.count("old answer") == 1
+    assert scrollback.count("new answer") == 1
+    assert scrollback.index("old answer") < scrollback.index("new answer")
 
 
-def test_switching_does_not_lose_partial_text_or_timeline_order():
-    tui = TUI()
+def test_switching_does_not_lose_partial_text_or_history_order():
+    tui = _make_tui()
     tui.event_handler(SessionRuntimeEvent("text_delta", {"content": "lead-a", "aid": 0}))
     tui.event_handler(SessionRuntimeEvent("text_delta", {"content": "child-a", "aid": 1}))
     tui.event_handler(
@@ -673,7 +679,8 @@ def test_switching_does_not_lose_partial_text_or_timeline_order():
 
     assert tui._state_for(0).current_text == "lead-alead-b"
     assert tui._state_for(1).current_text == ""
-    assert len(tui._state_for(1).timeline_blocks) == 2
+    assert _history_plains(tui, 1) == ["▸ A1:bash started pwd"]
+    assert len(tui._state_for(1).history_blocks) == 2
     tui.select_agent(1)
     assert "A1:bash" in tui._active_tools
 
@@ -689,20 +696,22 @@ def test_legacy_event_without_aid_routes_to_lead_not_current_focus():
     assert tui._state_for(1).current_text == "child"
 
 
-def test_settled_display_always_commits_lead_when_child_is_selected():
-    tui = TUI()
+def test_stop_live_settles_every_agent_but_prints_only_the_focused_one():
+    tui = _make_tui()
     tui.event_handler(SessionRuntimeEvent("text_delta", {"content": "lead answer", "aid": 0}))
     tui.event_handler(SessionRuntimeEvent("text_delta", {"content": "child notes", "aid": 1}))
+
+    tui.stop_live()
+
+    # Both agents' streamed text is committed, so neither is lost on a later switch.
+    assert tui._state_for(0).current_text == ""
+    assert tui._state_for(1).current_text == ""
+    scrollback = _scrollback(tui)
+    assert "lead answer" in scrollback
+    assert "child notes" not in scrollback
+
     tui.select_agent(1)
-
-    settled = tui._build_settled_display(aid=0)
-
-    console = Console(file=StringIO(), width=80)
-    with console.capture() as capture:
-        console.print(settled)
-    output = capture.get()
-    assert "lead answer" in output
-    assert "child notes" not in output
+    assert "child notes" in _scrollback(tui)
 
 
 def test_live_suspend_and_resume_transfer_keyboard_ownership():

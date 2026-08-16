@@ -1,7 +1,11 @@
-"""Display building for the TUI: team panel, timeline, and live viewport.
+"""Display building for the TUI: team panel, live viewport, and block chrome.
 
 Mixed into ``renderer.TUI`` — methods render the state that
 ``renderer_events`` maintains. Also owns the shared style palette.
+
+Settled blocks are printed to scrollback by ``renderer``; what is built here for
+the Live region is only the in-flight remainder, so the frame stays proportional
+to its content instead of claiming the whole terminal.
 """
 
 from __future__ import annotations
@@ -25,6 +29,12 @@ from opencollab.adapters.tui.theme import (
 )
 from opencollab.application.scheduler_types import roster_display_state
 
+# Ceiling on the Live region, in terminal rows. The live frame carries only
+# in-flight chrome, so it is normally far shorter; this bounds the pathological
+# case (a long streamed answer) so the region can never take over the terminal
+# the way a full-height frame did.
+MAX_LIVE_BODY_LINES = 12
+
 
 class _LineViewport:
     """A pre-rendered, bottom-aligned live viewport."""
@@ -37,27 +47,6 @@ class _LineViewport:
             yield from line
             if index < len(self.lines) - 1:
                 yield Segment.line()
-
-
-class _PinnedFooterViewport:
-    """A live body that reserves the terminal's physical bottom row for status."""
-
-    def __init__(self, body: Any, footer: Any) -> None:
-        self.body = body
-        self.footer = footer
-
-    def __rich_console__(self, console: Console, options: Any) -> Any:
-        max_height = max(1, console.height)
-        body_lines = console.render_lines(self.body, options, pad=False)
-        footer_lines = console.render_lines(self.footer, options, pad=False)
-        if len(footer_lines) >= max_height:
-            lines = footer_lines[-max_height:]
-        else:
-            body_height = max_height - len(footer_lines)
-            visible_body = body_lines[-body_height:] if body_height else []
-            spacer = [[] for _ in range(body_height - len(visible_body))]
-            lines = [*visible_body, *spacer, *footer_lines]
-        yield from _LineViewport(lines).__rich_console__(console, options)
 
 
 class _RendererDisplayMixin:
@@ -228,14 +217,28 @@ class _RendererDisplayMixin:
         )
         return grid
 
-    def _build_display(self, *, include_team_panel: bool = True) -> Any:
-        """Build the Rich renderable for current state."""
-        parts = []
+    def _focus_band(self, aid: int) -> Any:
+        """The labelled rule that opens a newly focused agent's redraw."""
+        from rich.rule import Rule
 
-        # Chronological blocks (assistant text snapshots + activity lines).
-        if self._timeline_blocks:
-            parts.extend(self._timeline_blocks)
-            parts.append(Text("", style=""))
+        role = next(
+            (
+                str(entry_role)
+                for entry_aid, entry_role, _state in self._team_entries()
+                if entry_aid == aid
+            ),
+            "",
+        )
+        label = self._agent_label(aid)
+        title = f"{label} {role}" if role and aid != 0 else label
+        return Rule(Text(title, style=self._STYLE_HEADING), style=self._STYLE_MUTED)
+
+    def _build_display(self, *, include_team_panel: bool = True) -> Any:
+        """Build the Rich renderable for the in-flight state.
+
+        Settled blocks are not included: they already went to scrollback.
+        """
+        parts = []
 
         # Current streaming chunk — fronted by the brand ◆ gutter marker.
         if self._current_text:
@@ -291,56 +294,16 @@ class _RendererDisplayMixin:
         return Group(*parts)
 
     def _build_live_display(self) -> Any:
-        """Build a live frame with the team status on the terminal's bottom row."""
-        max_height = max(1, self.console.height)
-        team_panel = self._build_team_panel()
-        if team_panel is None:
-            display = self._build_display()
-            lines = self.console.render_lines(display, self.console.options, pad=False)
-            if len(lines) <= max_height:
-                return display
-            return _LineViewport(lines[-max_height:])
+        """Build a live frame sized to its content, roster footer last.
 
-        body = self._build_display(include_team_panel=False)
-        return _PinnedFooterViewport(body, team_panel)
-
-    def _build_settled_display(self, *, aid: int = 0) -> Any | None:
-        """Build one settled turn for an explicit scrollback handoff.
-
-        Interactive mode keeps this material in the redrawable history viewport;
-        one-shot mode uses this slice so it still leaves a normal terminal result.
-        Live-only chrome (spinner, transient status, roster) is excluded.
+        The frame is capped at ``MAX_LIVE_BODY_LINES`` (and at the terminal
+        height) and shows the tail when it overflows. It is never padded out to
+        the terminal height: a short frame must occupy few rows so the settled
+        transcript printed above it stays on screen.
         """
-        state = self._state_for(aid)
-        if state.current_text:
-            self._flush_current_text_to_timeline(state)
-        return self._build_history_display(state, start=state.turn_history_start)
-
-    def _build_history_display(self, state: Any, *, start: int = 0) -> Any | None:
-        """Build the requested slice of one agent's history without live chrome."""
-        blocks = list(state.history_blocks[start:])
-        if start == 0 and state.history_omitted_blocks:
-            blocks.insert(
-                0,
-                Text(
-                    f"... {state.history_omitted_blocks} older history blocks "
-                    "omitted; full history remains in the run trace.",
-                    style=self._STYLE_MUTED,
-                ),
-            )
-        if state.current_text:
-            blocks.append(self._assistant_block(Markdown(state.current_text)))
-        if not blocks:
-            return None
-        from rich.console import Group
-
-        return Group(*blocks)
-
-    def render_selected_history(self) -> str:
-        """Render the selected agent's complete history for Prompt Toolkit."""
-        display = self._build_history_display(self._selected_state)
-        if display is None:
-            return ""
-        with self.console.capture() as capture:
-            self.console.print(display, end="")
-        return capture.get().rstrip("\n")
+        max_height = max(1, min(MAX_LIVE_BODY_LINES, self.console.height))
+        display = self._build_display()
+        lines = self.console.render_lines(display, self.console.options, pad=False)
+        if len(lines) <= max_height:
+            return display
+        return _LineViewport(lines[-max_height:])
