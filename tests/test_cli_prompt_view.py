@@ -6,6 +6,7 @@ import io
 import os
 import struct
 import termios
+from functools import partial
 from types import SimpleNamespace
 
 import prompt_toolkit
@@ -260,6 +261,34 @@ async def test_read_command_uses_a_static_prompt_and_a_prompt_scoped_gate(monkey
     assert captured["gate_during_prompt"] is cli_main._prompt_scrollback_gate
     assert tui.gates == [cli_main._prompt_scrollback_gate, None]
     assert resumed == [False]
+
+
+@pytest.mark.asyncio
+async def test_agent_asked_prompts_are_gated_like_the_repl_prompt(monkeypatch):
+    """A permission y/N and an ask_user question own the screen too.
+
+    Both are read while other agents keep running, so an ungated settled block
+    from a concurrent agent would print into prompt_toolkit's redraw.
+    """
+    from opencollab.adapters.tui import TuiAskUserPolicy, TuiPermissionPolicy
+
+    tui = _FakeTUI()
+    tui.suspend_live = lambda: True
+    tui.resume_live = lambda was_suspended: None
+    seen: list = []
+
+    async def fake_read_line(prompt_text, **kwargs):
+        seen.append((prompt_text, tui.gates[-1]))
+        return "y"
+
+    monkeypatch.setattr(cli_main, "_read_line", fake_read_line)
+    read_line = partial(cli_main._read_line_at_prompt, tui)
+
+    assert await TuiPermissionPolicy(render=tui, read_line=read_line).confirm("Allow?") is True
+    assert await TuiAskUserPolicy(render=tui, read_line=read_line).ask("Which one?") == "y"
+
+    assert [gate for _prompt, gate in seen] == [cli_main._prompt_scrollback_gate] * 2
+    assert tui.gates[-1] is None
 
 
 @pytest.mark.asyncio

@@ -21,6 +21,7 @@ import asyncio
 import os
 import sys
 import uuid
+from functools import partial
 from typing import Any, Optional
 
 import typer
@@ -254,16 +255,31 @@ def _print_hint(label: str, value: str) -> None:
     console.print(line)
 
 
+async def _read_line_at_prompt(tui, prompt_text: Any, **kwargs: Any) -> str:
+    """Read one line with the TUI's scrollback routed through prompt_toolkit.
+
+    Every prompt owns the screen, not just the REPL's: an ``ask_user`` question
+    and a permission y/N are up while other agents keep running, and a settled
+    block printed straight to the console corrupts the prompt's redraw. So the
+    gate belongs to *reading a line*, not to one call site.
+    """
+    tui.set_scrollback_gate(_prompt_scrollback_gate)
+    try:
+        return await _read_line(prompt_text, **kwargs)
+    finally:
+        tui.set_scrollback_gate(None)
+
+
 async def _read_command(tui, bottom_toolbar: Any = None) -> str | None:
     """Prompt for a user line, returning None on EOF/interrupt.
 
-    Tab reprints the newly selected agent while this prompt is on screen, so the
-    TUI's scrollback writes are routed through prompt_toolkit for the duration.
+    Tab reprints the newly selected agent while this prompt is on screen, which
+    is one of the writes ``_read_line_at_prompt`` gates.
     """
     was_suspended = tui.suspend_live()
-    tui.set_scrollback_gate(_prompt_scrollback_gate)
     try:
-        return await _read_line(
+        return await _read_line_at_prompt(
+            tui,
             _PROMPT,
             bottom_toolbar=bottom_toolbar,
             key_bindings=build_agent_navigation_bindings(tui),
@@ -271,7 +287,6 @@ async def _read_command(tui, bottom_toolbar: Any = None) -> str | None:
     except (EOFError, KeyboardInterrupt):
         return None
     finally:
-        tui.set_scrollback_gate(None)
         tui.resume_live(was_suspended)
 
 
@@ -393,10 +408,11 @@ async def _run(
 
     # ``--yolo`` only auto-approves risky commands; a human is still present, so
     # the ask-user tool stays interactive (routed through the TUI's suspend/resume).
+    gated_read_line = partial(_read_line_at_prompt, tui)
     permission_policy = None
     if not yolo:
-        permission_policy = TuiPermissionPolicy(render=tui, read_line=_read_line)
-    ask_policy = TuiAskUserPolicy(render=tui, read_line=_read_line)
+        permission_policy = TuiPermissionPolicy(render=tui, read_line=gated_read_line)
+    ask_policy = TuiAskUserPolicy(render=tui, read_line=gated_read_line)
 
     event_sink = TuiEventSink(tui)
     events_file = os.environ.get("OPENCOLLAB_EVENTS_FILE")
@@ -449,6 +465,12 @@ async def _run(
                     if completed and one_shot_prompt is not None and hold_after_run:
                         await tui.hold_live()
                 finally:
+                    if one_shot_prompt is not None:
+                        # Only the focused agent's blocks reach scrollback, and a
+                        # one-shot run has no "later" in which to Tab back. If the
+                        # user wandered off to watch a teammate, end the run on the
+                        # agent that owes them an answer.
+                        tui.select_agent(target_aid)
                     tui.stop_live()
                     tui.print_stats(
                         scheduler.used_tokens,

@@ -351,6 +351,82 @@ async def test_cli_successful_one_shot_holds_before_stopping_and_cleanup(
 
 
 @pytest.mark.asyncio
+async def test_one_shot_prints_the_answer_even_if_focus_wandered_to_a_teammate(
+    monkeypatch,
+    tmp_path,
+):
+    """A one-shot run has no "later" in which to Tab back to the lead.
+
+    Only the focused agent's blocks reach scrollback, so a run that ends while
+    the user is watching a teammate would exit with the answer it was asked for
+    settled in memory and never printed.
+    """
+    from io import StringIO
+
+    from rich.console import Console
+
+    from opencollab.adapters.tui import TUI
+    from opencollab.domain.events import SessionRuntimeEvent
+
+    console = Console(file=StringIO(), width=100, color_system=None)
+    holder: dict[str, TUI] = {}
+
+    class OneShotTUI(TUI):
+        def __init__(self, *args, **kwargs):
+            super().__init__(console)
+            holder["tui"] = self
+
+        async def hold_live(self):
+            # The user Tabs to a teammate to read its trajectory, then quits.
+            self.select_agent(1)
+            return True
+
+    class Scheduler:
+        used_tokens = 7
+        lead_session = SimpleNamespace(auto_save_path=None, step_count=1)
+
+        def team_roster(self):
+            return []
+
+        async def run_turn(self, aid, line):
+            tui = holder["tui"]
+            tui.event_handler(
+                SessionRuntimeEvent("text_delta", {"content": "the final answer", "aid": 0})
+            )
+            tui.event_handler(
+                SessionRuntimeEvent("text_delta", {"content": "teammate notes", "aid": 1})
+            )
+            # Settles the teammate's text, so focusing it has something to show.
+            tui.event_handler(
+                SessionRuntimeEvent("tool_start", {"tool": "bash", "args": {"command": "ls"}, "aid": 1})
+            )
+
+        def agent_step_count(self, aid):
+            return 1
+
+        async def cleanup(self):
+            return None
+
+    install_cli_fakes(monkeypatch, Scheduler(), FakeTracer())
+    monkeypatch.setattr(tui_mod, "TUI", OneShotTUI)
+
+    await cli_main._run(
+        str(tmp_path),
+        config(),
+        None,
+        True,
+        True,
+        False,
+        one_shot_prompt="do work",
+        hold_after_run=True,
+    )
+
+    scrollback = console.file.getvalue()
+    assert "teammate notes" in scrollback
+    assert "the final answer" in scrollback
+
+
+@pytest.mark.asyncio
 async def test_cli_warns_when_event_log_persistence_is_degraded(
     monkeypatch,
     tmp_path,
