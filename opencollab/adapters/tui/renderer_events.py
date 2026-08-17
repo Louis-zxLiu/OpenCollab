@@ -127,15 +127,19 @@ class _RendererEventsMixin:
         elif etype == "loop_detected":
             tool = event.data.get("tool", "?")
             count = event.data.get("count", 0)
+            # Preserved: with the live chrome down to one shared row, a warning
+            # that only lived there would be overwritten by the next tool.
             self._emit_status(
                 Text(f"Loop detected: {tool} called {count}x with same args", style=self._STYLE_WARNING),
                 state=state,
+                preserve=True,
             )
 
         elif etype == "budget_warning":
             self._emit_status(
                 Text("Token budget running low", style=self._STYLE_WARNING),
                 state=state,
+                preserve=True,
             )
 
         elif etype == "error":
