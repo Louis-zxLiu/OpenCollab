@@ -29,9 +29,13 @@ class _FakeTUI:
     def __init__(self) -> None:
         self.selected_aid = 0
         self.gates: list = []
+        self.drained_partials: set[int] = set()
 
     def set_scrollback_gate(self, gate) -> None:
         self.gates.append(gate)
+
+    def drained_partial_answer(self, aid: int) -> bool:
+        return aid in self.drained_partials
 
     def select_next_agent(self) -> int | None:
         self.selected_aid = 1 if self.selected_aid == 0 else 2
@@ -351,6 +355,39 @@ async def test_repl_reports_stopped_turn_and_accepts_next_input(monkeypatch):
         "Agent 2 stopped: token budget exhausted",
     ]
     assert len(dividers) == 2
+
+
+@pytest.mark.asyncio
+async def test_stopped_turn_does_not_print_a_partial_answer_already_in_scrollback(monkeypatch):
+    """The partial answer is salvage, and the turn's cleanup may have got there first.
+
+    ``stop_live`` settles the trailing streamed text into scrollback, so printing
+    ``partial_answer`` unconditionally shows the user the same text twice.
+    """
+    tui = _FakeTUI()
+    tui.selected_aid = 2
+    tui.drained_partials = {2}
+    lines = iter(["first", None])
+    monkeypatch.setattr(
+        cli_main,
+        "_read_command",
+        lambda *_args, **_kwargs: asyncio.sleep(0, result=next(lines)),
+    )
+    printed: list[str] = []
+    monkeypatch.setattr(
+        cli_main,
+        "console",
+        SimpleNamespace(print=lambda value: printed.append(str(value))),
+    )
+
+    async def handle_turn(line: str, aid: int) -> None:
+        raise SchedulerTurnError(aid, SessionPhase.STOPPED, "token budget exhausted", "partial answer")
+
+    tui.print_turn_divider = lambda: None
+
+    await cli_main._repl_loop(tui, handle_turn, object())
+
+    assert printed == ["Agent 2 stopped: token budget exhausted"]
 
 
 @pytest.mark.asyncio

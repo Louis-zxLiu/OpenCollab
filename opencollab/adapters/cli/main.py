@@ -341,7 +341,10 @@ async def _repl_loop(tui: Any, handle_turn, lead: Any, bottom_toolbar: Any = Non
         try:
             result = await handle_turn(line, target_aid)
         except SchedulerTurnError as exc:
-            if exc.partial_answer:
+            # The half-finished answer is salvage: print it only if the turn's
+            # cleanup did not already settle the streamed text into scrollback,
+            # or the user reads the same partial answer twice.
+            if exc.partial_answer and not tui.drained_partial_answer(exc.aid):
                 console.print(Text(exc.partial_answer))
             reason = exc.terminal_reason or exc.phase.value
             style = "yellow" if exc.phase.value == "stopped" else "red"
@@ -465,13 +468,15 @@ async def _run(
                     if completed and one_shot_prompt is not None and hold_after_run:
                         await tui.hold_live()
                 finally:
-                    if one_shot_prompt is not None:
-                        # Only the focused agent's blocks reach scrollback, and a
-                        # one-shot run has no "later" in which to Tab back. If the
-                        # user wandered off to watch a teammate, end the run on the
-                        # agent that owes them an answer.
-                        tui.select_agent(target_aid)
-                    tui.stop_live()
+                    # Only the focused agent's blocks reach scrollback, and a
+                    # one-shot run has no "later" in which to Tab back. If the
+                    # user wandered off to watch a teammate, flush the tail of
+                    # the agent that owes them an answer. The tail, not a focus
+                    # switch: a switch reprints in full and would repeat every
+                    # row this agent already put on screen.
+                    tui.stop_live(
+                        final_aid=target_aid if one_shot_prompt is not None else None
+                    )
                     tui.print_stats(
                         scheduler.used_tokens,
                         scheduler.agent_step_count(target_aid),

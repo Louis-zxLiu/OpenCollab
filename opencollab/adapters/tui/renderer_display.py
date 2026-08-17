@@ -37,6 +37,31 @@ from opencollab.application.scheduler_types import roster_display_state
 MAX_LIVE_BODY_LINES = 12
 
 
+def collapse_rows(value: str) -> str:
+    """Fold CR/LF into spaces so one line of chrome stays one terminal row.
+
+    Chrome quotes text the renderer does not control — a shell command, a tool
+    argument, an error reason. A newline in any of them turns the single shared
+    status row into three, which is the regression the one-row chrome exists to
+    prevent. Width is already handled downstream by truncation.
+    """
+    if "\n" not in value and "\r" not in value:
+        return value
+    return " ".join(value.replace("\r\n", "\n").replace("\r", "\n").split("\n"))
+
+
+def collapse_text_rows(text: Text) -> Text:
+    """``collapse_rows`` for a styled ``Text``.
+
+    Status lines carry a single base style rather than per-word spans, so
+    rebuilding the string keeps the line looking the same.
+    """
+    plain = text.plain
+    if "\n" not in plain and "\r" not in plain:
+        return text
+    return Text(collapse_rows(plain), style=text.style)
+
+
 class _LineViewport:
     """A pre-rendered, bottom-aligned live viewport.
 
@@ -126,7 +151,7 @@ class _RendererDisplayMixin:
             for key in self._PREVIEW_KEYS:
                 value = source.get(key)
                 if isinstance(value, str):
-                    text = value[:limit]
+                    text = collapse_rows(value)[:limit]
                     return f" `{text}`" if code and key == "command" else f" {text}"
         return ""
 

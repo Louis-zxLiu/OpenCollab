@@ -185,6 +185,39 @@ def test_status_chrome_renderables_avoid_default_text_color():
     _assert_visible_text_has_non_white_style(tui._build_status_row())
 
 
+def test_status_row_stays_one_row_when_the_text_it_quotes_has_newlines():
+    """The chrome quotes text the renderer does not control.
+
+    A shell command, a tool argument and an error reason all reach the status
+    row verbatim, and a newline in any of them turns the single shared row into
+    three — undoing the whole point of collapsing the chrome onto one row.
+    """
+    console = Console(file=StringIO(), width=100, color_system=None)
+    tui = TUI(console)
+
+    tui.event_handler(
+        SessionRuntimeEvent(
+            "tool_start",
+            {"tool": "bash", "args": {"command": "echo one\necho two\r\necho three"}, "aid": 0},
+        )
+    )
+    row = tui._build_status_row()
+    assert "\n" not in row.plain and "\r" not in row.plain
+    assert len(console.render_lines(row, console.options.update(width=100))) == 1
+
+    # Same for the error path, whose reason comes straight from the runtime.
+    tui._live_paused = True
+    tui.event_handler(
+        SessionRuntimeEvent("error", {"reason": "boom\n  File x.py, line 1\n  KeyError", "aid": 0})
+    )
+    tui._active_tools.clear()
+    row = tui._build_status_row()
+    assert "\n" not in row.plain
+    assert len(console.render_lines(row, console.options.update(width=100))) == 1
+    # Scrollback still gets the whole message — only the one-row chrome folds.
+    assert "File x.py" in console.file.getvalue()
+
+
 def test_live_display_tails_when_content_exceeds_terminal_height():
     console = Console(file=StringIO(), width=40, height=4)
     tui = TUI(console)

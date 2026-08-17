@@ -360,6 +360,10 @@ async def test_one_shot_prints_the_answer_even_if_focus_wandered_to_a_teammate(
     Only the focused agent's blocks reach scrollback, so a run that ends while
     the user is watching a teammate would exit with the answer it was asked for
     settled in memory and never printed.
+
+    Exactly once, too: the flush is a tail drain, not a focus switch. A focus
+    switch reprints an agent in full, which would repeat every row the lead had
+    already put on screen before the user wandered off.
     """
     from io import StringIO
 
@@ -390,6 +394,13 @@ async def test_one_shot_prints_the_answer_even_if_focus_wandered_to_a_teammate(
 
         async def run_turn(self, aid, line):
             tui = holder["tui"]
+            # Settled while the lead still holds focus: already in scrollback.
+            tui.event_handler(
+                SessionRuntimeEvent("text_delta", {"content": "an early lead line", "aid": 0})
+            )
+            tui.event_handler(
+                SessionRuntimeEvent("tool_start", {"tool": "bash", "args": {"command": "pwd"}, "aid": 0})
+            )
             tui.event_handler(
                 SessionRuntimeEvent("text_delta", {"content": "the final answer", "aid": 0})
             )
@@ -423,7 +434,8 @@ async def test_one_shot_prints_the_answer_even_if_focus_wandered_to_a_teammate(
 
     scrollback = console.file.getvalue()
     assert "teammate notes" in scrollback
-    assert "the final answer" in scrollback
+    assert scrollback.count("the final answer") == 1
+    assert scrollback.count("an early lead line") == 1
 
 
 @pytest.mark.asyncio

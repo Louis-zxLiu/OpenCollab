@@ -15,7 +15,7 @@ from rich.text import Text
 from opencollab.adapters.tui import TUI
 from opencollab.adapters.tui import renderer as renderer_mod
 from opencollab.adapters.tui import renderer_display as renderer_display_mod
-from opencollab.domain.events import SessionRuntimeEvent
+from opencollab.domain.events import SchedulerEvent, SessionRuntimeEvent
 
 
 def _make_tui() -> TUI:
@@ -82,6 +82,8 @@ def test_agent_history_has_a_global_per_agent_bound():
     assert "bounded activity 0" not in scrollback
     assert "20 older history blocks omitted" in scrollback
     assert f"bounded activity {renderer_mod.MAX_HISTORY_BLOCKS_PER_AGENT + 19}" in scrollback
+
+
 def test_user_message_is_recorded_only_in_target_and_printed_only_when_focused():
     console = Console(file=StringIO(), width=100, color_system=None)
     tui = TUI(console)
@@ -193,6 +195,75 @@ def test_stop_live_settles_every_agent_but_prints_only_the_focused_one():
 
     tui.select_agent(1)
     assert "child notes" in _scrollback(tui)
+
+
+def test_finishing_on_an_unfocused_agent_prints_its_tail_exactly_once():
+    """The one-shot flush drains a tail; it must not replay the transcript.
+
+    A focus switch reprints an agent in full, which is right when the user asks
+    to look at one. Ending a run is not that ask: everything the target settled
+    while it held focus is already on screen.
+    """
+    tui = _make_tui()
+    tui.event_handler(SchedulerEvent("agent_spawned", {"aid": 1, "parent_aid": 0, "role": "coder"}))
+    tui.event_handler(SessionRuntimeEvent("text_delta", {"content": "early lead line", "aid": 0}))
+    tui.event_handler(
+        SessionRuntimeEvent("tool_start", {"tool": "bash", "args": {"command": "pwd"}, "aid": 0})
+    )
+    tui.event_handler(SessionRuntimeEvent("text_delta", {"content": "the final answer", "aid": 0}))
+
+    tui.select_agent(1)  # the user wanders off to watch a teammate
+    tui.stop_live(final_aid=0)
+
+    scrollback = _scrollback(tui)
+    assert scrollback.count("early lead line") == 1
+    assert scrollback.count("the final answer") == 1
+    # Under a band naming the lead, because the rows above belong to the teammate.
+    band = tui._agent_label(0)
+    assert scrollback.rindex(band) < scrollback.index("the final answer")
+
+
+def test_stop_live_reports_whose_trailing_text_it_committed():
+    """The CLI salvages a failed turn's partial answer only if this says no."""
+    tui = _make_tui()
+    tui.event_handler(SessionRuntimeEvent("text_delta", {"content": "lead partial", "aid": 0}))
+    tui.event_handler(SessionRuntimeEvent("text_delta", {"content": "child partial", "aid": 1}))
+
+    tui.stop_live()
+
+    # The lead held focus, so its partial reached scrollback; the child's did not.
+    assert tui.drained_partial_answer(0) is True
+    assert tui.drained_partial_answer(1) is False
+    # An agent that streamed nothing has no partial to have been committed.
+    assert tui.drained_partial_answer(2) is False
+
+
+def test_overlapping_prompts_keep_the_gate_until_the_last_one_releases():
+    """Two agents can hold a prompt at once; the first to finish must not
+    uninstall the gate the other is still relying on."""
+    tui = _make_tui()
+    withheld: list[object] = []
+
+    def outer_gate(emit) -> None:
+        withheld.append(emit)
+
+    def inner_gate(emit) -> None:
+        withheld.append(emit)
+
+    tui.set_scrollback_gate(outer_gate)   # agent 1's permission y/N
+    tui.set_scrollback_gate(inner_gate)   # agent 2's ask_user question
+    tui.set_scrollback_gate(None)         # agent 2 answers first
+
+    assert tui._scrollback_gate is outer_gate
+
+    tui.record_user_message(0, "settled while the first prompt is still up")
+
+    # Withheld, not printed behind the surviving prompt's back.
+    assert len(withheld) == 1
+    assert _scrollback(tui) == ""
+
+    tui.set_scrollback_gate(None)
+    assert tui._scrollback_gate is None
 
 
 def test_focus_switch_scrolls_the_screen_away_instead_of_erasing_it():

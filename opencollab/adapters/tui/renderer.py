@@ -120,7 +120,11 @@ class TUI(_RendererEventsMixin, _RendererDisplayMixin):
         # Settled blocks are written straight to the terminal. While a prompt is
         # on screen that write has to be handed to prompt_toolkit instead, or it
         # corrupts the prompt's redraw — the CLI swaps in ``run_in_terminal``.
-        self._scrollback_gate: Callable[[Callable[[], None]], Any] | None = None
+        # A stack, not a slot: prompts overlap (see ``set_scrollback_gate``).
+        self._scrollback_gates: list[Callable[[Callable[[], None]], Any]] = []
+        # Agents whose trailing streamed text the last ``stop_live()`` committed
+        # to scrollback, so a failed turn is not reported twice.
+        self._drained_partial_aids: frozenset[int] = frozenset()
 
     def _state_for(self, aid: int) -> _AgentRenderState:
         """Return one agent's render state, creating it on first observation."""
@@ -134,14 +138,29 @@ class TUI(_RendererEventsMixin, _RendererDisplayMixin):
             state.history_omitted_blocks += overflow
             state.printed_blocks = max(0, state.printed_blocks - overflow)
 
+    @property
+    def _scrollback_gate(self) -> Callable[[Callable[[], None]], Any] | None:
+        """The gate currently owning the screen, if any."""
+        return self._scrollback_gates[-1] if self._scrollback_gates else None
+
     def set_scrollback_gate(self, gate: Callable[[Callable[[], None]], Any] | None) -> None:
-        """Route scrollback writes through ``gate`` (``None`` writes directly).
+        """Claim the scrollback gate with ``gate``, or release one with ``None``.
 
         Rich's Live renders ordinary prints above its own region, so a running
         turn needs no gate. A prompt_toolkit prompt owns the screen instead, so
         the CLI installs ``run_in_terminal`` for the duration of the prompt.
+
+        Ownership is a stack rather than a slot because prompts overlap: an
+        ``ask_user`` question and a permission y/N come from two agents running
+        concurrently, and the first to be answered must not uninstall the gate
+        the other one is still relying on. Claims and releases pair up; a
+        release with nothing claimed is a no-op.
         """
-        self._scrollback_gate = gate
+        if gate is None:
+            if self._scrollback_gates:
+                self._scrollback_gates.pop()
+            return
+        self._scrollback_gates.append(gate)
 
     def _write_scrollback(self, emit: Callable[[], None]) -> None:
         gate = self._scrollback_gate
@@ -160,12 +179,29 @@ class TUI(_RendererEventsMixin, _RendererDisplayMixin):
         target_aid = self._selected_aid if aid is None else aid
         if target_aid != self._selected_aid:
             return
-        state = self._state_for(target_aid)
+        self._drain_agent_tail(target_aid)
+
+    def _drain_agent_tail(self, aid: int) -> None:
+        """Print one agent's not-yet-printed blocks, focused or not.
+
+        The tail, never a full reprint: a full reprint is what a focus switch
+        owes the user (see ``_reprint_focused_agent``), but everything this
+        agent settled while it *held* focus already reached scrollback, so
+        replaying it would print the transcript twice. An unfocused agent gets
+        a band first, because the rows above it belong to a teammate.
+        """
+        state = self._state_for(aid)
         pending = state.history_blocks[state.printed_blocks:]
         if not pending:
             return
         state.printed_blocks = len(state.history_blocks)
-        self._write_scrollback(lambda: self._print_blocks(pending))
+        blocks = pending if aid == self._selected_aid else [self._focus_band(aid), *pending]
+        self._write_scrollback(lambda: self._print_blocks(blocks))
+
+    def _fully_printed(self, aid: int) -> bool:
+        """Has everything this agent has settled reached scrollback?"""
+        state = self._state_for(aid)
+        return state.printed_blocks == len(state.history_blocks)
 
     def _print_blocks(self, blocks: list[Any]) -> None:
         for block in blocks:
@@ -517,11 +553,16 @@ class TUI(_RendererEventsMixin, _RendererDisplayMixin):
             self._keyboard_controller.start()
         self._keyboard_resume_pending = False
 
-    def stop_live(self) -> None:
+    def stop_live(self, final_aid: int | None = None) -> None:
         """Stop the live HUD, settling whatever it still held.
 
         Everything settled during the turn already reached scrollback, so this
         only has to commit the trailing streamed text and drop live-only chrome.
+
+        ``final_aid`` names an agent that must not leave anything unprinted —
+        the one a one-shot run asked, which has no later turn in which the user
+        could Tab back to it. Its tail is flushed even if focus wandered off to
+        a teammate.
         """
         set_quit_callback = getattr(self._keyboard_controller, "set_quit_callback", None)
         if callable(set_quit_callback):
@@ -530,6 +571,7 @@ class TUI(_RendererEventsMixin, _RendererDisplayMixin):
         if self._keyboard_controller is not None:
             self._keyboard_controller.stop()
         self._keyboard_resume_pending = False
+        streaming = {aid for aid, state in self._agent_states.items() if state.current_text}
         for state in self._agent_states.values():
             self._flush_current_text_to_timeline(state)
             state.status_lines.clear()
@@ -538,6 +580,22 @@ class TUI(_RendererEventsMixin, _RendererDisplayMixin):
             self._live = None
         self._live_paused = False
         self._drain_pending()
+        if final_aid is not None:
+            self._drain_agent_tail(final_aid)
+        self._drained_partial_aids = frozenset(
+            aid for aid in streaming if self._fully_printed(aid)
+        )
+
+    def drained_partial_answer(self, aid: int) -> bool:
+        """Did the last ``stop_live()`` commit this agent's trailing text?
+
+        A turn that ends in ``SchedulerTurnError`` carries the half-finished
+        answer as ``partial_answer``, and the CLI used to print it because the
+        transient Live frame discarded whatever it still held. It no longer
+        does — the text settles into scrollback — so the salvage print now has
+        to ask first, or the user reads the same partial answer twice.
+        """
+        return aid in self._drained_partial_aids
 
     def print_welcome(
         self,

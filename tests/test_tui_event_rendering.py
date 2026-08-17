@@ -41,8 +41,6 @@ def _history_plains(tui: TUI, aid: int) -> list[str]:
     ]
 
 
-
-
 def test_one_shot_welcome_describes_a_running_issue_without_an_input_prompt():
     output = StringIO()
     tui = TUI(Console(file=output, width=120, color_system=None))

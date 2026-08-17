@@ -12,6 +12,7 @@ from typing import Any
 from rich.markdown import Markdown
 from rich.text import Text
 
+from opencollab.adapters.tui.renderer_display import collapse_text_rows
 from opencollab.domain.events import SchedulerEvent
 
 MAX_STATUS_LINES = 40
@@ -304,7 +305,9 @@ class _RendererEventsMixin:
             self._append_history_block(target, status)
             self._drain_pending(target_aid)
         if self._live or self._live_paused:
-            target.status_lines.append(status)
+            # The status row is one row. The preserved copy above keeps the
+            # message whole in scrollback, so nothing is lost by folding it.
+            target.status_lines.append(collapse_text_rows(status))
             overflow = len(target.status_lines) - MAX_STATUS_LINES
             if overflow > 0:
                 del target.status_lines[:overflow]
