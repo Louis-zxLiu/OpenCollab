@@ -22,6 +22,7 @@ from opencollab.bootstrap.programmatic import (
     ProgrammaticResult,
 )
 from opencollab.bootstrap.runtime_context import build_runtime_context
+from opencollab.bootstrap.session_factory import SESSION_MAX_STEPS
 from opencollab.bootstrap.team_config import load_team_config
 from opencollab.domain.session import SessionPhase
 
@@ -40,11 +41,12 @@ async def run_team(
     use_worktrees: bool,
     prebuild_team: bool = False,
     allow_unisolated_shell: bool | None = None,
+    max_steps: int = SESSION_MAX_STEPS,
 ) -> ProgrammaticResult:
     """Run the scheduler regime once, including bounded team cleanup.
 
-    ``prebuild_team`` and ``allow_unisolated_shell`` are handed straight to
-    ``build_scheduler``; see its docstring for what each decides. Both default
+    ``prebuild_team``, ``allow_unisolated_shell`` and ``max_steps`` are handed
+    straight to ``build_scheduler``; see its docstring for what each decides. Both default
     to the values that reproduce today's run: no roster is seated up front, and
     the shell answer still follows ``interactive``, which is ``False`` here
     because a programmatic run has no human at it. Stating them is how an
@@ -76,6 +78,7 @@ async def run_team(
             resolved_team_config=team_config,
             save_dir=artifacts,
             prebuild_team=prebuild_team,
+            max_steps=max_steps,
         )
     except BaseException as exc:
         tracer_failure = _programmatic._close_tracer(context.tracer)

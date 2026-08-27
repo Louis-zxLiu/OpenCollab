@@ -38,7 +38,7 @@ from opencollab.application.scheduler_types import TeamPrebuiltError
 from opencollab.application.tool_execution import ToolRuntime
 from opencollab.bootstrap import build_runtime_context, build_scheduler
 from opencollab.bootstrap.context_builder import SpawnConfig
-from opencollab.bootstrap.session_factory import DefaultSessionFactory
+from opencollab.bootstrap.session_factory import SESSION_MAX_STEPS, DefaultSessionFactory
 from opencollab.bootstrap.team_config import (
     ANALYST_TOOL_NAMES,
     CODER_TOOL_NAMES,
@@ -772,3 +772,56 @@ async def test_the_shipped_team_still_starts_with_the_switch_off(tmp_path):
     finally:
         tracer.close()
         await scheduler.cleanup()
+
+
+async def test_every_seat_gets_the_same_step_ceiling(tmp_path):
+    """One run, one ceiling — for the entry agent and its teammates alike.
+
+    A team and a solo agent can be held to equal tokens or to equal steps, not
+    both: the solo agent carries one long history and pays more per step than a
+    teammate carrying a short one. These arms hold tokens equal, which makes the
+    step ceiling a runaway guard rather than an allowance — and a guard that
+    hands the entry agent twice what a teammate gets is neither.
+
+    Before this, the two seat paths took two different hard-coded defaults (100
+    for the entry agent, 50 for every teammate) and no caller could set either.
+    """
+    scheduler, tracer = _scheduler(
+        tmp_path,
+        prebuild_team=True,
+        team_config_path=str(HANDOFF_TEAM_FILE),
+        max_steps=777,
+    )
+    try:
+        await scheduler.ensure_team_prebuilt()
+        ceilings = {
+            scb.agent.name: scheduler._sessions[aid].max_steps
+            for aid, scb in sorted(scheduler.table.entries.items())
+        }
+    finally:
+        tracer.close()
+        await scheduler.cleanup()
+
+    assert ceilings == {"analyst": 777, "coder": 777, "tester": 777}
+
+
+async def test_the_default_ceiling_is_one_number_not_a_privilege(tmp_path):
+    """Unset, every seat still lands on the same figure — the asymmetry is gone
+    from the default, not merely overridable."""
+    scheduler, tracer = _scheduler(
+        tmp_path,
+        prebuild_team=True,
+        team_config_path=str(HANDOFF_TEAM_FILE),
+    )
+    try:
+        await scheduler.ensure_team_prebuilt()
+        ceilings = {
+            scheduler._sessions[aid].max_steps
+            for aid in scheduler.table.entries
+        }
+    finally:
+        tracer.close()
+        await scheduler.cleanup()
+
+    assert ceilings == {SESSION_MAX_STEPS}
+

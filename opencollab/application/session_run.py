@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import logging
 import math
 import time
 import uuid
@@ -38,6 +39,8 @@ from opencollab.application.ports import (
 from opencollab.application.tool_execution import ToolExecutionUseCase
 from opencollab.domain.events import SessionRuntimeEvent
 from opencollab.domain.session import SessionPhase, SessionState
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "DEFAULT_COMMIT_RESERVE",
@@ -148,6 +151,10 @@ class SessionRunUseCase(_SessionRunCompletionMixin):
         # (None|'soft'|'hard'). Drives _maybe_trace_steering to log only UPWARD
         # crossings, re-arming on a write reset. Never persisted.
         self._last_steering_level: str | None = None
+        # One ``session_terminal`` row per session, not per turn: ``run_loop``
+        # can be re-entered on an already-finished session as a read-only query
+        # for its answer, and that must not add a second disposition.
+        self._session_terminal_traced = False
         # Enforcement wind-down (STEP 0). Off by default: when ``off`` the precheck
         # wind-down branch is never taken, so the FSM is byte-for-byte identical to
         # the pre-enforcement code. ``commit_reserve`` is carved FROM the cap (not
@@ -264,11 +271,13 @@ class SessionRunUseCase(_SessionRunCompletionMixin):
             raise
         except Exception as exc:
             self.state.fail(reason=f"{type(exc).__name__}: {exc}")
+            self._trace_session_terminal()
             raise
 
         answer = self._last_turn_answer()
         if self.is_terminal_phase():
             self.state.clear_active_turn()
+            self._trace_session_terminal()
         return answer
 
     def _prepare_turn(self) -> None:
@@ -308,6 +317,55 @@ class SessionRunUseCase(_SessionRunCompletionMixin):
     def is_terminal_phase(self) -> bool:
         """Whether the session has finished its turn (done/failed/limits)."""
         return self.state.phase.is_terminal()
+
+    def _trace_session_terminal(self) -> None:
+        """Record how this session ended, and what it had left when it did.
+
+        Two resources can stop a session: the tokens it was given and the steps
+        it was allowed. They cannot both be equalized across differently
+        organized runs — a solo agent carries one long history and pays more per
+        step than a teammate carrying a short one — so a comparison holds one of
+        them equal and lets the other vary. This repository holds tokens equal.
+
+        That makes the step ceiling a runaway guard rather than an allowance,
+        and a guard is only honest if it never actually fires. Nothing recorded
+        that. A session stopped at its step ceiling with tokens still unspent
+        looked exactly like a session that finished: the phase collapsed to
+        STOPPED, the reason string lived only in memory, and the trajectory —
+        the file the run is read from afterwards — said nothing at all. The
+        claim "steps were counted, never enforced" was unfalsifiable.
+
+        So each session writes one row naming its disposition beside both
+        counters and both ceilings. ``step_ceiling_reached`` is derivable from
+        the two step fields and is written anyway: it is the exact question this
+        record exists to answer, and a reader should not have to re-derive the
+        rule to ask it.
+
+        Observation only, and guarded: a record that cannot be built must not
+        change how the session ended.
+        """
+        if self._session_terminal_traced or self.tracer is None:
+            return
+        self._session_terminal_traced = True
+        try:
+            step_count = int(self.state.step_count)
+            max_steps = int(self.max_steps)
+            self.tracer.log_step(
+                step_type="session_terminal",
+                payload={
+                    "aid": self.state.aid,
+                    "role": getattr(self.agent, "name", None),
+                    "phase": self.state.phase.value,
+                    "terminal_reason": self.state.terminal_reason,
+                    "step_count": step_count,
+                    "max_steps": max_steps,
+                    "step_ceiling_reached": step_count >= max_steps,
+                    "used_tokens": int(self.state.used_tokens),
+                    "max_budget_tokens": int(self.max_budget_tokens),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 — observability is non-authoritative
+            logger.error("session terminal trace failed: %s", exc)
 
     def _should_suspend(self) -> bool:
         """The loop stops on a terminal phase (turn finished) OR on the

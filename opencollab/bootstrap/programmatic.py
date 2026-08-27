@@ -42,6 +42,7 @@ from opencollab.bootstrap.agent_runtime import (
 )
 from opencollab.bootstrap.config import resolve_thinking_params
 from opencollab.bootstrap.scheduler_factory import build_scheduler  # noqa: F401
+from opencollab.bootstrap.session_factory import SESSION_MAX_STEPS
 from opencollab.bootstrap.tool_registry import build_tools_for_role
 from opencollab.bootstrap.workflow_runtime import (
     WORKFLOW_AGENT_PROMPT,
@@ -685,12 +686,14 @@ async def run_team(
     use_worktrees: bool,
     prebuild_team: bool = False,
     allow_unisolated_shell: bool | None = None,
+    max_steps: int = SESSION_MAX_STEPS,
 ) -> ProgrammaticResult:
     """Run the scheduler regime once, including bounded team cleanup.
 
     A forwarder kept so ``programmatic`` stays the one import surface for the
     three regimes; the implementation lives in ``programmatic_team``, whose
-    docstring documents ``prebuild_team`` and ``allow_unisolated_shell``.
+    docstring documents ``prebuild_team``, ``allow_unisolated_shell`` and
+    ``max_steps``.
     """
     from opencollab.bootstrap.programmatic_team import run_team as _run_team
 
@@ -707,6 +710,7 @@ async def run_team(
         use_worktrees=use_worktrees,
         prebuild_team=prebuild_team,
         allow_unisolated_shell=allow_unisolated_shell,
+        max_steps=max_steps,
     )
 
 

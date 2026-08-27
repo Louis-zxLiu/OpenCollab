@@ -21,6 +21,7 @@ from opencollab.bootstrap.programmatic import (
     run_team,
     run_workflow,
 )
+from opencollab.bootstrap.session_factory import SESSION_MAX_STEPS
 
 from .result import RunError, RunResult
 
@@ -230,6 +231,7 @@ class OpenCollab:
         use_worktrees: bool = True,
         prebuild_team: bool = False,
         allow_unisolated_shell: bool | None = None,
+        max_steps: int = SESSION_MAX_STEPS,
     ) -> RunResult[str]:
         """Run one scheduler-controlled team turn.
 
@@ -243,6 +245,13 @@ class OpenCollab:
         ever given ``ask_user``, but an unattended experiment may still need its
         agents to run ``git`` in their worktrees. ``None`` leaves the shell
         answer where it has always been for an SDK run — off.
+
+        ``max_steps`` is the step ceiling every seat gets, entry agent and
+        teammates alike. A comparison between a team and a solo agent can hold
+        their tokens equal or their steps equal but not both, and this run holds
+        tokens; the ceiling is only here to stop a runaway, so set it above what
+        the token budget can pay for and read the realized step counts out of
+        the trajectory.
         """
         _non_empty(prompt, "prompt")
         if self._environment is not None:
@@ -253,6 +262,7 @@ class OpenCollab:
             raise ValueError("prebuild_team must be a boolean")
         if allow_unisolated_shell is not None and not isinstance(allow_unisolated_shell, bool):
             raise ValueError("allow_unisolated_shell must be a boolean or None")
+        resolved_team_max_steps = _positive_int(max_steps, "max_steps")
         team_path = _path(config, "config")
         try:
             result = await run_team(
@@ -274,6 +284,7 @@ class OpenCollab:
                 use_worktrees=use_worktrees,
                 prebuild_team=prebuild_team,
                 allow_unisolated_shell=allow_unisolated_shell,
+                max_steps=resolved_team_max_steps,
             )
         except ProgrammaticLifecycleError as exc:
             raise RunError(str(exc)) from exc
