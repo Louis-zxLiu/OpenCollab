@@ -232,6 +232,7 @@ class OpenCollab:
         prebuild_team: bool = False,
         allow_unisolated_shell: bool | None = None,
         max_steps: int = SESSION_MAX_STEPS,
+        serialize_turns: bool = False,
     ) -> RunResult[str]:
         """Run one scheduler-controlled team turn.
 
@@ -252,6 +253,14 @@ class OpenCollab:
         tokens; the ceiling is only here to stop a runaway, so set it above what
         the token budget can pay for and read the realized step counts out of
         the trajectory.
+
+        ``serialize_turns`` holds the team to one turn at a time: a teammate a
+        message wakes waits for the running turn to finish instead of running
+        beside it. It changes only *when* an agent runs — every declared edge
+        stays open and ``message_agent`` stays voluntary, so whether the agents
+        hand work to each other is still theirs to decide. Off by default. The
+        run records which way it was set, under
+        ``assigned.topology_nodes.turns_serialized``.
         """
         _non_empty(prompt, "prompt")
         if self._environment is not None:
@@ -260,6 +269,8 @@ class OpenCollab:
             raise ValueError("trace and use_worktrees must be booleans")
         if not isinstance(prebuild_team, bool):
             raise ValueError("prebuild_team must be a boolean")
+        if not isinstance(serialize_turns, bool):
+            raise ValueError("serialize_turns must be a boolean")
         if allow_unisolated_shell is not None and not isinstance(allow_unisolated_shell, bool):
             raise ValueError("allow_unisolated_shell must be a boolean or None")
         resolved_team_max_steps = _positive_int(max_steps, "max_steps")
@@ -285,6 +296,7 @@ class OpenCollab:
                 prebuild_team=prebuild_team,
                 allow_unisolated_shell=allow_unisolated_shell,
                 max_steps=resolved_team_max_steps,
+                serialize_turns=serialize_turns,
             )
         except ProgrammaticLifecycleError as exc:
             raise RunError(str(exc)) from exc

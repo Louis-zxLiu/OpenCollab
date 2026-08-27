@@ -114,6 +114,7 @@ def build_scheduler(
     prebuild_team: bool = False,
     allow_unisolated_shell: bool | None = None,
     max_steps: int = SESSION_MAX_STEPS,
+    serialize_turns: bool = False,
 ) -> Scheduler:
     """Build the Scheduler and let it create agent 0 (the init process).
 
@@ -135,6 +136,13 @@ def build_scheduler(
     refused thereafter, so the roster is an input to the run rather than
     something the model decides mid-run. Off by default; the scheduler behaves
     exactly as before while it is off.
+
+    ``serialize_turns`` holds the team to one turn at a time: a teammate a
+    message wakes waits for the running turn to finish instead of running beside
+    it. It changes *when* an agent runs, never whether it may — the topology
+    keeps every declared edge and ``message_agent`` stays voluntary, so whether
+    the agents hand work to each other is still theirs to decide. Off by
+    default, which is the concurrent behaviour.
 
     ``interactive`` and ``allow_unisolated_shell`` are two different facts about
     a run, and only one of them is about a human:
@@ -239,6 +247,7 @@ def build_scheduler(
         topology=team_cfg.topology,
         roles=tuple(team_cfg.roles),
         prebuild_team=prebuild_team,
+        serialize_turns=serialize_turns,
     )
 
     # Attach hooks after the scheduler exists so the runner can hold its handle

@@ -825,3 +825,62 @@ async def test_the_default_ceiling_is_one_number_not_a_privilege(tmp_path):
 
     assert ceilings == {SESSION_MAX_STEPS}
 
+
+
+async def test_a_run_records_whether_its_turns_were_serialized(tmp_path):
+    """Holding the team to one turn at a time is a choice about the instrument.
+
+    It is not OpenCollab's default, so a run says which way it was set the same
+    way each node says whether its workspace was isolated — otherwise a reader
+    of the trajectory cannot tell one condition's runs from the other's.
+    """
+    on_dir = tmp_path / "on"
+    on_dir.mkdir()
+    off_dir = tmp_path / "off"
+    off_dir.mkdir()
+    serialized, serialized_tracer = _scheduler(
+        on_dir, prebuild_team=True, serialize_turns=True
+    )
+    try:
+        await serialized.ensure_team_prebuilt()
+        serialized_tracer.flush()
+    finally:
+        serialized_tracer.close()
+        await serialized.cleanup()
+
+    concurrent, concurrent_tracer = _scheduler(off_dir, prebuild_team=True)
+    try:
+        await concurrent.ensure_team_prebuilt()
+        concurrent_tracer.flush()
+    finally:
+        concurrent_tracer.close()
+        await concurrent.cleanup()
+
+    (on,) = _payloads(serialized_tracer.path, "assigned.topology_nodes")
+    (off,) = _payloads(concurrent_tracer.path, "assigned.topology_nodes")
+    assert on["turns_serialized"] is True
+    assert off["turns_serialized"] is False
+
+
+async def test_serializing_turns_does_not_narrow_who_may_address_whom(tmp_path):
+    """The flag changes when an agent runs, never whether it may speak.
+
+    Whether the models hand work to each other has to stay their decision, so
+    the declared edges must come out identical under either setting.
+    """
+    scheduler, tracer = _scheduler(
+        tmp_path, prebuild_team=True, serialize_turns=True
+    )
+    try:
+        await scheduler.ensure_team_prebuilt()
+        tracer.flush()
+    finally:
+        tracer.close()
+        await scheduler.cleanup()
+
+    (payload,) = _payloads(tracer.path, "assigned.topology_edges")
+    assert payload["edges"] == [
+        {"from_role": "analyst", "to_role": "coder"},
+        {"from_role": "analyst", "to_role": "tester"},
+    ]
+    assert payload["allow_all"] is False

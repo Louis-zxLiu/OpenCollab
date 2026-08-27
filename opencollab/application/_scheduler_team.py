@@ -424,6 +424,10 @@ class SchedulerTeamMixin:
         ``allow_all`` travels with the edges because an open topology declares no
         edges at all: an empty list alone would read as "nobody may talk".
 
+        ``turns_serialized`` travels with the nodes because it is the other half
+        of what the seated roster was allowed to do: who was seated, and whether
+        they were allowed to work at the same time.
+
         Observational end to end — a recorder that fails must not take the run
         with it.
         """
@@ -438,6 +442,11 @@ class SchedulerTeamMixin:
                 payload={
                     "entry_role": lead.agent.name if lead is not None else None,
                     "declared_roles": list(self._roles),
+                    # Whether the run holds the team to one turn at a time. It
+                    # is a choice made about the instrument, not OpenCollab's
+                    # default, so the run says which way it was set the same way
+                    # each node says whether its workspace was isolated.
+                    "turns_serialized": bool(self._serialize_turns),
                     "nodes": self._assigned_topology_nodes(),
                 },
             )

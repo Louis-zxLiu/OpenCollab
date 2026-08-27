@@ -110,6 +110,7 @@ class Scheduler(
         roles: tuple[str, ...] = (),
         event_factory: SchedulerEventFactory | None = None,
         prebuild_team: bool = False,
+        serialize_turns: bool = False,
     ):
         self._session_factory = session_factory
         self._worktree_pool = worktree_pool
@@ -126,8 +127,16 @@ class Scheduler(
         # scheduler behaves exactly as it did.
         self._prebuild_team = bool(prebuild_team)
         self._team_prebuilt = False
+        # One turn at a time across the whole team. Off by default, which is the
+        # concurrent behaviour above. On, ``_turn_gate`` holds a single lock
+        # across every ``run_loop``, so a teammate woken by a message waits for
+        # the current turn instead of running beside it. What the agents may say
+        # to each other is untouched: the topology keeps every declared edge and
+        # ``message_agent`` stays voluntary — only the timing changes.
+        self._serialize_turns = bool(serialize_turns)
         # Created on first use: ``__init__`` may run without a running loop.
         self._prebuild_lock: asyncio.Lock | None = None
+        self._turn_gate_lock: asyncio.Lock | None = None
         # Configured role names (from the team config), in declaration order.
         # Used by ``team_roster`` to surface the team before anything spawns.
         normalized_roles: list[str] = []

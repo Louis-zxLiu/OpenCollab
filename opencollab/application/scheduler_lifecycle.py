@@ -14,6 +14,7 @@ helpers).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 from typing import Any
@@ -318,6 +319,28 @@ class LifecycleMixin:
         except Exception as exc:
             logger.error("background task for aid %s failed: %s", aid, exc)
 
+    def _turn_gate(self) -> Any:
+        """The team-wide turn gate every driver runs its loop inside.
+
+        Under ``serialize_turns`` this is one lock shared by every agent, so
+        exactly one turn is in flight at a time. Off, it is a no-op and
+        independent aids proceed concurrently, which is what ``_run_locks``
+        (one per aid) has always allowed.
+
+        Holding it across ``run_loop`` cannot deadlock, and not because of any
+        one team's configuration: ``run_loop`` *returns* when a session suspends
+        on ``AWAITING_EVENTS`` instead of blocking on its children, so the gate
+        is released at every suspension point and no driver ever holds it while
+        waiting for another agent to finish.
+
+        Created on first use: ``__init__`` may run without a running loop.
+        """
+        if not self._serialize_turns:
+            return contextlib.nullcontext()
+        if self._turn_gate_lock is None:
+            self._turn_gate_lock = asyncio.Lock()
+        return self._turn_gate_lock
+
     async def _drive_agent(self, aid: int, session: Any) -> None:
         """Run a session's loop once and finalize.
 
@@ -337,11 +360,12 @@ class LifecycleMixin:
 
         try:
             cancel_event = self._turn_cancel_events.get(aid)
-            result = (
-                await session.run_loop(cancel_event)
-                if cancel_event is not None
-                else await session.run_loop()
-            )
+            async with self._turn_gate():
+                result = (
+                    await session.run_loop(cancel_event)
+                    if cancel_event is not None
+                    else await session.run_loop()
+                )
         except asyncio.CancelledError:
             self._release_leases(aid)
             scb.state.cancel()

@@ -84,6 +84,11 @@ def test_public_class_and_method_shapes_stay_lean() -> None:
             # what those tokens can pay for. ``agent`` and ``workflow`` already
             # took this; ``team`` is where it could not be set at all.
             "max_steps",
+            # Whether the seated roster may work at the same time. It answers a
+            # question about the run, not about any one agent, which is why it
+            # belongs beside the two conditions above rather than in the team
+            # config: the config says who is seated and who may address whom.
+            "serialize_turns",
         ),
         sdk.OpenCollab.workflow: (
             "self",

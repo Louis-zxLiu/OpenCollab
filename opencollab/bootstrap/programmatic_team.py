@@ -42,16 +42,18 @@ async def run_team(
     prebuild_team: bool = False,
     allow_unisolated_shell: bool | None = None,
     max_steps: int = SESSION_MAX_STEPS,
+    serialize_turns: bool = False,
 ) -> ProgrammaticResult:
     """Run the scheduler regime once, including bounded team cleanup.
 
-    ``prebuild_team``, ``allow_unisolated_shell`` and ``max_steps`` are handed
-    straight to ``build_scheduler``; see its docstring for what each decides. Both default
-    to the values that reproduce today's run: no roster is seated up front, and
-    the shell answer still follows ``interactive``, which is ``False`` here
-    because a programmatic run has no human at it. Stating them is how an
-    unattended experiment gets a declared roster whose agents can run ``git``
-    without also being handed an ``ask_user`` there is nobody to answer.
+    ``prebuild_team``, ``allow_unisolated_shell``, ``max_steps`` and
+    ``serialize_turns`` are handed straight to ``build_scheduler``; see its
+    docstring for what each decides. All default to the values that reproduce
+    today's run: no roster is seated up front, turns may overlap, and the shell
+    answer still follows ``interactive``, which is ``False`` here because a
+    programmatic run has no human at it. Stating them is how an unattended
+    experiment gets a declared roster whose agents can run ``git`` without also
+    being handed an ``ask_user`` there is nobody to answer.
     """
     run_config = dict(config)
     run_config["budget"] = max_tokens
@@ -79,6 +81,7 @@ async def run_team(
             save_dir=artifacts,
             prebuild_team=prebuild_team,
             max_steps=max_steps,
+            serialize_turns=serialize_turns,
         )
     except BaseException as exc:
         tracer_failure = _programmatic._close_tracer(context.tracer)
