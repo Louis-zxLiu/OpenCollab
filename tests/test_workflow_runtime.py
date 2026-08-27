@@ -432,6 +432,63 @@ async def test_no_save_dir_keeps_sessions_ephemeral(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_every_workflow_agent_gets_its_own_id(monkeypatch):
+    """Each workflow session is built with a distinct, real ``aid``.
+
+    ``build_session`` defaults to ``aid=-1``. Left at that default every agent
+    in a workflow run stamps the same ``-1`` onto its ``tool_exec`` and
+    ``llm_call`` records, so the trajectory cannot be attributed per agent.
+    Ids are allocated whether or not a run folder is configured.
+    """
+    calls = _patch_build_session(monkeypatch)
+    ctx = workflow_runtime.build_workflow_context(cfg=_cfg())
+
+    await ctx.agent("one")
+    await ctx.agent("two")
+    await ctx.agent("three")
+
+    assert [c["aid"] for c in calls] == [0, 1, 2]
+
+
+@pytest.mark.asyncio
+async def test_agent_id_and_transcript_prefix_name_the_same_agent(monkeypatch, tmp_path):
+    """The ``aid`` in the trace and the transcript's filename prefix agree.
+
+    That shared number is the join key between a run folder's per-agent
+    transcript and the trajectory records the agent produced.
+    """
+    calls = _patch_build_session(monkeypatch)
+    save_dir = str(tmp_path / "run")
+    ctx = workflow_runtime.build_workflow_context(cfg=_cfg(), save_dir=save_dir)
+
+    await ctx.agent("analyze the bug", label="analyst")
+    await ctx.agent("write the fix", label="coder")
+
+    for call in calls:
+        prefix = os.path.basename(call["auto_save_path"]).split("_")[0]
+        assert int(prefix) == call["aid"]
+
+
+def test_workflow_agent_id_reaches_the_built_session():
+    """The id survives ``build_session`` into ``session.state.aid``.
+
+    Driven through the real factory rather than a captured kwarg, so a fix that
+    passes ``aid`` but loses it in the wiring still fails here.
+    """
+    factory = workflow_runtime.WorkflowSessionFactory(
+        model="test-model",
+        provider="anthropic",
+        api_key="fake",  # pragma: allowlist secret
+        base_url="https://example.test",
+    )
+
+    first = factory.build_workflow_session(prompt="analyze", budget=100_000)
+    second = factory.build_workflow_session(prompt="fix", budget=100_000)
+
+    assert [first.state.aid, second.state.aid] == [0, 1]
+
+
+@pytest.mark.asyncio
 async def test_save_dir_threads_sequential_per_session_paths(monkeypatch, tmp_path):
     """With a save_dir, each session gets its own ordered <seq>.json path."""
     calls = _patch_build_session(monkeypatch)

@@ -113,21 +113,34 @@ class WorkflowSessionFactory:
         self._env = env
         self._session_seq = 0
 
-    def _next_save_path(self, label: str | None) -> str | None:
-        """Per-session transcript path: ``<save_dir>/<seq>_<role>.json``.
+    def _next_aid(self) -> int:
+        """Allocate this session's agent id.
 
-        Returns ``None`` when no run folder is configured. The sequence number
-        orders sessions by creation and guarantees uniqueness; incrementing it
-        has no ``await`` so it is atomic under the event loop's cooperative
-        scheduling even when ``parallel``/``pipeline`` build many sessions
-        concurrently. The caller's ``label`` (e.g. ``coder:s1r2``) is slugged
-        into the name so a run folder reads as its workflow phases at a glance.
+        One integer per session, handed to ``build_session`` as ``aid`` and
+        reused as the transcript's ``seq`` prefix so a run folder's filenames
+        and its trace records name the same agent. Allocation happens on every
+        build, not only when a run folder is configured: without it every
+        workflow agent would keep ``build_session``'s ``aid=-1`` default and a
+        ``tool_exec`` record could not be traced back to the agent that ran it.
+
+        Incrementing has no ``await`` so it is atomic under the event loop's
+        cooperative scheduling even when ``parallel``/``pipeline`` build many
+        sessions concurrently.
+        """
+        aid = self._session_seq
+        self._session_seq += 1
+        return aid
+
+    def _save_path(self, aid: int, label: str | None) -> str | None:
+        """Per-session transcript path: ``<save_dir>/<aid>_<role>.json``.
+
+        Returns ``None`` when no run folder is configured. The caller's
+        ``label`` (e.g. ``coder:s1r2``) is slugged into the name so a run folder
+        reads as its workflow phases at a glance.
         """
         if self._save_dir is None:
             return None
-        seq = self._session_seq
-        self._session_seq += 1
-        return workflow_transcript_path(self._save_dir, seq, label)
+        return workflow_transcript_path(self._save_dir, aid, label)
 
     def build_workflow_session(
         self,
@@ -190,6 +203,7 @@ class WorkflowSessionFactory:
                 if self._workspace
                 else LocalEnvironment()
             )
+        aid = self._next_aid()
         return build_session(
             agent=agent,
             env=env,
@@ -199,7 +213,8 @@ class WorkflowSessionFactory:
             event_sink=self._event_sink,
             llm_timeout=self._llm_timeout,
             provider_retry_budget=self._provider_retry_budget,
-            auto_save_path=self._next_save_path(label),
+            aid=aid,
+            auto_save_path=self._save_path(aid, label),
         )
 
 
