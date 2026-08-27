@@ -28,6 +28,7 @@ from opencollab.bootstrap.config import (
 from opencollab.bootstrap.container import RuntimeContext, build_workspace_safety_policy
 from opencollab.bootstrap.context_builder import SpawnConfig
 from opencollab.bootstrap.session_factory import (
+    SESSION_MAX_STEPS,
     DefaultSessionFactory,
     agent_save_path,
     make_run_dir,
@@ -112,6 +113,7 @@ def build_scheduler(
     allow_unisolated_child_tests: bool = False,
     prebuild_team: bool = False,
     allow_unisolated_shell: bool | None = None,
+    max_steps: int = SESSION_MAX_STEPS,
 ) -> Scheduler:
     """Build the Scheduler and let it create agent 0 (the init process).
 
@@ -148,6 +150,13 @@ def build_scheduler(
     watching it, which is why one boolean used to answer both. An unattended
     batch run pulls them apart: its agents must be able to run ``git`` in their
     worktrees, and there is nobody for them to ask anything. Passing
+    ``max_steps`` is the step ceiling every seat is built with — the entry agent
+    and each teammate alike. It is a runaway guard rather than an allowance:
+    tokens are the resource a run is held to, and steps are counted and
+    reported. Before this parameter existed the ceiling could not be set at all
+    on this path, and the two hard-coded defaults gave the entry agent twice
+    what a teammate got.
+
     ``allow_unisolated_shell=True`` with ``interactive=False`` is exactly that
     run, and it is not expressible with one flag.
 
@@ -216,6 +225,7 @@ def build_scheduler(
         # the hardened default it gives a child a model spawned mid-run.
         prebuilt_roster=prebuild_team,
         allow_unisolated_shell=allow_unisolated_shell,
+        max_steps=max_steps,
     )
     worktree_pool = WorktreePool(ctx.workspace, use_worktrees=use_worktrees)
 

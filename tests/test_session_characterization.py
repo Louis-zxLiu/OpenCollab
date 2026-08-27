@@ -383,7 +383,11 @@ def test_no_tool_calls_marks_done_and_emits_text_delta():
     assert session.messages[-1] == {"role": "assistant", "content": "plain answer"}
     assert [event.type for event in events] == ["step_start", "text_delta", "step_end"]
     assert fake_llm.calls[0]["tools"] is None
-    assert [step["step_type"] for step in tracer.steps] == ["context_shaping", "llm_call"]
+    assert [step["step_type"] for step in tracer.steps] == [
+        "context_shaping",
+        "llm_call",
+        "session_terminal",
+    ]
     assert tracer.steps[1]["payload"]["content"] == "plain answer"
 
 def test_session_accepts_explicit_llm_client():
@@ -498,6 +502,7 @@ def test_tool_calls_execute_append_tool_result_and_continue():
         "tool_exec",
         "context_shaping",
         "llm_call",
+        "session_terminal",
     ]
     assert fake_llm.calls[0]["tools"][0]["function"]["name"] == "fake_tool"
 

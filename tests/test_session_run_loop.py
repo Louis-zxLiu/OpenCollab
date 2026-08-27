@@ -323,7 +323,13 @@ def test_actual_usage_overrun_is_traced_and_response_is_discarded():
         "error",
         "step_end",
     ]
-    assert [step["step_type"] for step in tracer.steps] == ["context_shaping", "llm_call"]
+    # Closing row: how the session ended, beside both counters (see
+    # ``_trace_session_terminal``).
+    assert [step["step_type"] for step in tracer.steps] == [
+        "context_shaping",
+        "llm_call",
+        "session_terminal",
+    ]
     assert tracer.steps[1]["tokens"] == reserved_input_tokens + 101
     assert tracer.steps[1]["payload"]["usage"]["input_tokens"] == (
         reserved_input_tokens + 100
@@ -576,6 +582,7 @@ def test_run_loop_llm_step_events_trace_and_message_shape():
         "llm_call",
         "context_shaping",
         "llm_call",
+        "session_terminal",
     ]
     assert events[2][1]["latency"] == tracer.steps[1]["latency"]
     assert tracer.steps[1] == {
@@ -878,3 +885,86 @@ def test_shaper_bounds_model_view_but_leaves_state_messages_full():
     assert "re-read a narrower range" in sent_tool["content"]
     # ...while the persisted history kept the full result.
     assert state.messages[1]["content"] == big
+
+
+def test_a_session_stopped_by_its_step_ceiling_says_so_on_disk():
+    """The ceiling is a guard, so a run has to be able to prove it never fired.
+
+    Tokens are the resource these arms are held to; steps vary and are counted.
+    A session stopped at its step ceiling with budget still unspent is that
+    story falling apart, and before this record it looked identical to a session
+    that simply finished: one STOPPED phase, a reason string that lived only in
+    memory, nothing in the trajectory.
+    """
+    tracer = FakeTracer()
+    calls = [tool_call()]
+    runner = build_runner(
+        agent=FakeAgent([{"type": "function", "function": {"name": "fake_tool"}}]),
+        # Never finishes on its own: every turn asks for another tool call, so
+        # the only thing that can stop it is a ceiling.
+        llm=FakeLLM(
+            [
+                llm_response(
+                    content="still working",
+                    tool_calls=calls,
+                    total_tokens=5,
+                    finish_reason="tool_calls",
+                )
+            ]
+            * 6
+        ),
+        tool_execution=FakeToolExecution(
+            ToolProcessingResult(
+                messages_to_append=[
+                    {"role": "tool", "tool_call_id": "call-1", "content": "ok"}
+                ]
+            )
+        ),
+        tracer=tracer,
+        max_steps=2,
+        max_budget_tokens=1_000_000,
+    )
+
+    run(runner.run_loop())
+
+    terminal = [step for step in tracer.steps if step["step_type"] == "session_terminal"]
+    assert len(terminal) == 1
+    payload = terminal[0]["payload"]
+    assert payload["step_ceiling_reached"] is True
+    assert payload["terminal_reason"] == "step limit reached: 2 steps"
+    # The other resource was nowhere near spent, which is what makes the stop a
+    # limit acting rather than a run finishing.
+    assert payload["used_tokens"] < payload["max_budget_tokens"]
+
+
+def test_a_session_that_finishes_on_its_own_reports_an_unreached_ceiling():
+    """The control. Without it the field above proves nothing: a record that
+    said "reached" for every session would pass the test above unchanged."""
+    tracer = FakeTracer()
+    runner = build_runner(
+        llm=FakeLLM([llm_response(content="done", total_tokens=5)]),
+        tracer=tracer,
+        max_steps=50,
+    )
+
+    run(runner.run_loop())
+
+    payload = [s for s in tracer.steps if s["step_type"] == "session_terminal"][0]["payload"]
+    assert payload["step_ceiling_reached"] is False
+    assert payload["step_count"] < payload["max_steps"]
+
+
+def test_a_finished_session_re_entered_for_its_answer_does_not_sign_off_twice():
+    """``run_loop`` doubles as a read-only query on a DONE session. One session
+    is one disposition; a second row would double-count it."""
+    tracer = FakeTracer()
+    runner = build_runner(
+        llm=FakeLLM([llm_response(content="done", total_tokens=5)]),
+        tracer=tracer,
+    )
+
+    run(runner.run_loop())
+    run(runner.run_loop())
+
+    assert len([s for s in tracer.steps if s["step_type"] == "session_terminal"]) == 1
+

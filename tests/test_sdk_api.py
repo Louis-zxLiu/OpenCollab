@@ -79,6 +79,11 @@ def test_public_class_and_method_shapes_stay_lean() -> None:
             # seated before the first model call, and a seat whose shell runs.
             "prebuild_team",
             "allow_unisolated_shell",
+            # And the ceiling that must not become a third one: a team run holds
+            # tokens equal to a solo run's, so its step ceiling has to sit above
+            # what those tokens can pay for. ``agent`` and ``workflow`` already
+            # took this; ``team`` is where it could not be set at all.
+            "max_steps",
         ),
         sdk.OpenCollab.workflow: (
             "self",

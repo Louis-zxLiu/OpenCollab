@@ -342,6 +342,32 @@ def _fork_snapshot_environment(environment: Any) -> Environment:
     return snapshot_environment
 
 
+SESSION_MAX_STEPS = 100
+"""The step ceiling every session in a run is built with.
+
+A runaway guard, not an allowance. Steps and tokens cannot both be equalized
+across differently-organized runs: a solo agent carries one long history and
+pays more per step, while a team's members each carry a short one and pay less,
+so holding the token pool equal makes the team's step count higher and holding
+the step count equal makes its token spend lower. Exactly one of the two can be
+the aligned resource, and it is tokens — that is the cost, the thing the
+provider bills, and the thing a budget claim is about. Steps are counted and
+reported instead, which makes them a result rather than a control.
+
+A guard is therefore only useful if it never fires: a session stopped by this
+ceiling while it still held tokens would be a limit acting under the name of a
+statistic. It has to sit above what the pool can physically fund, and every
+step must send the system prompt and the tool schemas, which compaction cannot
+remove — so the cheapest possible step has a floor and the pool divided by that
+floor bounds the steps a run can reach. Measured on the arms this repository
+ships, that bound is under 500 steps for a 1,000,000-token pool.
+
+The value is the same for every seat. A teammate used to get half the entry
+agent's allowance for no reason anyone could state, which is the same kind of
+unearned privilege difference the shell gate had.
+"""
+
+
 def build_spawn_session(
     *,
     role: str,
@@ -410,6 +436,7 @@ class DefaultSessionFactory:
         allow_unisolated_child_tests: bool = False,
         prebuilt_roster: bool = False,
         allow_unisolated_shell: bool | None = None,
+        max_steps: int = SESSION_MAX_STEPS,
     ):
         self._cfg = cfg
         self._provider_retry_budget = (
@@ -429,6 +456,7 @@ class DefaultSessionFactory:
         # Run folder where every agent's transcript is persisted. When set,
         # spawned children get their own ``agent_<aid>_<role>.json`` autosave.
         self._save_dir = save_dir
+        self._max_steps = int(max_steps)
 
     def _validate_responses_tool_support(self) -> None:
         """Reject statically incompatible team roles before opening a workspace."""
@@ -528,13 +556,17 @@ class DefaultSessionFactory:
         role: str,
         env: Environment,
         budget: int,
-        max_steps: int = 50,
+        max_steps: int | None = None,
         aid: int = -1,
         scheduler: SchedulerPort | None = None,
         task: str | None = None,
         context: str = "",
     ) -> Session:
         role = validate_role_identity(role)
+        # ``None`` means "whatever this run is using", which is the run's single
+        # ceiling. A caller that names a number still gets it, so the standalone
+        # ``build_spawn_session`` helper keeps its own documented default.
+        max_steps = self._max_steps if max_steps is None else int(max_steps)
         cfg = self._cfg
         safety_policy = (
             cfg.safety_policy_factory(env)
@@ -614,6 +646,7 @@ class DefaultSessionFactory:
             env=env,
             tracer=cfg.tracer,
             max_budget_tokens=budget,
+            max_steps=self._max_steps,
             event_sink=cfg.event_bus,
             permission_policy=cfg.permission_policy,
             ask_policy=cfg.ask_policy,
@@ -635,6 +668,7 @@ __all__ = [
     "SnapshotSessionError",
     "agent_save_path",
     "build_session",
+    "SESSION_MAX_STEPS",
     "build_spawn_session",
     "load_session",
     "make_run_dir",
