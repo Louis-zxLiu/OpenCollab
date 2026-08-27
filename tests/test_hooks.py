@@ -17,6 +17,10 @@ from types import SimpleNamespace
 import pytest
 
 from opencollab.adapters import hooks as hooks_adapter
+from opencollab.adapters._env_process import (
+    PROCESS_KILL_GRACE_SECONDS,
+    PROCESS_TERM_GRACE_SECONDS,
+)
 from opencollab.adapters.hooks import ShellHookRunner
 from opencollab.application.hooks import HookEventSubscriber
 from opencollab.bootstrap import build_runtime_context, build_scheduler
@@ -167,12 +171,25 @@ def test_runner_swallows_nonzero_exit():
     assert outcome.allow is True
 
 
+# Killing one hook may cost the hook's own timeout, then a SIGTERM grace, then
+# two kill graces reaping the group. A test deadline below that sum reports a
+# kill that worked as a failure on any machine slow enough to need the graces.
+HOOK_KILL_WORST_CASE_SECONDS = PROCESS_TERM_GRACE_SECONDS + 2 * PROCESS_KILL_GRACE_SECONDS
+
+
 def test_runner_kills_on_timeout_without_raising():
-    spec = HookSpec(event="Stop", action_type="command", command="sleep 5", timeout=0.2)
+    hook_timeout = 0.2
+    # The command outlives the deadline by an order of magnitude, so a hook that
+    # was waited out instead of killed trips the deadline rather than passing.
+    spec = HookSpec(event="Stop", action_type="command", command="sleep 60", timeout=hook_timeout)
     runner = ShellHookRunner((spec,))
+    deadline = hook_timeout + HOOK_KILL_WORST_CASE_SECONDS + 1.0
 
     async def _run():
-        return await asyncio.wait_for(runner.fire("Stop", {"hook_event_name": "Stop"}), timeout=2.0)
+        return await asyncio.wait_for(
+            runner.fire("Stop", {"hook_event_name": "Stop"}),
+            timeout=deadline,
+        )
 
     # Returns well under the sleep duration and does not raise.
     outcome = asyncio.run(_run())
@@ -180,14 +197,19 @@ def test_runner_kills_on_timeout_without_raising():
 
 
 def _delayed_sentinel_command(started, finished) -> str:
-    code = (
-        "import pathlib,time; "
-        f"pathlib.Path({str(started)!r}).touch(); "
-        "time.sleep(0.6); "
-        f"pathlib.Path({str(finished)!r}).touch()"
+    """A backgrounded descendant that marks its start, waits, then marks its end.
+
+    Both marks are shell redirections rather than a launched program: the callers
+    below kill this group on a sub-second timeout, and an interpreter's startup
+    does not reliably fit inside one — measured at 0.04-0.35s on the machines
+    this suite runs on, against a 0.2s hook timeout.
+    """
+    child = (
+        f": > {shlex.quote(str(started))}; "
+        "sleep 0.6; "
+        f": > {shlex.quote(str(finished))}"
     )
-    child = f"{shlex.quote(sys.executable)} -c {shlex.quote(code)}"
-    return f"{child} & wait"
+    return f"{{ {child}; }} & wait"
 
 
 def test_runner_timeout_kills_descendant_process_group(tmp_path):

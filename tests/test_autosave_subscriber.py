@@ -125,12 +125,13 @@ def test_autosave_coalesces_generations_not_yet_started():
 def test_autosave_coalesces_pending_generations_without_blocking_emit():
     current = {"value": ""}
     saved: list[str] = []
+    release = threading.Event()
 
     def prepare():
         frozen = current["value"]
 
         def save():
-            time.sleep(0.02)
+            release.wait(10.0)
             saved.append(frozen)
 
         return save
@@ -138,17 +139,18 @@ def test_autosave_coalesces_pending_generations_without_blocking_emit():
     subscriber = AutoSaveSubscriber(lambda: None, prepare_fn=prepare)
 
     async def scenario():
-        started = time.monotonic()
         for index in range(10):
             current["value"] = str(index)
             await subscriber.emit(SessionEvent(type="step_end"))
-        emit_elapsed = time.monotonic() - started
+            # The first save is parked in the sink and nothing has released it,
+            # so an emit that waited for its save could not have returned here.
+            # Not blocking is proved by what has been saved, not by a stopwatch.
+            assert saved == []
+        release.set()
         await asyncio.gather(*subscriber.pending_tasks)
-        return emit_elapsed
 
-    elapsed = asyncio.run(scenario())
+    asyncio.run(scenario())
 
-    assert elapsed < 0.05
     assert saved == ["0", "9"]
 
 

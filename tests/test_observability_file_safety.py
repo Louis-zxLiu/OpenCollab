@@ -6,7 +6,6 @@ import asyncio
 import json
 import os
 import threading
-import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -143,23 +142,24 @@ def test_tracer_write_failure_is_sticky(tmp_path, monkeypatch) -> None:
 def test_tracer_slow_write_does_not_block_log_step(tmp_path, monkeypatch) -> None:
     started = threading.Event()
     release = threading.Event()
+    left_sink = threading.Event()
 
     def slow_write(*_args, **_kwargs) -> None:
         started.set()
-        assert release.wait(1.0)
+        release.wait(10.0)
+        left_sink.set()
 
     monkeypatch.setattr("opencollab.adapters.trace.write_locked_text", slow_write)
     tracer = Tracer("run", output_dir=str(tmp_path))
-    timer = threading.Timer(0.15, release.set)
-    timer.start()
     try:
-        before = time.monotonic()
         tracer.log_step("slow", {})
-        elapsed = time.monotonic() - before
-        assert elapsed < 0.05
+        # The writer really is inside the slow sink, and nothing has released it
+        # yet — so a log_step that waited for the write could not have returned.
+        # Handing off is proved by which events are set, not by how long it took.
+        assert started.wait(10.0)
+        assert not left_sink.is_set()
     finally:
         release.set()
-        timer.cancel()
         tracer.close()
 
 

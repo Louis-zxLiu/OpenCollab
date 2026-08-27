@@ -520,15 +520,29 @@ async def test_first_event_timeout_includes_waiting_for_response_headers():
 
 
 @pytest.mark.asyncio
-async def test_response_header_timeout_retries_the_same_request():
+async def test_response_header_timeout_retries_the_same_request(monkeypatch):
     calls = 0
+
+    # The first-event budget is spent by attempt 1 *and* re-imposed on attempt 2,
+    # which has to create its stream and yield its first event inside whatever is
+    # left of it. Keep the budget far above the microseconds that costs: a value
+    # small enough to be interesting on attempt 1 is a coin flip on attempt 2.
+    first_event_timeout = 0.25
+
+    async def skip_delay(_seconds):
+        return None
+
+    # Patching ``retry.asyncio.sleep`` mutates the one shared ``asyncio`` module,
+    # so the stalled attempt below must hang on something other than a sleep.
+    monkeypatch.setattr("opencollab.adapters.llm.retry.asyncio.sleep", skip_delay)
+    never = asyncio.Event()
 
     class Responses:
         async def create(self, **_kwargs):
             nonlocal calls
             calls += 1
             if calls == 1:
-                await asyncio.sleep(10)
+                await never.wait()
             item = message_item("OK")
             return FakeStream(
                 [
@@ -545,9 +559,9 @@ async def test_response_header_timeout_retries_the_same_request():
         None,
         0,
         1,
-        first_event_timeout=0.001,
+        first_event_timeout=first_event_timeout,
         stream_idle_timeout=1,
-        round_timeout=2,
+        round_timeout=5,
     )
 
     assert calls == 2
