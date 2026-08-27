@@ -19,6 +19,22 @@ from opencollab.application.workflow import (
     WorkflowBudgetExceeded,
     WorkflowContext,
 )
+from opencollab.application.workflow_runtime import (
+    DEFAULT_INTERNAL_COMMIT_TIMEOUT_SECONDS,
+)
+
+# Waits on work that must SUCCEED. It is event-loop bookkeeping with no
+# intrinsic duration, so a sub-second budget bounds how starved the machine is
+# rather than the code, and reports work that finished as a red build. The
+# waits meant to EXPIRE keep their own small timeouts.
+MUST_SETTLE_SECONDS = 10.0
+
+# test_dead_scout_synth_respects_the_callers_deadline separates two outcomes:
+# the caller's deadline was honoured (milliseconds) or it was not, in which case
+# the internal commit cap runs instead. Any value between them tells them apart,
+# so sit far from the fast one rather than a tenth of a second away from it.
+CALLER_DEADLINE_HONOURED_SECONDS = 10.0
+assert CALLER_DEADLINE_HONOURED_SECONDS < DEFAULT_INTERNAL_COMMIT_TIMEOUT_SECONDS
 
 
 @pytest.mark.asyncio
@@ -258,7 +274,7 @@ async def test_timeout_keeps_concurrency_slot_until_cancel_cleanup_finishes():
     ctx = WorkflowContext(factory, max_concurrency=1)
 
     assert await ctx.agent("slow", timeout=0.05) is None
-    await asyncio.wait_for(timed_out.cancel_seen.wait(), timeout=0.5)
+    await asyncio.wait_for(timed_out.cancel_seen.wait(), timeout=MUST_SETTLE_SECONDS)
 
     second_task = asyncio.create_task(ctx.agent("second"))
     for _ in range(20):
@@ -267,7 +283,7 @@ async def test_timeout_keeps_concurrency_slot_until_cancel_cleanup_finishes():
     assert second_task.done() is False
 
     timed_out.release_cancel.set()
-    assert await asyncio.wait_for(second_task, timeout=0.5) == "second"
+    assert await asyncio.wait_for(second_task, timeout=MUST_SETTLE_SECONDS) == "second"
     assert overlapped is False
 
 @pytest.mark.asyncio
@@ -282,11 +298,11 @@ async def test_active_background_agent_is_visible_to_boundary_owner():
     ctx = WorkflowContext(FakeFactory([session]))
     agent_task = asyncio.create_task(ctx.agent("background"))
 
-    await asyncio.wait_for(started.wait(), timeout=0.5)
+    await asyncio.wait_for(started.wait(), timeout=MUST_SETTLE_SECONDS)
     assert agent_task in ctx.pending_cleanup_tasks
 
     release.set()
-    assert await asyncio.wait_for(agent_task, timeout=0.5) == "done"
+    assert await asyncio.wait_for(agent_task, timeout=MUST_SETTLE_SECONDS) == "done"
     await asyncio.sleep(0)
     assert ctx.pending_cleanup_tasks == ()
 
@@ -307,9 +323,9 @@ async def test_pending_cleanup_callback_consumes_late_exception():
     ctx = WorkflowContext(FakeFactory([session]))
     try:
         assert await ctx.agent("slow", timeout=0.05) is None
-        await asyncio.wait_for(session.cancel_seen.wait(), timeout=0.5)
+        await asyncio.wait_for(session.cancel_seen.wait(), timeout=MUST_SETTLE_SECONDS)
         session.release_cancel.set()
-        await asyncio.wait_for(ctx.wait_for_pending_cleanup(), timeout=0.5)
+        await asyncio.wait_for(ctx.wait_for_pending_cleanup(), timeout=MUST_SETTLE_SECONDS)
         for _ in range(3):
             await asyncio.sleep(0)
         gc.collect()
@@ -341,9 +357,9 @@ async def test_enforced_timeout_does_not_start_synth_while_scout_cleans_up():
 
     assert result is not None and "evidence cards" in result
     assert len(factory.builds) == 1
-    await asyncio.wait_for(timed_out.cancel_seen.wait(), timeout=0.5)
+    await asyncio.wait_for(timed_out.cancel_seen.wait(), timeout=MUST_SETTLE_SECONDS)
     timed_out.release_cancel.set()
-    await asyncio.wait_for(ctx.wait_for_pending_cleanup(), timeout=0.5)
+    await asyncio.wait_for(ctx.wait_for_pending_cleanup(), timeout=MUST_SETTLE_SECONDS)
 
 
 @pytest.mark.asyncio
@@ -383,14 +399,14 @@ async def test_dead_scout_synth_respects_the_callers_deadline():
                 timeout=0.01,
                 enforcement_strength=ENFORCEMENT_ON,
             ),
-            timeout=0.2,
+            timeout=CALLER_DEADLINE_HONOURED_SECONDS,
         )
     finally:
         await ctx.wait_for_pending_cleanup()
 
     assert result is not None and "evidence cards" in result
     assert synth.cancelled.is_set()
-    assert asyncio.get_running_loop().time() - started_at < 0.1
+    assert asyncio.get_running_loop().time() - started_at < CALLER_DEADLINE_HONOURED_SECONDS
 
 
 @pytest.mark.asyncio
@@ -478,14 +494,14 @@ async def test_budget_lease_release_cannot_be_cancelled_while_lock_is_held():
     )
 
     first_task = asyncio.create_task(ctx.agent("first", budget=80))
-    await asyncio.wait_for(first_started.wait(), timeout=0.5)
+    await asyncio.wait_for(first_started.wait(), timeout=MUST_SETTLE_SECONDS)
     await ctx._budget_lock.acquire()
     try:
         release_first.set()
         for _ in range(5):
             await asyncio.sleep(0)
         first_task.cancel()
-        assert await asyncio.wait_for(first_task, timeout=0.5) == "first"
+        assert await asyncio.wait_for(first_task, timeout=MUST_SETTLE_SECONDS) == "first"
         assert ctx.budget._leases == []
     finally:
         ctx._budget_lock.release()
