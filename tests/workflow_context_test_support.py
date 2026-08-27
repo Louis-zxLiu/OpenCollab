@@ -10,9 +10,12 @@ from opencollab.domain.session import TurnEnforcementState
 
 
 class FakeState:
-    def __init__(self) -> None:
+    def __init__(self, aid: int = -1) -> None:
         self.messages: list[dict[str, Any]] = []
         self.turn = TurnEnforcementState()
+        # The real factory stamps a per-session id here; -1 is the same default
+        # ``build_session`` uses when nobody passes one.
+        self.aid = aid
 
 class FakeSession:
     """A scripted one-shot session.
@@ -109,6 +112,7 @@ class FakeFactory:
         self._sessions = list(sessions)
         self._idx = 0
         self.builds: list[dict[str, Any]] = []
+        self._next_aid = 0
 
     def build_workflow_session(
         self,
@@ -134,6 +138,9 @@ class FakeFactory:
         )
         session = self._sessions[self._idx]
         self._idx += 1
+        # Mirror the real factory: one id per session, in build order.
+        session.state.aid = self._next_aid
+        self._next_aid += 1
         return session
 
 class RecordingSink:
@@ -142,6 +149,20 @@ class RecordingSink:
 
     async def emit(self, event: Any) -> None:
         self.events.append(event)
+
+class RecordingTracer:
+    """Keeps every trace record so a test can read the run back."""
+
+    def __init__(self) -> None:
+        self.steps: list[dict[str, Any]] = []
+
+    def log_step(self, *, step_type: str, payload: dict[str, Any]) -> None:
+        self.steps.append({"step_type": step_type, "payload": payload})
+
+    def payloads(self, step_type: str) -> list[dict[str, Any]]:
+        return [
+            step["payload"] for step in self.steps if step["step_type"] == step_type
+        ]
 
 class _DeferredTokenSession(FakeSession):
     """A FakeSession whose reported token spend can be deferred.

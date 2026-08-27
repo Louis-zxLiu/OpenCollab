@@ -151,6 +151,10 @@ class WorkflowContext(
         self._semaphore = asyncio.Semaphore(max_concurrency)
         self._task_semaphore = asyncio.Semaphore(task_concurrency)
         self._sessions: list[Any] = []
+        # Title of the most recent ``phase()`` call, carried onto every agent
+        # started after it. Without it a run's agents are an undifferentiated
+        # sequence and nothing says which stage of the script each belonged to.
+        self._phase_title: str | None = None
         self.budget = WorkflowBudget(budget_total, self._sessions)
         self._budget_lock = asyncio.Lock()
         self._budget_waiters = 0
@@ -268,6 +272,54 @@ class WorkflowContext(
                 }
             )
             logger.error("workflow %s trace failed: %s", step_type, exc)
+
+    def _build_workflow_session(
+        self,
+        *,
+        label: str | None,
+        budget: int,
+        tools: Sequence[Any] | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Build one one-shot session and record that this agent existed.
+
+        Every workflow agent is created here, so this is where a run says who
+        ran. It has to be said out loud: a workflow keeps its sessions in a
+        plain list, and the only other place a script's own name for an agent
+        survives is the transcript filename — which exists only when the run was
+        given a folder to save into. An ephemeral run left no way to tell one
+        agent from another at all.
+
+        The ``aid`` is the same integer the agent's ``llm_call``, ``tool_exec``
+        and ``session_terminal`` records carry, so this record is what joins
+        those to a role: it names the agent the script asked for, the phase it
+        was asked for in, and what it was given to work with.
+
+        Emitted after the build, because an agent that failed to build has no
+        id to attribute anything to; the caller records that failure instead.
+        """
+        session = self._factory.build_workflow_session(
+            label=label,
+            budget=budget,
+            tools=tools,
+            **kwargs,
+        )
+        state = getattr(session, "state", None)
+        self._trace_step(
+            "workflow_agent_started",
+            {
+                "aid": getattr(state, "aid", None),
+                "label": label,
+                "phase": self._phase_title,
+                "tools": [
+                    name
+                    for tool in tools or ()
+                    if isinstance((name := getattr(tool, "name", None)), str)
+                ],
+                "budget": budget,
+            },
+        )
+        return session
 
     def _record_agent_failure(self, label: str | None, exc: Exception) -> None:
         status_code = getattr(exc, "status_code", None)
@@ -522,7 +574,7 @@ class WorkflowContext(
         deadline = self._timeout_deadline(timeout)
         session_budget = self._capped_session_budget(budget)
         try:
-            session = self._factory.build_workflow_session(
+            session = self._build_workflow_session(
                 prompt=prompt,
                 budget=session_budget,
                 tools=tools,
@@ -745,7 +797,8 @@ class WorkflowContext(
     # -- observability ----------------------------------------------------- #
 
     async def phase(self, title: str) -> None:
-        """Mark a workflow phase. No-op when no sink/tracer is wired."""
+        """Mark a workflow phase, and carry it onto the agents started next."""
+        self._phase_title = title
         await self._emit("phase", title)
 
     async def log(self, message: str) -> None:

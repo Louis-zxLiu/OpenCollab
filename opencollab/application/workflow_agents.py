@@ -63,7 +63,7 @@ class WorkflowAgentsMixin:
         submit_tool = SubmitFindingsTool(on_capture=capture_done.set)
         combined_tools = [*(tools or []), submit_tool]
         try:
-            session = self._factory.build_workflow_session(
+            session = self._build_workflow_session(
                 prompt=prompt,
                 budget=session_budget,
                 tools=combined_tools,
@@ -160,7 +160,7 @@ class WorkflowAgentsMixin:
         synth_label = f"{label}:synth" if label else "synth"
         session_budget = self._capped_session_budget(commit_reserve)
         try:
-            session = self._factory.build_workflow_session(
+            session = self._build_workflow_session(
                 prompt=prompt,
                 budget=session_budget,
                 tools=[submit_tool],
@@ -256,7 +256,7 @@ class WorkflowAgentsMixin:
         submit_tool = SubmitFindingsTool(on_capture=capture_done.set)
         draft_label = f"{label}:draft" if label else "draft"
         try:
-            session = self._factory.build_workflow_session(
+            session = self._build_workflow_session(
                 prompt=prompt,
                 budget=session_budget,
                 tools=[submit_tool],
