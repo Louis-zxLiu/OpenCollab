@@ -38,10 +38,10 @@ def _git(cwd, *args) -> str:
     ).stdout.strip()
 
 
-def _repo(path):
+def _repo(path, *, object_format: str = "sha1"):
     """A committed repository — the precondition for linked worktrees."""
     path.mkdir()
-    _git(path, "init", "-q", "-b", "main")
+    _git(path, "init", "-q", "-b", "main", f"--object-format={object_format}")
     _git(path, "config", "user.email", "tests@example.com")
     _git(path, "config", "user.name", "OpenCollab Tests")
     (path / "tracked.txt").write_text("base\n", encoding="utf-8")
@@ -278,3 +278,40 @@ async def test_a_non_git_worktree_names_no_head_and_no_commits(tmp_path) -> None
         assert env.own_commit_count is None
     finally:
         await env.cleanup()
+
+
+async def test_a_handoff_is_read_in_a_sha256_repository_too(tmp_path) -> None:
+    """The same handoff, in a repository whose object ids are 64 characters.
+
+    A harness that rebuilds the repository under test can choose SHA-256, and
+    the evaluation harness this project runs against does exactly that for
+    instances whose base tree is recorded that way. The base is read out of the
+    HEAD reflog, so a rule that recognised only 40-character ids would find no
+    entry it could parse, quietly fall back to the creation base, and report
+    every handoff as work the taker did itself — with nothing failing to say so.
+    """
+    source = _repo(tmp_path / "repo", object_format="sha256")
+    coder = WorktreeEnvironment(str(source), branch_name="sha256-coder")
+    tester = WorktreeEnvironment(str(source), branch_name="sha256-tester")
+    try:
+        await coder.setup()
+        await coder.write_file("f1.txt", "coder work\n")
+        assert (await coder.exec_cmd("git add -A && git commit -qm coder")).returncode == 0
+        handoff_sha = _git(coder.workspace, "rev-parse", "HEAD")
+        assert len(handoff_sha) == 64
+        # The scheduler reads an agent's evidence by taking its diff, so the
+        # coder's commit list is populated the same way it is in a real run.
+        assert _changed_files(await coder.get_diff()) == ["f1.txt"]
+
+        await tester.setup()
+        assert (await tester.exec_cmd(f"git checkout -q {handoff_sha}")).returncode == 0
+        await tester.write_file("f2.txt", "tester work\n")
+
+        diff = await tester.get_diff()
+
+        assert _changed_files(diff) == ["f2.txt"]
+        assert tester.diff_base == handoff_sha
+        assert handoff_sha in coder.own_commits
+    finally:
+        await tester.cleanup()
+        await coder.cleanup()

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import re
 import shlex
 import shutil
 import tempfile
@@ -14,23 +13,17 @@ from opencollab.adapters._env_base import Environment, ExecResult, TextFileRange
 from opencollab.adapters._env_local import LocalEnvironment
 from opencollab.adapters._env_process import run_process
 from opencollab.adapters.git_patch import guarded_staged_diff_command
+from opencollab.adapters.git_worktree_evidence import (
+    ABSENT_REF_OLD_VALUE,
+    parse_own_commits,
+    select_diff_base,
+    validate_worktree_branch,
+)
 from opencollab.application.async_timeout import await_owned_operation
 from opencollab.application.exception_notes import add_exception_note
 
 WORKTREE_GIT_TIMEOUT_SECONDS = 30.0
-_BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,180}$")
-_ZERO_OID = "0" * 40
-# One HEAD reflog entry as ``git log -g --format=%H%x09%gs`` writes it: the
-# commit HEAD was moved to, and the message saying how it got there.
-_REFLOG_ENTRY_RE = re.compile(r"^([0-9a-f]{40})\t(.*)$")
-# Reflog messages for a commit this worktree made itself: ``commit: <subject>``,
-# and the parenthesised variants ``commit (initial)``, ``commit (amend)``,
-# ``commit (merge)``. Every other way HEAD moves adopts a commit from elsewhere.
-_OWN_COMMIT_REFLOG_PREFIX = "commit"
 _PORCELAIN_STATUS_CHARS = frozenset(" MADRCU?!")
-# How many of a worktree's own commits are listed to a caller. The true total is
-# reported separately, so a capped list never reads as a shorter one.
-_OWN_COMMIT_LIMIT = 64
 
 
 def _dirty_path_preview(output: str, *, limit: int = 12) -> str:
@@ -64,9 +57,9 @@ class WorktreeEnvironment(Environment):
             raise NotADirectoryError(self._source)
         self.source_workspace = self._source
         self.host_workspace = None
-        self._branch = branch_name or f"opencollab-wt-{uuid.uuid4().hex[:12]}"
-        if not _BRANCH_RE.fullmatch(self._branch):
-            raise ValueError("worktree branch name must be one safe Git ref component")
+        self._branch = validate_worktree_branch(
+            branch_name or f"opencollab-wt-{uuid.uuid4().hex[:12]}"
+        )
         self._worktree_dir: str | None = None
         self._copy_baseline_dir: str | None = None
         self._copy_exported_diff: str | None = None
@@ -207,7 +200,7 @@ class WorktreeEnvironment(Environment):
             "update-ref",
             f"refs/heads/{self._branch}",
             self._base_commit,
-            _ZERO_OID,
+            ABSENT_REF_OLD_VALUE,
         )
         if claimed.returncode != 0:
             branch_probe = await self._git(
@@ -496,9 +489,7 @@ class WorktreeEnvironment(Environment):
         )
         if listed.returncode != 0 or listed.stdout_truncated or listed.stderr_truncated:
             return
-        commits = listed.stdout.split()
-        self._own_commits = tuple(commits[:_OWN_COMMIT_LIMIT])
-        self._own_commit_count = len(commits)
+        self._own_commits, self._own_commit_count = parse_own_commits(listed.stdout)
 
     async def _resolve_diff_base(self) -> str:
         """The commit this worktree's current stretch of work started from.
@@ -540,15 +531,7 @@ class WorktreeEnvironment(Environment):
         reflog = await self._git_in(worktree, "log", "-g", "--format=%H%x09%gs", "HEAD")
         if reflog.returncode != 0 or reflog.stdout_truncated or reflog.stderr_truncated:
             return self._base_commit
-        for line in reflog.stdout.splitlines():
-            entry = _REFLOG_ENTRY_RE.match(line)
-            if entry is None:
-                continue
-            commit, message = entry.group(1), entry.group(2)
-            if message.startswith(_OWN_COMMIT_REFLOG_PREFIX):
-                continue
-            return commit
-        return self._base_commit
+        return select_diff_base(reflog.stdout, fallback=self._base_commit)
 
     async def get_diff(self) -> str:
         self._ensure_active()
