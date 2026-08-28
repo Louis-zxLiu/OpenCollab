@@ -72,15 +72,23 @@ def test_patch_blocks_ignored_untracked_files_without_leaking_content(tmp_path):
         ("diff.hide.command", "true"),
         ("diff.hide.textconv", "true"),
         ("filter.hide.clean", "true"),
-        ("core.attributesfile", "/dev/null"),
         ("core.excludesfile", "/dev/null"),
         ("core.fsmonitor", "true"),
         ("core.sparsecheckout", "true"),
+        ("core.sparsecheckoutcone", "true"),
         ("core.worktree", "/tmp/elsewhere"),
-        ("diff.ignoresubmodules", "all"),
     ],
 )
-def test_patch_rejects_repository_local_transform_config(tmp_path, key, value):
+def test_patch_rejects_config_it_cannot_make_harmless(tmp_path, key, value):
+    """Settings no command-line override can be trusted to defuse.
+
+    A clean/smudge filter and an external diff driver are reached through a
+    tracked ``.gitattributes`` this command does not control; a sparse
+    checkout's skip-worktree bits outlive the setting that made them; a
+    redirected working tree moves what is being read; and a monitor that is
+    *on* can lie about what changed. Each makes the command exit 125 rather
+    than report a patch it cannot vouch for.
+    """
     repo = _repo(tmp_path)
     (repo / "tracked.txt").write_text("new\n", encoding="utf-8")
     _git(repo, "config", key, value)
@@ -175,6 +183,61 @@ def test_patch_rejects_transform_config_loaded_through_include(tmp_path):
 
     assert result.returncode == 125
     assert "core.excludesfile" in result.stderr
+
+
+def test_patch_survives_repository_attributes_that_would_hide_content(tmp_path):
+    """``core.attributesFile`` is pinned, so it cannot mark a file undiffable."""
+    repo = _repo(tmp_path)
+    (repo / "tracked.txt").write_text("new\n", encoding="utf-8")
+    attributes = tmp_path / "external-attributes"
+    attributes.write_text("tracked.txt -diff\n", encoding="utf-8")
+    _git(repo, "config", "core.attributesFile", str(attributes))
+
+    result = _extract(repo)
+
+    assert result.returncode == 0, result.stderr
+    assert "+new" in result.stdout
+    assert "Binary files" not in result.stdout
+
+
+def test_patch_survives_a_repository_that_hides_gitlink_changes(tmp_path):
+    """``diff.ignoreSubmodules=all`` would drop a gitlink change from the patch."""
+    repo = _repo(tmp_path)
+    linked = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    _git(repo, "update-index", "--add", "--cacheinfo", f"160000,{linked},sub")
+    _git(repo, "commit", "-qm", "add gitlink")
+    (repo / "tracked.txt").write_text("new\n", encoding="utf-8")
+    _git(repo, "add", "tracked.txt")
+    _git(repo, "commit", "-qm", "second")
+    moved = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    _git(repo, "update-index", "--cacheinfo", f"160000,{moved},sub")
+    _git(repo, "config", "diff.ignoreSubmodules", "all")
+
+    result = _extract(repo)
+
+    assert result.returncode == 0, result.stderr
+    assert "sub" in result.stdout
+
+
+def test_patch_allows_a_repository_that_turns_its_monitor_off(tmp_path):
+    """The exact local configuration the evaluation harness writes.
+
+    Its snapshot sets these three to *disable* attribute and monitor influence
+    on the tree it hashes. A guard that read the key name alone refused all
+    three, so no agent working in such a repository could produce any patch at
+    all -- the failure this case exists to keep from coming back.
+    """
+    repo = _repo(tmp_path)
+    (repo / "tracked.txt").write_text("new\n", encoding="utf-8")
+    _git(repo, "config", "core.attributesFile", os.devnull)
+    _git(repo, "config", "core.fsmonitor", "false")
+    _git(repo, "config", "diff.ignoreSubmodules", "all")
+
+    result = _extract(repo)
+
+    assert result.returncode == 0, result.stderr
+    assert "tracked.txt" in result.stdout
+    assert "+new" in result.stdout
 
 
 def test_patch_forces_filemode_evidence_on(tmp_path):
