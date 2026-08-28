@@ -81,6 +81,26 @@ class _ChildSession:
         return self._result
 
 
+class _BudgetStoppedSession(_ChildSession):
+    """A child that spends its whole budget and is stopped, not finished.
+
+    This is what a per-agent cap does: the loop winds down and the session ends
+    in STOPPED, which the scheduler reads as a terminal failure.
+    """
+
+    async def run_loop(self) -> str:
+        self.state.set_phase(SessionPhase.STOPPED)
+        self.state.terminal_reason = "budget exhausted"
+        return "ran out of budget"
+
+
+class _CrashingSession(_ChildSession):
+    """A child whose run loop raises instead of returning."""
+
+    async def run_loop(self) -> str:
+        raise RuntimeError("provider fell over")
+
+
 class _LeadSession:
     def __init__(self):
         self.agent = type("_Agent", (), {"name": "lead"})()
@@ -116,11 +136,18 @@ def _sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _run_one_child(tmp_path, env, run_id: str) -> tuple[list[dict], PendingRow]:
-    """Spawn one child that finishes with ``env``; return traces + parent row."""
+def _run_one_child(
+    tmp_path, env, run_id: str, *, session_class=None
+) -> tuple[list[dict], PendingRow]:
+    """Spawn one child that ends with ``env``; return traces + parent row.
+
+    ``session_class`` picks how that child ends: it defaults to the one that
+    completes, and the failure tests pass one that stops at its budget or dies
+    on its provider instead.
+    """
     tracer = Tracer(run_id=run_id, output_dir=str(tmp_path))
     trace_path = tracer.path
-    child = _ChildSession("coder", "implemented it", env)
+    child = (session_class or _ChildSession)("coder", "implemented it", env)
     lead = _LeadSession()
     scheduler = Scheduler(
         session_factory=_Factory(child),
@@ -388,3 +415,48 @@ def test_an_agent_that_changed_nothing_still_gets_a_row(tmp_path):
     assert payload["diff_chars"] == 0
     assert payload["truncated_in_result"] is False
     assert row.status is RowStatus.DONE
+
+
+def test_an_agent_stopped_at_its_budget_still_records_what_it_left_behind(tmp_path):
+    """A cap must not erase the evidence of the work it interrupted.
+
+    Only the completion path used to write this row, so an agent stopped at its
+    per-agent cap wrote nothing — and "nothing" is exactly what an agent that
+    changed no files writes. The two are opposite outcomes: this one committed
+    a fix and ran out of tokens before it could say so. Per-agent adherence is
+    scored off these rows, so scoring the first as the second counts real
+    collaboration as collaboration that never happened.
+    """
+    env = _CommittedEnv(THREE_FILE_DIFF, {"pkg/new.py": ADDED, "pkg/mod.py": MODIFIED})
+
+    payloads, row = _run_one_child(
+        tmp_path, env, "worktree-budget", session_class=_BudgetStoppedSession
+    )
+
+    assert row.status is RowStatus.FAILED
+    assert len(payloads) == 1
+    payload = payloads[0]
+    assert payload["aid"] == 1
+    assert payload["role"] == "coder"
+    assert payload["diff_sha"] == _sha(THREE_FILE_DIFF)
+    # The half of the row a handoff is joined on survives the stop too.
+    assert payload["commits"] == ["2" * 40, "3" * 40]
+    assert payload["head_commit"] == "2" * 40
+    assert [entry["path"] for entry in payload["files"]] == [
+        "pkg/new.py",
+        "pkg/mod.py",
+        "pkg/gone.py",
+    ]
+
+
+def test_an_agent_whose_run_loop_raised_still_records_what_it_left_behind(tmp_path):
+    """Same argument as the budget stop, reached down the exception path."""
+    env = _Env(THREE_FILE_DIFF, {"pkg/new.py": ADDED, "pkg/mod.py": MODIFIED})
+
+    payloads, row = _run_one_child(
+        tmp_path, env, "worktree-crash", session_class=_CrashingSession
+    )
+
+    assert row.status is RowStatus.FAILED
+    assert len(payloads) == 1
+    assert payloads[0]["diff_sha"] == _sha(THREE_FILE_DIFF)

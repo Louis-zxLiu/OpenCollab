@@ -390,6 +390,7 @@ class LifecycleMixin:
             scb.state.fail(terminal_reason)
             reason = f"Error: {terminal_reason}"
             scb.result = reason
+            await self._trace_worktree_evidence(aid, scb, session)
             try:
                 await self.emit_scheduler_event(
                     self._events.agent_failed(aid, scb.agent.name, terminal_reason)
@@ -426,6 +427,7 @@ class LifecycleMixin:
         terminal_failure = self._terminal_failure_result(scb, result)
         if terminal_failure is not None:
             scb.result = terminal_failure
+            await self._trace_worktree_evidence(aid, scb, session)
             await self._safe_emit_scheduler_event(
                 self._events.agent_failed(aid, scb.agent.name, terminal_failure)
             )
@@ -503,6 +505,30 @@ class LifecycleMixin:
         await self._drain_message_inbox(aid, allow_current_task=True)
         if not self._shutting_down:
             await self._drain_ready_message_inboxes()
+
+    async def _trace_worktree_evidence(self, aid: int, scb: Any, session: Any) -> None:
+        """Record what an agent left in its worktree, whatever ended the agent.
+
+        The completion path already writes this row. Every other terminal path
+        returned before reaching it, so an agent that spent its whole budget
+        writing code wrote no row at all -- and neither does an agent that
+        changed nothing, which is the reading ``_trace_worktree_changes``
+        exists to rule out. The two are opposite outcomes and they looked
+        identical on disk.
+
+        That matters beyond tidiness because per-agent adherence is scored off
+        these rows: a run whose coder was stopped at its cap after committing
+        scores as a coder that never touched a file, so the collaboration it
+        did do is counted as collaboration that did not happen.
+
+        Observational, like the call it mirrors: ``_trace_worktree_changes``
+        guards every read and swallows its own failures, so a diff that cannot
+        be taken here leaves the terminal path exactly as it was.
+        """
+        env = getattr(session, "env", None)
+        if env is None:
+            return
+        await self._trace_worktree_changes(aid, scb.agent.name, env)
 
     @staticmethod
     def _terminal_failure_result(scb: Any, result: str) -> str | None:
