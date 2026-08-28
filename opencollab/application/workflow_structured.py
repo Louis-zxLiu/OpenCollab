@@ -136,7 +136,7 @@ class WorkflowStructuredMixin:
         combined_tools = [capture_tool, *(tools or [])]
         session_budget = self._capped_session_budget(budget)
         try:
-            session = self._build_workflow_session(
+            session = await self._build_workflow_session(
                 prompt=seeded_prompt,
                 budget=session_budget,
                 tools=combined_tools,
@@ -230,7 +230,7 @@ class WorkflowStructuredMixin:
         retry_prompt = prompt + "\n\n" + _STRUCTURED_RETRY
         session_budget = self._capped_session_budget(budget)
         try:
-            session = self._build_workflow_session(
+            session = await self._build_workflow_session(
                 prompt=retry_prompt,
                 budget=session_budget,
                 tools=[capture_tool],

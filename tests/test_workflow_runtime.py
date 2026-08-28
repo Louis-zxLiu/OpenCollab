@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import types
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -23,6 +25,23 @@ from opencollab.bootstrap import (
     workflow_runtime,
 )
 from opencollab.bootstrap.session_factory import slug_label
+
+
+def _git_workspace(path: Path) -> Path:
+    """A one-commit git repository: worktrees need something to branch from."""
+    path.mkdir(parents=True)
+    for args in (
+        ("init", "-q"),
+        ("config", "user.email", "tests@example.com"),
+        ("config", "user.name", "OpenCollab Tests"),
+    ):
+        subprocess.run(["git", *args], cwd=path, check=True, capture_output=True)
+    (path / "tracked.txt").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-qm", "base"], cwd=path, check=True, capture_output=True
+    )
+    return path
 
 
 def test_workflow_runtime_public_module_uses_plain_reexports():
@@ -73,7 +92,30 @@ async def test_built_context_preserves_falsey_injected_environment(monkeypatch):
     assert ctx._tree_probe._env is environment
 
 
-def test_concrete_factory_rejects_unsupported_isolation_before_building_session(monkeypatch):
+def test_a_supplied_workspace_is_the_one_the_session_is_built_on(monkeypatch):
+    """``env`` wins over the run-wide environment, which is what isolation is.
+
+    Without this the flag would travel while the agent kept editing the run's
+    shared tree, and a run could report an isolated agent that was not one.
+    """
+    calls = _patch_build_session(monkeypatch)
+    cfg = _cfg()
+    factory = workflow_runtime.WorkflowSessionFactory(
+        model=cfg["model"],
+        provider=cfg["provider"],
+        api_key=cfg["api_key"],
+        base_url=cfg["base_url"],
+    )
+    own_workspace = object()
+
+    factory.build_workflow_session(
+        prompt="solve", budget=1, isolation=True, env=own_workspace
+    )
+
+    assert calls[0]["env"] is own_workspace
+
+
+def test_a_run_that_isolates_nobody_never_opens_a_worktree(monkeypatch):
     calls = _patch_build_session(monkeypatch)
     cfg = _cfg()
     factory = workflow_runtime.WorkflowSessionFactory(
@@ -83,10 +125,57 @@ def test_concrete_factory_rejects_unsupported_isolation_before_building_session(
         base_url=cfg["base_url"],
     )
 
-    with pytest.raises(ValueError, match="isolation is not available"):
-        factory.build_workflow_session(prompt="solve", budget=1, isolation=True)
+    factory.build_workflow_session(prompt="solve", budget=1)
 
-    assert calls == []
+    assert calls[0]["env"] is not None
+    assert factory._worktree_pool is None
+
+
+@pytest.mark.asyncio
+async def test_an_isolated_workflow_agent_edits_where_no_sibling_can_see(tmp_path):
+    """The whole point, stated as behaviour rather than as a type check.
+
+    Two isolated agents get two working trees, and a file one writes is absent
+    from the other's and from the workspace they both branched from. That
+    absence is what makes a handoff between them have to be carried by something
+    the run records — a commit sha — instead of by the file system.
+    """
+    workspace = _git_workspace(tmp_path / "repo")
+    factory = workflow_runtime.WorkflowSessionFactory(
+        model="test-model",
+        provider="anthropic",
+        api_key="k",  # pragma: allowlist secret
+        base_url="https://example.test",
+        workspace=str(workspace),
+    )
+
+    coder = await factory.acquire_isolated_env(label="coder")
+    tester = await factory.acquire_isolated_env(label="tester")
+    try:
+        assert coder.workspace != tester.workspace != str(workspace)
+        await coder.write_file("only_the_coder_wrote_this.txt", "patch")
+
+        assert not (Path(tester.workspace) / "only_the_coder_wrote_this.txt").exists()
+        assert not (workspace / "only_the_coder_wrote_this.txt").exists()
+    finally:
+        await factory.release_isolated_envs()
+
+    assert not Path(coder.workspace).exists()
+
+
+@pytest.mark.asyncio
+async def test_releasing_isolated_workspaces_twice_is_not_an_error(tmp_path):
+    factory = workflow_runtime.WorkflowSessionFactory(
+        model="test-model",
+        provider="anthropic",
+        api_key="k",  # pragma: allowlist secret
+        base_url="https://example.test",
+        workspace=str(_git_workspace(tmp_path / "repo")),
+    )
+    await factory.acquire_isolated_env(label="coder")
+
+    await factory.release_isolated_envs()
+    await factory.release_isolated_envs()
 
 
 def test_explicit_thinking_false_disables_responses_reasoning_effort(monkeypatch):

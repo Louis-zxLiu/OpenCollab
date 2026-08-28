@@ -272,8 +272,24 @@ class WorkflowSessionFactoryPort(Protocol):
         label: str | None = None,
         tool_choice: Any = None,
         thinking: bool | None = None,
+        env: Any | None = None,
     ) -> Any:
         ...    # ``thinking`` None -> factory default; False -> force reasoning off.
+
+    async def acquire_isolated_env(self, *, label: str | None = None) -> Any:
+        """Hand out a workspace of this agent's own, for ``isolation=True``.
+
+        Separate from ``build_workflow_session`` because acquiring one is I/O —
+        it checks out a working tree — while building a session is not, and the
+        engine calls this only for the agents a script asked to isolate. What
+        the returned object is stays the factory's business; the engine only
+        passes it back as ``env``.
+
+        The factory owns the lifetime: every environment handed out here is
+        released when the run ends, so a script that isolates an agent does not
+        also have to clean up after it.
+        """
+        ...
 
 
 class SchedulerPort(Protocol):

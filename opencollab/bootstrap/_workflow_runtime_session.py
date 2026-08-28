@@ -14,6 +14,7 @@ from opencollab.adapters.llm.types import (
     model_capabilities,
 )
 from opencollab.adapters.working_tree import EnvWorkingTreeProbe
+from opencollab.adapters.worktree_pool import WorktreePool
 from opencollab.application.ports import EventPublisherPort, TracePort
 from opencollab.application.workflow import WorkflowContext
 from opencollab.application.workflow_registry import WorkflowSpec
@@ -42,8 +43,9 @@ class WorkflowSessionFactory:
 
     Each ``build_workflow_session`` call assembles a fresh one-shot ``Agent``
     (carrying the resolved LLM config) and a self-wiring ``Session``. ``tools``
-    from the caller become the agent's toolset. ``isolation=True`` is rejected
-    until this factory can provide a distinct worktree-backed environment.
+    from the caller become the agent's toolset. ``isolation=True`` is served by
+    ``acquire_isolated_env``, which lends the session a worktree of its own from
+    the same pool the scheduler uses for teammates.
     """
 
     def __init__(
@@ -112,6 +114,12 @@ class WorkflowSessionFactory:
         self._save_dir = save_dir
         self._env = env
         self._session_seq = 0
+        # Created on the first ``isolation=True`` build, so a run that isolates
+        # nobody never touches git. The pool is the same one the scheduler lends
+        # teammate worktrees from, which is the point: an isolated workflow agent
+        # and an isolated teammate get the same kind of workspace, so a handoff
+        # between two agents means the same thing in either arm.
+        self._worktree_pool: WorktreePool | None = None
 
     def _next_aid(self) -> int:
         """Allocate this session's agent id.
@@ -142,6 +150,35 @@ class WorkflowSessionFactory:
             return None
         return workflow_transcript_path(self._save_dir, aid, label)
 
+    async def acquire_isolated_env(self, *, label: str | None = None) -> Any:
+        """Check out a working tree this agent alone edits.
+
+        A linked worktree, so it shares ``.git/objects`` with the workspace it
+        came from: a commit made in here is reachable from every other agent's
+        tree the moment it exists, which is what lets one agent hand its work to
+        another by naming a sha instead of by leaving files where the other one
+        will find them.
+
+        ``label`` names the branch, so a leftover tree says which agent made it.
+        A run without a workspace has nothing to branch from, and the pool hands
+        back a plain local environment instead of failing — the same fallback it
+        gives a team told not to use worktrees.
+        """
+        if self._worktree_pool is None:
+            self._worktree_pool = WorktreePool(
+                self._workspace or ".",
+                use_worktrees=self._workspace is not None,
+            )
+        return await self._worktree_pool.acquire(label or "workflow-agent")
+
+    async def release_isolated_envs(self) -> None:
+        """Tear down every worktree this factory handed out. Safe to call twice."""
+        pool = self._worktree_pool
+        if pool is None:
+            return
+        self._worktree_pool = None
+        await pool.release()
+
     def build_workflow_session(
         self,
         *,
@@ -152,9 +189,8 @@ class WorkflowSessionFactory:
         label: str | None = None,
         tool_choice: Any = None,
         thinking: bool | None = None,
+        env: Any | None = None,
     ) -> Any:
-        if isolation:
-            raise ValueError("workflow agent isolation is not available")
         use_thinking = self._thinking if thinking is None else thinking
         use_reasoning_effort = None if thinking is False else self._reasoning_effort
         reasoning_effort_policy = "suppressed" if thinking is False else "configured"
@@ -196,9 +232,10 @@ class WorkflowSessionFactory:
             provider_error_time_budget=self._provider_error_time_budget,
             tool_choice=tool_choice,
         )
-        env = self._env
-        if env is None:
-            env = (
+        # An isolated agent brings its own tree; everyone else shares the run's.
+        session_env = env if env is not None else self._env
+        if session_env is None:
+            session_env = (
                 LocalEnvironment(self._workspace)
                 if self._workspace
                 else LocalEnvironment()
@@ -206,7 +243,7 @@ class WorkflowSessionFactory:
         aid = self._next_aid()
         return build_session(
             agent=agent,
-            env=env,
+            env=session_env,
             tracer=self._tracer,
             max_budget_tokens=budget,
             max_steps=self._max_steps,

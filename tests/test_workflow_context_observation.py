@@ -161,6 +161,7 @@ async def test_starting_an_agent_records_which_agent_it_was() -> None:
             "phase": "triage",
             "tools": ["read"],
             "budget": 100_000,
+            "isolated": False,
         }
     ]
 

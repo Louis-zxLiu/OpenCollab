@@ -113,6 +113,14 @@ class FakeFactory:
         self._idx = 0
         self.builds: list[dict[str, Any]] = []
         self._next_aid = 0
+        # Workspaces handed to isolated agents, in the order they were asked for.
+        self.handed_out: list[object] = []
+
+    async def acquire_isolated_env(self, *, label: str | None = None) -> object:
+        """Hand back a distinct sentinel per call, so tests can tell them apart."""
+        env = object()
+        self.handed_out.append(env)
+        return env
 
     def build_workflow_session(
         self,
@@ -123,11 +131,13 @@ class FakeFactory:
         isolation: bool = False,
         label: str | None = None,
         tool_choice: str | None = None,
+        env: Any | None = None,
         thinking: bool | None = None,
     ) -> FakeSession:
         self.builds.append(
             {
                 "prompt": prompt,
+                "env": env,
                 "budget": budget,
                 "tools": tools,
                 "isolation": isolation,

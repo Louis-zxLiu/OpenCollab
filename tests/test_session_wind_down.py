@@ -638,7 +638,7 @@ class _EnforcedFakeFactory:
         self.builds = []
 
     def build_workflow_session(self, *, prompt, budget, tools=None, isolation=False,
-                               label=None, tool_choice=None, thinking=None):
+                               label=None, tool_choice=None, thinking=None, env=None):
         self.builds.append({"tools": list(tools or []), "label": label})
         for tool in tools or []:
             if getattr(tool, "name", None) == SUBMIT_TOOL_NAME:

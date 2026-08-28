@@ -273,12 +273,13 @@ class WorkflowContext(
             )
             logger.error("workflow %s trace failed: %s", step_type, exc)
 
-    def _build_workflow_session(
+    async def _build_workflow_session(
         self,
         *,
         label: str | None,
         budget: int,
         tools: Sequence[Any] | None = None,
+        isolation: bool = False,
         **kwargs: Any,
     ) -> Any:
         """Build one one-shot session and record that this agent existed.
@@ -298,10 +299,13 @@ class WorkflowContext(
         Emitted after the build, because an agent that failed to build has no
         id to attribute anything to; the caller records that failure instead.
         """
+        env = await self._factory.acquire_isolated_env(label=label) if isolation else None
         session = self._factory.build_workflow_session(
             label=label,
             budget=budget,
             tools=tools,
+            isolation=isolation,
+            env=env,
             **kwargs,
         )
         state = getattr(session, "state", None)
@@ -317,9 +321,26 @@ class WorkflowContext(
                     if isinstance((name := getattr(tool, "name", None)), str)
                 ],
                 "budget": budget,
+                # Whether this agent got a workspace of its own. Read with
+                # ``tools``: an isolated agent that can write is one whose edits
+                # no sibling can see, so a handoff out of it has to be carried
+                # by something the run records rather than by the file system.
+                "isolated": bool(isolation),
             },
         )
         return session
+
+    async def release_isolated_workspaces(self) -> None:
+        """Give back every workspace the factory lent to an isolated agent.
+
+        Called once the run's sessions are closed, so a tree is never removed
+        while an agent still holds it. Duck-typed on purpose: a factory that
+        never hands out isolated workspaces needs no such method, and a run that
+        asked for no isolation must not start caring that one exists.
+        """
+        release = getattr(self._factory, "release_isolated_envs", None)
+        if callable(release):
+            await release()
 
     def _record_agent_failure(self, label: str | None, exc: Exception) -> None:
         status_code = getattr(exc, "status_code", None)
@@ -471,8 +492,6 @@ class WorkflowContext(
         controlled way inside the workflow (its on-disk edits survive) rather than
         being truncated by the outer wall.
         """
-        if isolation:
-            raise ValueError("workflow agent isolation is not available")
         supplied_tool_names = [
             name
             for tool in tools or ()
@@ -574,7 +593,7 @@ class WorkflowContext(
         deadline = self._timeout_deadline(timeout)
         session_budget = self._capped_session_budget(budget)
         try:
-            session = self._build_workflow_session(
+            session = await self._build_workflow_session(
                 prompt=prompt,
                 budget=session_budget,
                 tools=tools,
