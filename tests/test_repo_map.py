@@ -459,3 +459,55 @@ def test_session_factory_without_workspace_injects_no_map(tmp_path):
     )
 
     assert MAP_HEADER not in session.agent.system_prompt
+
+
+class _ElsewhereEnvironment:
+    """An environment whose files are not on this host's file system."""
+
+    local_filesystem = False
+    workspace = "/testbed"
+
+    async def setup(self) -> None:  # pragma: no cover - never run here
+        return None
+
+    async def cleanup(self) -> None:  # pragma: no cover - never run here
+        return None
+
+    async def exec_cmd(self, *_args, **_kwargs):  # pragma: no cover - never run here
+        raise AssertionError("this test never executes anything")
+
+
+def test_no_repo_map_when_the_agents_cannot_read_the_lead_workspace(tmp_path):
+    """A map of the launch directory is a false claim about a container run.
+
+    The lead workspace anchors the run's own bookkeeping and stays a host path.
+    Once the agents work inside a container, that directory is not the one they
+    can read, and a map of it sends them looking for files that are not there —
+    which costs them steps and tells them nothing.
+    """
+    ws = _workspace(tmp_path)
+    factory = DefaultSessionFactory(
+        _spawn_cfg(), lead_workspace=str(ws), lead_environment=_ElsewhereEnvironment()
+    )
+
+    session = factory.build_spawn_session(
+        role="coder", env=_ElsewhereEnvironment(), budget=10_000, aid=1
+    )
+
+    assert MAP_HEADER not in session.agent.system_prompt
+    assert "core.py" not in session.agent.system_prompt
+
+
+def test_repo_map_still_ships_when_the_run_works_on_this_host(tmp_path):
+    """The control: a host environment handed in is still the same directory."""
+    ws = _workspace(tmp_path)
+    factory = DefaultSessionFactory(
+        _spawn_cfg(), lead_workspace=str(ws), lead_environment=LocalEnvironment(str(ws))
+    )
+
+    session = factory.build_spawn_session(
+        role="coder", env=LocalEnvironment(str(ws)), budget=10_000, aid=1
+    )
+
+    assert MAP_HEADER in session.agent.system_prompt
+    assert "core.py" in session.agent.system_prompt

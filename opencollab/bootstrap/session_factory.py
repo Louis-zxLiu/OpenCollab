@@ -541,12 +541,31 @@ class DefaultSessionFactory:
         """
         return self._allow_unisolated_shell and seated_at_start
 
+    def _lead_workspace_is_readable_by_the_agents(self) -> bool:
+        """Whether the lead workspace is the directory the agents actually read.
+
+        It is, whenever the run works on this host: no environment was handed in,
+        or the one that was reads and writes this same file system. It is not,
+        when the repository exists only inside a container -- the lead workspace
+        is then the host directory the run was launched from, and an agent that
+        goes looking for what a map of it lists finds nothing there.
+
+        Only the repository map turns on this. A skill package is read off this
+        host once, at build time, and reaches the agent as text it can use from
+        anywhere; a repository map is a claim about a directory the agent is
+        expected to go and read.
+        """
+        env = self._lead_environment
+        if env is None:
+            return True
+        return bool(getattr(env, "local_filesystem", False))
+
     def _fresh_context_builder(self) -> ContextBuilder:
         """Snapshot bounded workspace context at the new session's start."""
         skill_store = build_skill_store(self._lead_workspace)
         project_context = (
             build_repo_map(self._lead_workspace)
-            if self._lead_workspace
+            if self._lead_workspace and self._lead_workspace_is_readable_by_the_agents()
             else None
         )
         return ContextBuilder(
