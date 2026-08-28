@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from opencollab.domain.agent import Agent
 from opencollab.domain.session import SessionState
 
-PER_AGENT_BUDGET_SHARE = 1.5
+PER_AGENT_BUDGET_SHARE = 1.0
 """``c`` in the per-agent budget cap ``c * total / N``. Dimensionless.
 
 Every agent on a declared team draws from one shared pool of ``total`` tokens
@@ -35,23 +35,38 @@ consumed:
   agent that is idle, while still bounding how much of the pool any one agent
   can take.
 
-The value is ``1.5``: one agent may spend up to half again an equal share. It is
-a free parameter of the allocation rule, not an estimate of any quantity, and it
-is fixed before data collection so the caps are a property of the design rather
-than of the runs.
+The value is ``1.0``: the strict equal split. It is a free parameter of the
+allocation rule, not an estimate of any quantity, and it is fixed before data
+collection so the caps are a property of the design rather than of the runs.
 
-Overspend is bounded, not impossible. The caps sum to ``c * total``, which is
-more than the pool, so the caps alone do not bound the team; the aggregate
-ceiling does. Every session's precheck tests the team total before it starts a
-model call, so once aggregate spend reaches ``total`` no agent begins another
-turn. What can still be spent past ``total`` is therefore only what was already
-in flight when the ceiling was crossed: at most one turn per agent running
-concurrently, and on a pipeline topology, one turn. That is a bound on the order
-of a single turn's tokens, not of ``(c - 1) * total``. The realized figure is
-recorded per run rather than assumed, so it can be reported.
+Paired with a pool of ``N`` times what one agent working alone is given, ``c =
+1`` states the allowance per *seat* rather than per team: one seat is worth
+exactly one solo agent's budget, and the team's additional tokens are reachable
+only by actually putting another seat to work. A team that quietly does the job
+through a single agent therefore runs on the same budget that agent would have
+had by itself.
 
-The alternative this replaces — taking each agent's share out of the pool when
-the agent is created — has no overspend at all, but holds tokens for agents that
+That property is what rules out an allocation artifact, and it is why ``c`` is
+not larger here. Under ``c = 1.5`` against a pool equal to one agent's budget,
+an agent that does the whole job alone is stopped at half of what the same agent
+is given alone. It runs out earlier, produces less, and the shortfall is then
+read off the run as something about working this way -- when it was the
+allocation rule. Raising ``c`` restores some of that headroom but not the
+property: any ``c != 1`` makes the seat's allowance depend on ``N``, so two
+teams of different sizes stop being comparable to each other or to the solo
+agent.
+
+Because the caps sum to exactly the pool, they bound the team on their own; the
+aggregate ceiling is the tighter of the two only while agents run concurrently.
+Every session's precheck tests the team total before it starts a model call, so
+once aggregate spend reaches ``total`` no agent begins another turn. What can
+still be spent past ``total`` is therefore only what was already in flight when
+the ceiling was crossed: at most one turn per agent running concurrently, and on
+a pipeline topology, one turn. The realized figure is recorded per run rather
+than assumed, so it can be reported.
+
+The alternative this replaces -- taking each agent's share out of the pool when
+the agent is created -- has no overspend at all, but holds tokens for agents that
 never spend them, which makes an idle agent and an exhausted one
 indistinguishable in the accounts.
 """

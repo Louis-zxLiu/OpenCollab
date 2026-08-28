@@ -124,11 +124,13 @@ def _spend(scheduler: Scheduler, aid: int, tokens: int) -> None:
 def test_the_cap_is_the_share_constant_times_an_equal_split():
     scheduler, _ = _scheduler(prebuild_team=True)
     assert scheduler._declared_team_size() == 3
-    assert CAP == int(TOTAL * PER_AGENT_BUDGET_SHARE / 3) == 300_000
+    assert CAP == int(TOTAL * PER_AGENT_BUDGET_SHARE / 3) == 200_000
     assert scheduler._per_agent_cap() == CAP
-    # Half again an equal split: what one agent may spend past total / N is
-    # exactly what makes an idle teammate's allowance reachable.
-    assert CAP > TOTAL // 3
+    # ``c = 1`` is the strict equal split: the three caps sum to exactly the
+    # pool, so a seat is worth what one agent working alone is given and the
+    # team's extra tokens are reachable only by using another seat.
+    assert CAP == TOTAL // len(ROLES)
+    assert CAP * len(ROLES) == TOTAL
 
 
 def test_every_seat_gets_the_same_cap_agent_zero_included():
@@ -186,18 +188,21 @@ def test_agent_zero_is_told_the_budget_it_can_actually_spend():
         has_structured_output=False,
         structured_override=None,
     )
-    assert block["content"] == "[Budget: ~300k/300k tokens left, ~50 steps left.]"
+    assert block["content"] == "[Budget: ~200k/200k tokens left, ~50 steps left.]"
 
 
 # --- what the shared pool buys ----------------------------------------------
 
 
 def test_an_idle_teammate_freezes_nothing_for_the_agent_doing_the_work():
-    """The whole point of sharing the pool instead of splitting it.
+    """What sharing the pool still buys once ``c`` is 1.
 
-    Two of the three seated agents never spend a token. The one that is working
-    can still be leased past ``total / N``, and the team's committed total counts
-    only what was actually spent — the idle pair commit nothing.
+    At ``c = 1`` an agent cannot be leased past ``total / N`` — that ceiling is
+    the equal split itself. What the shared pool still buys is that the two
+    seated agents which never spend a token commit nothing: the team's committed
+    total counts spend, not headcount, so an idle seat and an exhausted one stay
+    distinguishable in the accounts. Under the reservation this replaced, all
+    three seats would have been committed the moment they were created.
     """
 
     async def scenario():
@@ -205,14 +210,16 @@ def test_an_idle_teammate_freezes_nothing_for_the_agent_doing_the_work():
         await scheduler.ensure_team_prebuilt()
 
         equal_split = TOTAL // len(ROLES)
-        _spend(scheduler, 0, equal_split)  # already at an equal share
-        assert scheduler.allocated_tokens == equal_split
+        assert CAP == equal_split
+        half_a_share = equal_split // 2
+        _spend(scheduler, 0, half_a_share)
+        assert scheduler.allocated_tokens == half_a_share
 
         grant = scheduler._reserve_turn_lease(0)
-        assert grant == CAP - equal_split == 100_000
-        assert scheduler._sessions[0].max_budget_tokens == CAP > equal_split
+        assert grant == CAP - half_a_share == 100_000
+        assert scheduler._sessions[0].max_budget_tokens == CAP
         # Only spend is committed; the two idle seats hold nothing.
-        assert scheduler.allocated_tokens == equal_split
+        assert scheduler.allocated_tokens == half_a_share
 
     run(scenario())
 
@@ -266,15 +273,25 @@ def test_an_empty_pool_is_not_recorded_as_a_cap_refusal():
 
     With the pool itself spent there is nothing the cap withheld, and a record
     here would make an exhausted team look like a throttled agent.
+
+    At ``c = 1`` the caps sum to exactly the pool, so the only way to empty it
+    while a seat is still under its own cap is the overspend the rule documents
+    — a turn already in flight when the aggregate ceiling was crossed. That is
+    the state built here: two agents past their caps, the third having spent
+    nothing at all.
     """
 
     async def scenario():
         tracer = RecordingTracer()
         scheduler, _ = _scheduler(prebuild_team=True, tracer=tracer)
         await scheduler.ensure_team_prebuilt()
-        _spend(scheduler, 0, CAP)
-        _spend(scheduler, 1, CAP)
+        overspent = TOTAL // 2
+        assert overspent > CAP
+        _spend(scheduler, 0, overspent)
+        _spend(scheduler, 1, overspent)
         assert scheduler.used_tokens == TOTAL
+        # The third seat is far under its own cap; the pool is what is gone.
+        assert scheduler.table.get(2).state.used_tokens == 0
         assert scheduler._reserve_turn_lease(2) == 0
         assert tracer.payloads("agent_cap_reached") == []
 
