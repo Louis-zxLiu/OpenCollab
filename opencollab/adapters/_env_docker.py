@@ -179,6 +179,25 @@ class DockerEnvironment(Environment):
         self.host_workspace = None
         self._temporary_files: set[str] = set()
 
+    @property
+    def container_reference(self) -> str | None:
+        """The container this was attached to, or ``None`` when it owns one.
+
+        Read by whatever needs to open a second view onto the same container --
+        a per-agent worktree, say -- without reaching into how attaching works.
+        """
+        return self._attached_reference
+
+    @property
+    def command_prefix(self) -> Callable[[str], str] | str | None:
+        """What an agent's commands here are wrapped with, if anything.
+
+        A container built for a benchmark usually needs its interpreter
+        activated first, and a second view onto the same container has to run
+        commands the same way for its results to mean the same thing.
+        """
+        return self._command_prefix
+
     async def _docker(
         self,
         *args: str,

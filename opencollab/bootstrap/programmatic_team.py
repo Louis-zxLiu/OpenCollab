@@ -12,6 +12,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal
 
+from opencollab.adapters.env import Environment
 from opencollab.adapters.trace import Tracer
 from opencollab.application.exception_notes import add_exception_note
 from opencollab.application.scheduler_types import SchedulerTurnError
@@ -43,6 +44,7 @@ async def run_team(
     allow_unisolated_shell: bool | None = None,
     max_steps: int = SESSION_MAX_STEPS,
     serialize_turns: bool = False,
+    environment: Environment | None = None,
 ) -> ProgrammaticResult:
     """Run the scheduler regime once, including bounded team cleanup.
 
@@ -54,6 +56,11 @@ async def run_team(
     programmatic run has no human at it. Stating them is how an unattended
     experiment gets a declared roster whose agents can run ``git`` without also
     being handed an ``ask_user`` there is nobody to answer.
+
+    ``environment`` is where the run works. ``workspace`` still names the
+    directory this run is anchored to -- skills, the repository map, and the
+    session store are read from it -- while the environment is what agents
+    execute in, which is how a team reaches a repository inside a container.
     """
     run_config = dict(config)
     run_config["budget"] = max_tokens
@@ -82,6 +89,7 @@ async def run_team(
             prebuild_team=prebuild_team,
             max_steps=max_steps,
             serialize_turns=serialize_turns,
+            environment=environment,
         )
     except BaseException as exc:
         tracer_failure = _programmatic._close_tracer(context.tracer)

@@ -254,6 +254,12 @@ class OpenCollab:
         the token budget can pay for and read the realized step counts out of
         the trajectory.
 
+        An environment given to the client is where this team works: agent 0
+        runs in it, and with ``use_worktrees`` each teammate gets an isolated
+        view of the same place. That is how a team is run against a repository
+        that exists only inside a container -- the case the evaluation harness
+        creates, where the repository cannot be exposed to the host at all.
+
         ``serialize_turns`` holds the team to one turn at a time: a teammate a
         message wakes waits for the running turn to finish instead of running
         beside it. It changes only *when* an agent runs — every declared edge
@@ -263,8 +269,6 @@ class OpenCollab:
         ``assigned.topology_nodes.turns_serialized``.
         """
         _non_empty(prompt, "prompt")
-        if self._environment is not None:
-            raise ValueError("team runs do not accept a custom environment")
         if not isinstance(trace, bool) or not isinstance(use_worktrees, bool):
             raise ValueError("trace and use_worktrees must be booleans")
         if not isinstance(prebuild_team, bool):
@@ -297,6 +301,7 @@ class OpenCollab:
                 allow_unisolated_shell=allow_unisolated_shell,
                 max_steps=resolved_team_max_steps,
                 serialize_turns=serialize_turns,
+                environment=self._environment,
             )
         except ProgrammaticLifecycleError as exc:
             raise RunError(str(exc)) from exc

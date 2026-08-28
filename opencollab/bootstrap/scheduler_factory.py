@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+from opencollab.adapters.env import Environment
 from opencollab.adapters.hooks import ShellHookRunner
 from opencollab.adapters.storage import SessionStore
 from opencollab.adapters.worktree_pool import WorktreePool
@@ -115,6 +116,7 @@ def build_scheduler(
     allow_unisolated_shell: bool | None = None,
     max_steps: int = SESSION_MAX_STEPS,
     serialize_turns: bool = False,
+    environment: Environment | None = None,
 ) -> Scheduler:
     """Build the Scheduler and let it create agent 0 (the init process).
 
@@ -136,6 +138,11 @@ def build_scheduler(
     refused thereafter, so the roster is an input to the run rather than
     something the model decides mid-run. Off by default; the scheduler behaves
     exactly as before while it is off.
+
+    ``environment`` is where this run works. Left unset every agent works on
+    the host workspace; supplied, agent 0 works in it and each teammate gets an
+    isolated view of the same place -- which is how a team reaches a repository
+    that exists only inside a container.
 
     ``serialize_turns`` holds the team to one turn at a time: a teammate a
     message wakes waits for the running turn to finish instead of running beside
@@ -225,6 +232,7 @@ def build_scheduler(
         ),
         team_cfg=team_cfg,
         lead_workspace=ctx.workspace,
+        lead_environment=environment,
         interactive=interactive,
         save_dir=run_dir,
         allow_unisolated_child_tests=allow_unisolated_child_tests,
@@ -235,7 +243,11 @@ def build_scheduler(
         allow_unisolated_shell=allow_unisolated_shell,
         max_steps=max_steps,
     )
-    worktree_pool = WorktreePool(ctx.workspace, use_worktrees=use_worktrees)
+    worktree_pool = WorktreePool(
+        ctx.workspace,
+        use_worktrees=use_worktrees,
+        base_environment=environment,
+    )
 
     scheduler = Scheduler(
         session_factory=session_factory,

@@ -423,6 +423,10 @@ class DefaultSessionFactory:
     letting ``interactive`` answer it by implication. ``None`` keeps the old
     coupling (a human at the run is what licensed an unsandboxed shell), so a
     caller that does not pass it gets exactly the previous behaviour.
+
+    ``lead_environment`` is where agent 0 works. Unset, it is the lead workspace
+    on this host; set, it is whatever the caller handed in, which is how a run
+    reaches a repository that exists only inside a container.
     """
 
     def __init__(
@@ -431,6 +435,7 @@ class DefaultSessionFactory:
         *,
         team_cfg: TeamConfig | None = None,
         lead_workspace: str | None = None,
+        lead_environment: Environment | None = None,
         interactive: bool = False,
         save_dir: str | None = None,
         allow_unisolated_child_tests: bool = False,
@@ -448,6 +453,7 @@ class DefaultSessionFactory:
         self._interactive = interactive
         self._validate_responses_tool_support()
         self._lead_workspace = lead_workspace
+        self._lead_environment = lead_environment
         self._allow_unisolated_child_tests = allow_unisolated_child_tests
         self._prebuilt_roster = bool(prebuilt_roster)
         self._allow_unisolated_shell = (
@@ -629,7 +635,10 @@ class DefaultSessionFactory:
         left to ``Session.apply_launch``.
         """
         cfg = self._cfg
-        env = LocalEnvironment(self._lead_workspace)
+        # Agent 0 works where the run works. A caller that supplied an
+        # environment -- a container holding the repository under test, say --
+        # gets that one; otherwise the lead workspace on this host.
+        env = self._lead_environment or LocalEnvironment(self._lead_workspace)
         context_builder = self._fresh_context_builder()
         plan = context_builder.build_plan(self._team.entry)
         agent = context_builder.build_agent(
