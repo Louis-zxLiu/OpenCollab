@@ -156,6 +156,19 @@ def _intrinsic_low_yield(tool_name: str, output: str) -> bool:
     return False
 
 
+def _first_shell_word(text: str) -> str:
+    """The first word of ``text``, stopping at a shell operator or separator."""
+    if not text:
+        return ""
+    lexer = shlex.shlex(text, posix=True, punctuation_chars="|&;()<>")
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    try:
+        return next(iter(lexer), "")
+    except ValueError:
+        return ""
+
+
 def _has_unquoted_output_redirect(command: str) -> bool:
     quote: str | None = None
     escaped = False
@@ -200,10 +213,10 @@ def _has_unquoted_output_redirect(command: str) -> bool:
                 continue
 
         suffix = command[cursor:].lstrip()
-        try:
-            target = shlex.split(suffix, posix=True)[0] if suffix else ""
-        except ValueError:
-            target = ""
+        # The target ends where the next command begins. Splitting on
+        # whitespace alone leaves the separator glued to it -- ``2>/dev/null;``
+        # is not ``/dev/null`` -- and a discarded stream then reads as a write.
+        target = _first_shell_word(suffix)
         if target == "/dev/null":
             index = cursor + 1
             continue
