@@ -82,8 +82,21 @@ def guarded_staged_diff_command(
         f'info_attributes=$({git_command} rev-parse --git-path info/attributes) || exit 125; '
         'if [ -L "$info_attributes" ] || { [ -e "$info_attributes" ] && [ ! -f "$info_attributes" ]; }; then '
         "echo 'repository-local info/attributes is not a regular file' >&2; exit 125; fi; "
+        # A repository may turn attributes *off*; it may not turn any on. Every
+        # form that assigns a value or sets an attribute can change what the
+        # diff shows -- a clean/smudge filter, an external diff driver, an
+        # encoding conversion -- and so can ``-diff``, whose "off" means "report
+        # this path as binary" and hides content rather than revealing it.
+        # Unsetting anything else only makes the diff a more faithful reading of
+        # the bytes on disk, which is what a harness hardening its own snapshot
+        # is doing when it writes such a file.
         'if [ -s "$info_attributes" ]; then '
-        "echo 'repository-local info/attributes can alter patch evidence' >&2; exit 125; fi; "
+        "if ! awk '{ sub(/#.*/, \"\") } NF == 0 { next } "
+        '/^[[:space:]]*\\[/ { bad = 1 } '
+        '{ for (i = 2; i <= NF; i++) '
+        'if ($i == \"-diff\" || $i !~ /^[-!][A-Za-z0-9_.-]+$/) bad = 1 } '
+        "END { exit bad ? 1 : 0 }' \"$info_attributes\"; then "
+        "echo 'repository-local info/attributes can alter patch evidence' >&2; exit 125; fi; fi; "
     )
     stage_untracked = (
         f'{git_index_command} ls-files --others --exclude-per-directory=.gitignore '

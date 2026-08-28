@@ -112,6 +112,70 @@ def test_patch_rejects_repository_local_attributes(tmp_path):
 
 
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFO requires POSIX")
+def test_patch_allows_attributes_that_only_turn_conversions_off(tmp_path):
+    """The exact line the evaluation harness writes into its own snapshot.
+
+    Every token unsets something -- line-ending conversion, clean/smudge
+    filters, ``$Id$`` expansion, encoding conversion -- so the diff it produces
+    is a more faithful reading of the bytes on disk, not a less faithful one.
+    Refusing it left an agent in such a repository unable to produce any patch.
+    """
+    repo = _repo(tmp_path)
+    (repo / "tracked.txt").write_text("new\n", encoding="utf-8")
+    info = repo / ".git" / "info" / "attributes"
+    info.write_text("* -text -filter -ident -working-tree-encoding\n", encoding="utf-8")
+
+    result = _extract(repo)
+
+    assert result.returncode == 0, result.stderr
+    assert "+new" in result.stdout
+
+
+def test_patch_rejects_attributes_that_mark_a_path_binary(tmp_path):
+    """``-diff`` is the one unset that hides content instead of revealing it."""
+    repo = _repo(tmp_path)
+    (repo / "tracked.txt").write_text("new\n", encoding="utf-8")
+    info = repo / ".git" / "info" / "attributes"
+    info.write_text("* -diff\n", encoding="utf-8")
+
+    result = _extract(repo)
+
+    assert result.returncode == 125
+    assert "info/attributes" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "tracked.txt text",  # setting, not unsetting
+        "tracked.txt working-tree-encoding=UTF-16",
+        "[attr]hidden -diff",  # a macro definition
+    ],
+)
+def test_patch_rejects_attributes_that_turn_anything_on(tmp_path, line):
+    repo = _repo(tmp_path)
+    (repo / "tracked.txt").write_text("new\n", encoding="utf-8")
+    info = repo / ".git" / "info" / "attributes"
+    info.write_text(f"{line}\n", encoding="utf-8")
+
+    result = _extract(repo)
+
+    assert result.returncode == 125
+    assert "info/attributes" in result.stderr
+
+
+def test_patch_allows_a_comment_only_attributes_file(tmp_path):
+    repo = _repo(tmp_path)
+    (repo / "tracked.txt").write_text("new\n", encoding="utf-8")
+    info = repo / ".git" / "info" / "attributes"
+    info.write_text("# nothing to declare\n\n", encoding="utf-8")
+
+    result = _extract(repo)
+
+    assert result.returncode == 0, result.stderr
+    assert "+new" in result.stdout
+
+
 def test_patch_rejects_non_regular_repository_attributes(tmp_path):
     repo = _repo(tmp_path)
     info_attributes = repo / ".git" / "info" / "attributes"
