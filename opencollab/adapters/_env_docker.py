@@ -36,6 +36,30 @@ _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$")
 _FULL_ID_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 _WRITE_LOCKS: dict[str, asyncio.Lock] = {}
 
+# Git refuses to commit without an author, and a benchmark image is not
+# configured with one: ``git commit`` inside the container fails with "Please
+# tell me who you are" before it writes anything. That is fatal to a team whose
+# handoff payload is a commit sha -- the agent doing the work has nothing to
+# hand over, and the failure surfaces as a shell error inside one turn rather
+# than as anything the run records.
+#
+# Passed per exec rather than written into the repository's config, because the
+# repository the agent works in is evidence: the evaluation harness rebuilds it
+# as a single anonymous commit and reads it back afterwards, so a key this
+# process added to ``.git/config`` would be a difference between the workspace
+# it prepared and the one it verifies. An environment variable leaves the
+# workspace byte-identical.
+#
+# The identity is deliberately not a person and its address is unroutable: the
+# commits never leave the container, and ``worktree_changes`` already attributes
+# each sha to an agent, so nothing reads this back.
+_GIT_IDENTITY_ENV: tuple[tuple[str, str], ...] = (
+    ("GIT_AUTHOR_NAME", "OpenCollab Agent"),
+    ("GIT_AUTHOR_EMAIL", "agent@opencollab.invalid"),
+    ("GIT_COMMITTER_NAME", "OpenCollab Agent"),
+    ("GIT_COMMITTER_EMAIL", "agent@opencollab.invalid"),
+)
+
 _EXEC_WRAPPER = r"""
 pidfile=$1
 shellflag=$2
@@ -365,6 +389,8 @@ class DockerEnvironment(Environment):
             args.append("-i")
         if self._exec_workdir:
             args.extend(("-w", self._exec_workdir))
+        for name, value in _GIT_IDENTITY_ENV:
+            args.extend(("-e", f"{name}={value}"))
         shell_flag = "-lc" if self._command_prefix is not None else "-c"
         args.extend(
             (
