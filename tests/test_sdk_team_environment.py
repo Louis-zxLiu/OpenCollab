@@ -145,7 +145,7 @@ def run_team_in(tmp_path, monkeypatch):
             },
             environment=environment,
         )
-        await client.team(
+        observed["result"] = await client.team(
             "Say where you are.",
             config=_team_file(tmp_path / "team.yaml"),
             artifacts=artifacts,
@@ -187,3 +187,34 @@ async def test_a_team_given_no_environment_still_works_in_its_workspace(
 
     assert observed["analyst_saw"].strip().endswith("anchor-workspace")
     assert observed["coder_saw"].strip().endswith("anchor-workspace")
+
+
+async def test_a_finished_team_run_says_it_wound_down(run_team_in):
+    """Wind-down evidence, in the same fields a solo agent and a workflow use.
+
+    Without it a caller cannot tell a team that finished from one abandoned
+    mid-flight, and a harness that reads the absence as "not settled" throws
+    away the workspace of every completed team run -- which is how this was
+    found: every team run produced an empty patch and reported that its
+    execution had not quiesced, while the identical workflow run did not.
+    """
+    metrics = (await run_team_in(environment=None))["result"].metrics
+
+    assert metrics["session_quiesced"] is True
+    assert metrics["environment_owned"] is True
+    assert metrics["execution_quiesced"] is True
+
+
+async def test_a_team_says_nothing_about_an_environment_it_was_lent(
+    run_team_in, tmp_path
+):
+    """It never cleans a supplied environment, so it does not vouch for one."""
+    elsewhere = _repo(tmp_path / "elsewhere", "supplied-environment")
+
+    metrics = (await run_team_in(environment=LocalEnvironment(str(elsewhere))))[
+        "result"
+    ].metrics
+
+    assert metrics["session_quiesced"] is True
+    assert metrics["environment_owned"] is False
+    assert metrics["environment_quiesced"] is None

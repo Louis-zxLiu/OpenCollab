@@ -266,7 +266,19 @@ async def test_shared_team_runtime_always_cleans_scheduler(
     assert scheduler.cleanup_timeout == 3.0
     assert result.status == "completed"
     assert result.tokens == 8
-    assert result.metrics == {"steps": 2, "sessions": 1}
+    # The counters, plus the wind-down evidence every regime now reports: this
+    # run owns its environments and cleaning the scheduler released them, which
+    # is exactly what the assertions above just established.
+    assert result.metrics == {
+        "steps": 2,
+        "sessions": 1,
+        "session_quiesced": True,
+        "environment_owned": True,
+        "environment_cleanup_quiesced": True,
+        "environment_quiesced": True,
+        "cleanup_quiesced": True,
+        "execution_quiesced": True,
+    }
 
 
 @pytest.mark.parametrize(

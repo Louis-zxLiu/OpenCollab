@@ -202,6 +202,25 @@ async def run_team(
         metrics={
             "steps": int(getattr(lead, "step_count", 0)),
             "sessions": len(scheduler.table.entries),
+            # A team run reports the same wind-down evidence a solo agent and a
+            # workflow already do. Without it a caller cannot tell a team that
+            # finished from one abandoned mid-flight, and one that reads the
+            # absence as "not settled" treats every completed team run as a
+            # failure -- which is what a harness deciding whether to trust the
+            # workspace does.
+            #
+            # Reaching this line is the evidence: ``scheduler.cleanup`` returned,
+            # which means every scheduler-owned task stopped and the terminal
+            # snapshot persisted, and each failure above raises rather than
+            # falling through. Worktrees are released inside that same call, so
+            # a run that owns its environments has cleaned them up by now; one
+            # handed an environment never cleans it and says nothing about it.
+            **_programmatic._quiescence_metrics(
+                session_quiesced=True,
+                environment_owned=environment is None,
+                environment_cleanup_quiesced=None if environment is not None else True,
+                environment_quiesced=None if environment is not None else True,
+            ),
         },
         agent_failures=_programmatic._team_agent_failures(scheduler),
     )
