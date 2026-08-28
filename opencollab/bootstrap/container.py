@@ -50,7 +50,6 @@ from opencollab.application.session_run import SessionRunUseCase
 from opencollab.application.shaping import (
     DEFAULT_TOOL_RESULT_BUDGET,
     AutoCompactShaper,
-    EagerToolOutputClearShaper,
     OldHistorySnipShaper,
     PerToolResultBudgetShaper,
     ShaperPipeline,
@@ -220,6 +219,29 @@ def _build_default_shaper(
     tool turns → auto-compact (summarize the remaining old span via the
     Claude Code-derived compaction prompt). All read-time over a copy; transcript stays full for lossless
     resume.
+
+    Every layer here is pressure-triggered: each no-ops until an estimated
+    context size crosses its trigger. ``EagerToolOutputClearShaper`` is
+    deliberately not among them, although it was. It ran unconditionally on
+    every call, and the two costs it carries are both paid at low context,
+    where there is no pressure to relieve:
+
+    * It rewrites history. Each call stubs the one result that has just aged
+      past its keep-recent window, so the message at that depth differs from
+      the message sent last call — the provider's prompt prefix stops matching
+      there and the whole tail after it is re-read at full input price, every
+      call. Append-only history matches to the end. The layers below rewrite
+      too, but only once pressure is real, and against a window that is
+      genuinely too large to send.
+    * The model re-reads what was cleared. Runs on this repository's own tasks
+      showed the same file re-read eight and nine times while the context peak
+      sat at about two percent of the window, so the tokens the clearing saved
+      were spent again on fetching the same bytes back.
+
+    Turning it off hands its job to the layers below, which do the same work on
+    the same messages when the context is actually large. It is not deleted:
+    ``opencollab.application.shaping`` still exports it, and a caller that
+    wants an always-on front rung can compose one.
     """
     # Trigger/target scale to the active model's real context window, degrading
     # to fixed defaults when the model is unrecognised.
@@ -237,7 +259,6 @@ def _build_default_shaper(
     }
     return ShaperPipeline(
         (
-            EagerToolOutputClearShaper(compactable_tools=COMPACTABLE_TOOL_NAMES),
             PerToolResultBudgetShaper(DEFAULT_TOOL_RESULT_BUDGET),
             ToolOutputClearShaper(compactable_tools=COMPACTABLE_TOOL_NAMES, **history_kwargs),
             OldHistorySnipShaper(**history_kwargs),
