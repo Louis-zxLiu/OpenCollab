@@ -590,9 +590,12 @@ async def test_a_seated_peer_gets_the_entry_agent_s_shell(tmp_path):
         tracer.close()
         await scheduler.cleanup()
 
-    # The Analyst carries no bash, so agent 0's shell answer is read off the
-    # switch itself rather than off a tool it does not have.
-    assert "ask_user" in {tool.name for tool in entry.agent.tools}
+    # Agent 0 is the entry role, which is what makes the comparison below a
+    # comparison between the entry seat and the peers. This used to be read off
+    # ``ask_user``, which only the entry role was given; the team no longer
+    # declares that tool -- nobody answers it in an unattended run -- so the
+    # roster says it directly.
+    assert entry.agent.name == team.entry == "analyst"
     # The Analyst carries the working tools too on this team, so it is a seat
     # in this map as well: the point is that every seat answers the same, not
     # that only the two workers do.

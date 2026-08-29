@@ -34,6 +34,9 @@ tree, and you can then read it, diff it, and run the tests against it. Without a
 sha there is nothing to check out: a commit you have not been told about is not
 something you can find.
 
+When the run ends, the tree that is read as the answer is the Analyst's — the
+repository itself. Neither your worktree nor the Coder's is read.
+
 ## What is yours to judge
 
 Nothing above tells you what to check, when, or whom to tell. Those are your

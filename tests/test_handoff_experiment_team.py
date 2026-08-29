@@ -148,3 +148,66 @@ def test_no_capability_is_reachable_only_through_a_teammate(team) -> None:
     for role in ("coder", "tester"):
         exclusive = (set(team.roles[role].tools) & working_tools) - analyst
         assert not exclusive, f"only the {role} can {sorted(exclusive)}"
+
+
+#: The single-agent arm's tool list, duplicated here because it lives in the
+#: other repository — ``WORKING_TOOL_NAMES`` in OpenCollab-Eval's
+#: ``generation/gen_prediction_constants.py``, which is what that arm passes to
+#: ``builtin_tools``. Both sides pin it, so a change on either fails a test.
+SINGLE_AGENT_WORKING_TOOLS = frozenset(
+    {"apply_patch", "bash", "file_read", "file_write", "grep", "run_tests"}
+)
+
+#: Everything else a role on this team may hold. The collaboration channel is
+#: what this arm is supposed to differ by; ``git_diff`` is how a role with no
+#: edit tool reads what someone else changed.
+COLLABORATION_TOOLS = frozenset({"git_diff", "message_agent", "team_status"})
+
+
+def test_the_analyst_holds_the_single_agent_s_tools_and_the_channel(team) -> None:
+    """Exactly, not merely a capable superset.
+
+    This file's own comment already claimed the Analyst "carries the single
+    agent's working tools", and it did not: the single agent has ``file_write``
+    and no ``apply_patch``, the Analyst had ``apply_patch`` and no
+    ``file_write``, and the Analyst additionally held ``run_tests``,
+    ``ask_user`` and ``use_skill``. Four capability differences on the axis this
+    arm is not supposed to differ on, described in prose as none.
+
+    A superset is not good enough either. If the Analyst can do something the
+    single agent cannot, a difference in outcome can be read off the bundles
+    rather than off how the work was organized -- which is the reading this
+    whole configuration exists to rule out.
+    """
+    analyst = set(team.roles["analyst"].tools)
+
+    assert analyst - COLLABORATION_TOOLS == set(SINGLE_AGENT_WORKING_TOOLS)
+    assert analyst & COLLABORATION_TOOLS == {"message_agent", "team_status"}
+
+
+def test_no_role_holds_a_tool_that_cannot_succeed_here(team) -> None:
+    """``ask_user`` and ``use_skill`` are not merely unused, they cannot work.
+
+    Nobody is at an unattended benchmark run to answer a question, and no skill
+    package is shipped into the task container. A role holding either can only
+    spend a turn discovering that, and only one arm held them.
+    """
+    for role in ROLES:
+        tools = set(team.roles[role].tools)
+        assert "ask_user" not in tools, role
+        assert "use_skill" not in tools, role
+
+
+def test_every_role_is_told_which_tree_is_read_as_the_answer() -> None:
+    """An empty patch has to be attributable to the model, not to not knowing.
+
+    Only the repository the Analyst works in is collected when the run ends; the
+    Coder's and the Tester's worktrees are not. An agent that leaves its work in
+    one of those submits nothing, and without this fact stated the run cannot
+    tell "the model chose not to bring the work back" from "the model was never
+    told where back is".
+    """
+    prompts = REPO_ROOT / "configs" / "handoff-experiment"
+    for role in ROLES:
+        body = " ".join((prompts / f"{role}.md").read_text(encoding="utf-8").split())
+        assert "read as the answer" in body, role

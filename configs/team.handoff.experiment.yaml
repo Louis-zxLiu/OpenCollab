@@ -36,21 +36,32 @@
 # so it could finish the task alone, and every message it sends is a choice it
 # did not have to make.
 #
-# The tool bundles are the shipped ones with exactly those changes: the
-# Analyst's `spawn_agent` is replaced by `message_agent` and it gains the
-# working tools (`apply_patch`, `bash`, `run_tests`), `team_status` is added
-# everywhere so an agent can resolve a teammate's aid, and the Tester gains
-# `bash`. No role has `spawn_agent`: on a prebuilt team it can only be refused.
+# The working bundle is therefore literally the single agent's, not merely a
+# capable one: `apply_patch, bash, file_read, file_write, grep, run_tests`, the
+# same six names the single-agent arm passes to `builtin_tools`
+# (`WORKING_TOOL_NAMES` in OpenCollab-Eval's `gen_prediction_constants`). On top
+# of that the Analyst and the Coder carry only `message_agent` and
+# `team_status` -- the collaboration channel, which is the one thing this arm
+# is supposed to differ by. The Tester holds no tool that edits a file, which
+# is a declared role boundary rather than an arm difference, and it carries
+# `git_diff` to read what others changed.
+#
+# `ask_user` and `use_skill` were on the Analyst and are gone. Nobody answers
+# `ask_user` in an unattended run and no skill package reaches the container, so
+# both could only fail; a tool the single agent does not hold and this one
+# cannot use is a difference between the arms that buys nothing.
+#
+# No role has `spawn_agent`: on a prebuilt team it can only be refused.
 entry: analyst
 
 roles:
   analyst:
     prompt_file: handoff-experiment/analyst.md
-    tools: [apply_patch, ask_user, bash, file_read, grep, message_agent, run_tests, team_status, use_skill]
+    tools: [apply_patch, bash, file_read, file_write, grep, message_agent, run_tests, team_status]
 
   coder:
     prompt_file: handoff-experiment/coder.md
-    tools: [apply_patch, bash, file_read, grep, message_agent, run_tests, team_status]
+    tools: [apply_patch, bash, file_read, file_write, grep, message_agent, run_tests, team_status]
 
   tester:
     prompt_file: handoff-experiment/tester.md
