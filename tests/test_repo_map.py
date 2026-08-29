@@ -283,12 +283,41 @@ def test_build_repo_map_via_env_checks_find_before_sorting():
 
 
 def test_build_repo_map_via_env_rejects_find_diagnostics():
-    env = _FakeEnv(
-        stdout="./visible.py\n",
-        stderr="find: unreadable directory",
-    )
+    """A partial traversal must not be presented as a complete map.
+
+    The check moved into the script, because a diagnostic on the process's
+    stderr does not say whose it was. It now decides there, where find's own
+    stream is still separate, and reports the refusal as a status the caller
+    already rejects.
+    """
+    env = _FakeEnv(stdout="./visible.py\n", returncode=71)
 
     assert run(build_repo_map_via_env(env)) == ""
+    # The guard itself, pinned where it now lives.
+    probe = _FakeEnv(stdout="")
+    run(build_repo_map_via_env(probe))
+    assert 'if [ -s "$repo_map_err" ]' in probe.cmds[0]
+    assert "exit 71" in probe.cmds[0]
+
+
+def test_build_repo_map_via_env_ignores_stderr_that_is_not_the_traversal_s():
+    """The shell around the listing writes to the same stream, every time.
+
+    With a command prefix the environment runs a *login* shell, so its profile
+    scripts print on every command. Treating any stderr as fatal meant the map
+    was empty in exactly the case it exists for -- a repository the caller
+    cannot walk itself -- and ``append_repository_layout`` drops an empty map
+    without a word, so nothing said so.
+    """
+    env = _FakeEnv(
+        stdout="./src\n./src/core.py\n",
+        stderr="Unable to determine terminal type\nconda: no such env\n",
+    )
+
+    result = run(build_repo_map_via_env(env))
+
+    assert result.startswith(MAP_HEADER)
+    assert "src/core.py" in result
 
 
 def test_build_repo_map_via_env_rejects_truncated_traversal_output():

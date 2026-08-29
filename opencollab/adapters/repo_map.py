@@ -376,6 +376,16 @@ async def build_repo_map_via_env(
         'if [ "$repo_map_head_status" -ne 0 ]; then\n'
         '  exit "$repo_map_head_status"\n'
         "fi\n"
+        # A partial traversal must not be presented as a complete map, and
+        # ``find`` can write a diagnostic without the caller being able to see
+        # whose it was: the shell around this script writes to the same stream.
+        # Under a command prefix the environment runs a *login* shell, whose
+        # profile scripts print there on every single command, so "the process
+        # wrote to stderr" says nothing about the listing. This says it here,
+        # where find's own stream is still separate from everyone else's.
+        'if [ -s "$repo_map_err" ]; then\n'
+        "  exit 71\n"
+        "fi\n"
         'case "$repo_map_find_status" in\n'
         "  0|141) exit 0 ;;\n"
         '  *) exit "$repo_map_find_status" ;;\n'
@@ -385,12 +395,11 @@ async def build_repo_map_via_env(
         result = await env.exec_cmd(cmd)
     except Exception:
         return ""
-    if (
-        result.returncode != 0
-        or result.stderr.strip()
-        or result.stdout_truncated
-        or result.stderr_truncated
-    ):
+    # Deliberately not ``result.stderr``: see the ``repo_map_err`` guard in the
+    # script above. Everything that makes this listing untrustworthy -- find
+    # failed, find complained, the listing was cut off in transport -- reaches
+    # here as a non-zero status or a truncation flag.
+    if result.returncode != 0 or result.stdout_truncated:
         return ""
     paths = sorted(
         line[2:] if line.startswith("./") else line
