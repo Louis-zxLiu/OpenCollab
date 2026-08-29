@@ -23,6 +23,9 @@ from opencollab.adapters.env import (
     LocalEnvironment,
     WorktreeEnvironment,
 )
+from opencollab.adapters.repo_map import (
+    build_repo_map_via_env as _build_repo_map_via_env,
+)
 from opencollab.adapters.safe_files import (
     create_regular_bytes_atomic,
     ensure_directory_no_symlinks,
@@ -148,6 +151,20 @@ def attach_container(
         command_prefix=command_prefix,
         timeout_returncode=timeout_returncode,
     )
+
+
+async def build_repo_map_via_env(env: Any, **budgets: int) -> str:
+    """A bounded listing of the paths an environment's workspace holds.
+
+    Public because the workspace an agent reads is not always on this host. A
+    caller that runs agents inside a container cannot walk the repository with
+    ``os.walk`` -- the directory it would walk is the one the run was launched
+    from, not the one the agent sees -- so it asks the environment instead.
+
+    Returns ``""`` when the listing cannot be taken, so a caller can append the
+    result unconditionally.
+    """
+    return await _build_repo_map_via_env(env, **budgets)
 
 
 def local_environment(workspace: str | os.PathLike[str]) -> EnvironmentPort:
