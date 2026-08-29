@@ -17,10 +17,22 @@ from opencollab.application.tool_execution import ToolRuntime
 #: an agent that expects an answer on this call and gets a queue receipt has no
 #: way to tell "still working" from "never arrived". Both facts here are things
 #: a sender has to know to decide whether to wait or to carry on.
+#:
+#: The third fact is the one a sender cannot find out by trying: finishing is
+#: how you wait. A reply reopens a finished turn (a terminal session resumes to
+#: IDLE when a message is delivered, ``domain/session.py`` PHASE_TRANSITIONS)
+#: and the run is not over until nobody is running and no inbox is left
+#: holding a message (``_scheduler_run._quiescent``). Without that sentence a
+#: sender with nothing else to do has to guess between two wrong moves: spend
+#: turns on ``team_status`` until the answer shows up, which bills a full
+#: conversation to the provider each time, or finish believing the exchange
+#: died with it.
 _DELIVERY_NOTE = (
     "The teammate runs on its next turn, not now, and nothing about its work "
     "comes back through this call. If it answers, the answer arrives as a "
-    "message in your conversation. Carry on with whatever you can do "
+    "message in your conversation, and that reopens your turn even if you had "
+    "already finished -- so if you have nothing else to do, finishing is how "
+    "you wait, and it costs nothing. Carry on with whatever you can do "
     "meanwhile, or use team_status to see whether it is running."
 )
 

@@ -11,7 +11,9 @@ not make it correct.
 a message to one of them, addressed by role name; it arrives in that agent's own
 conversation on that agent's next turn, and that agent can send one back to you
 the same way. Sending returns as soon as the message is queued: no work of
-theirs comes back through that call. This team's topology lets you address the Analyst and the Coder, and
+theirs comes back through that call. A message that arrives for you reopens
+your turn even if you had already finished, so if you are waiting on someone
+and have nothing else to do, finishing is how you wait. This team's topology lets you address the Analyst and the Coder, and
 lets each of them address you.
 
 ## The team you have is the whole team

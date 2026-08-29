@@ -211,3 +211,20 @@ def test_every_role_is_told_which_tree_is_read_as_the_answer() -> None:
     for role in ROLES:
         body = " ".join((prompts / f"{role}.md").read_text(encoding="utf-8").split())
         assert "read as the answer" in body, role
+
+
+def test_every_role_is_told_that_finishing_is_how_you_wait() -> None:
+    """Waiting has a free form, and a model that misses it pays in budget.
+
+    ``message_agent`` returns immediately, so a role that has handed work over
+    and has nothing left to do has to choose what to do with its turn. Two of
+    the three available moves are wrong: polling ``team_status`` until the
+    answer lands bills a whole conversation to the provider per poll, and
+    treating the exchange as over abandons a teammate's work. The third is
+    free -- a delivered message reopens a finished turn -- but nothing about
+    the tool's behaviour reveals it, so each card says it.
+    """
+    prompts = REPO_ROOT / "configs" / "handoff-experiment"
+    for role in ROLES:
+        body = " ".join((prompts / f"{role}.md").read_text(encoding="utf-8").split())
+        assert "finishing is how you wait" in body, role
