@@ -20,6 +20,7 @@ from opencollab.adapters.tools.human import AskUserTool
 from opencollab.adapters.tools.message import MessageAgentTool, TeamStatusTool
 from opencollab.adapters.tools.run_tests import RunTestsTool
 from opencollab.adapters.tools.spawn import SpawnAgentTool, SpawnWithReviewTool
+from opencollab.adapters.tools.submit import SubmitTool
 from opencollab.adapters.tools.use_skill import UseSkillTool
 from opencollab.application.ports import SchedulerPort, SkillStorePort
 from opencollab.domain.tools import validate_unique_tool_names
@@ -34,6 +35,7 @@ STATELESS_TOOL_FACTORIES: dict[str, Callable[[], Tool]] = {
     "run_tests": RunTestsTool,
     "git_diff": GitDiffTool,
     "grep": GrepTool,
+    "submit": SubmitTool,
     "ask_user": AskUserTool,
 }
 SCHEDULER_TOOL_FACTORIES: dict[str, Callable[[SchedulerPort], Tool]] = {

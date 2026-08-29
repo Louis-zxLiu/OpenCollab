@@ -20,6 +20,7 @@ BuiltinToolName: TypeAlias = Literal[
     "run_tests",
     "git_diff",
     "grep",
+    "submit",
 ]
 
 _BUILTIN_TOOL_NAMES = frozenset(
@@ -31,6 +32,7 @@ _BUILTIN_TOOL_NAMES = frozenset(
         "run_tests",
         "git_diff",
         "grep",
+        "submit",
     }
 )
 

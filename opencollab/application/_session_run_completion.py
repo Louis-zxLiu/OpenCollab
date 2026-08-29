@@ -138,16 +138,36 @@ class _SessionRunCompletionMixin:
                 immediate.append(tc)
         return immediate, deferred
 
+    def _record_submission(self, result: Any) -> None:
+        """Remember that this step called ``submit``, and with what."""
+        if getattr(result, "turn_submitted", False):
+            self._submitted_summary = getattr(result, "submitted_summary", None) or ""
+
     async def autosave_pending_step(self) -> None:
-        """Emit step_end (the autosave trigger) and loop back to PRECHECK."""
+        """Emit step_end (the autosave trigger), then PRECHECK -- or DONE.
+
+        DONE when the step that just ran called ``submit``. The summary the
+        model gave it is appended as this turn's assistant answer first, so a
+        submitted turn returns the agent's own account of what it handed over
+        rather than whatever text happened to precede the tool call. Everything
+        before the branch is unchanged, so a submitted step is saved exactly
+        like any other.
+        """
         pending = self._pending
         latency = (
             pending.latency
             if pending is not None
             else (self.state.pending_step_latency or 0.0)
         )
+        submitted = self._submitted_summary
+        if submitted is not None:
+            self.state.append_message({"role": "assistant", "content": submitted})
         await self.finish_step(latency)
         self.clear_pending_step()
+        if submitted is not None:
+            self._submitted_summary = None
+            self.state.transition_to(SessionPhase.DONE, reason="submitted")
+            return
         self.state.transition_to(SessionPhase.PRECHECK)
 
     def clear_pending_step(self) -> None:
@@ -271,6 +291,7 @@ class _SessionRunCompletionMixin:
                 blocked_messages,
             )
             result.apply_to(self.state)
+            self._record_submission(result)
             self._pending_tool_allowlist = None
             self._pending_tool_gate_label = None
             self.state.transition_to(SessionPhase.AUTOSAVING)
@@ -306,6 +327,7 @@ class _SessionRunCompletionMixin:
             observations.tool_step_attempted |= proc.tool_step_attempted
             completed_messages.extend(proc.messages_to_append)
             terminal_capture_accepted = proc.terminal_capture_accepted
+            self._record_submission(proc)
 
         observations.apply_read_write_counter_to(self.state)
         observations.apply_evidence_counter_to(self.state)

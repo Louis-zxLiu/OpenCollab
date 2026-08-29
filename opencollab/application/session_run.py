@@ -147,6 +147,10 @@ class SessionRunUseCase(_SessionRunCompletionMixin):
         # Guards the once-per-session retry on an empty-stop turn (see
         # ``handle_pending_response``).
         self._empty_stop_retried = False
+        # The summary a ``submit`` call in the step now finishing gave, or None
+        # when this step did not submit. Read once by
+        # ``autosave_pending_step``, which ends the turn at DONE.
+        self._submitted_summary: str | None = None
         # High-water mark of the steering nudge level emitted so far
         # (None|'soft'|'hard'). Drives _maybe_trace_steering to log only UPWARD
         # crossings, re-arming on a write reset. Never persisted.
@@ -192,6 +196,7 @@ class SessionRunUseCase(_SessionRunCompletionMixin):
         self.reset_runtime_for_user_turn()
         self._pending = None
         self._empty_stop_retried = False
+        self._submitted_summary = None
         self._last_steering_level = None
         self._turn_start_message_index = None
         self._llm_step_started = False
@@ -302,6 +307,7 @@ class SessionRunUseCase(_SessionRunCompletionMixin):
             # Deferred work belongs to the same turn; every other entry starts a
             # fresh once-per-turn empty-response retry allowance.
             self._empty_stop_retried = False
+            self._submitted_summary = None
 
     def _last_turn_answer(self) -> str:
         """Return the last real assistant text produced by the current turn."""

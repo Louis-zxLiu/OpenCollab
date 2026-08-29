@@ -564,8 +564,15 @@ class ToolExecutionUseCase(ToolExecutionRuntimeMixin):
                 ),
                 label="tool_end",
             )
-            if getattr(tool, "terminal_capture_accepted", False):
+            submitted = getattr(tool, "turn_submitted", False)
+            if getattr(tool, "terminal_capture_accepted", False) or submitted:
                 result.terminal_capture_accepted = True
+                if submitted:
+                    # The turn is over, so nothing the model asked for after
+                    # this can run -- same reason a structured capture ends the
+                    # batch, one step further out.
+                    result.turn_submitted = True
+                    result.submitted_summary = getattr(tool, "submitted_summary", None)
                 for skipped in tool_calls[index + 1 :]:
                     result.messages_to_append.append(
                         {

@@ -155,7 +155,7 @@ def test_no_capability_is_reachable_only_through_a_teammate(team) -> None:
 #: ``generation/gen_prediction_constants.py``, which is what that arm passes to
 #: ``builtin_tools``. Both sides pin it, so a change on either fails a test.
 SINGLE_AGENT_WORKING_TOOLS = frozenset(
-    {"apply_patch", "bash", "file_read", "file_write", "grep", "run_tests"}
+    {"apply_patch", "bash", "file_read", "file_write", "grep", "run_tests", "submit"}
 )
 
 #: Everything else a role on this team may hold. The collaboration channel is
