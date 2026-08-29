@@ -120,3 +120,55 @@ def test_a_bad_call_after_a_good_one_does_not_leave_the_turn_submitted():
     _call(tool, {"summary": ""})
     assert tool.turn_submitted is False
     assert tool.submitted_summary is None
+
+
+def test_the_real_executor_carries_the_flag_out_of_the_batch():
+    """The wiring, end to end, with the tool the model actually calls.
+
+    Everything above this point runs against a fake executor holding a
+    pre-built result, which would keep passing if the executor stopped reading
+    the flag off the tool. This one calls the real ``submit`` through the real
+    dispatcher, and also pins the batch behaviour: a call the model issued
+    after ``submit`` cannot run, because the turn is over.
+    """
+    from tool_execution_test_support import (
+        AlwaysAllowPermissionPolicy,
+        FakeAgent,
+        NullEventPublisher,
+    )
+
+    from opencollab.application.tool_execution import ToolExecutionUseCase
+
+    use_case = ToolExecutionUseCase(
+        agent=FakeAgent([SubmitTool()]),
+        environment=object(),
+        state=SessionState(messages=[]),
+        event_publisher=NullEventPublisher(),
+        safety_policy=object(),
+        permission_policy=AlwaysAllowPermissionPolicy(),
+    )
+
+    result = run(
+        use_case.process(
+            [
+                {
+                    "id": "c1",
+                    "function": {
+                        "name": "submit",
+                        "arguments": '{"summary": "%s"}' % SUMMARY,
+                    },
+                },
+                {
+                    "id": "c2",
+                    "function": {"name": "submit", "arguments": '{"summary": "again"}'},
+                },
+            ]
+        )
+    )
+
+    assert result.turn_submitted is True
+    assert result.submitted_summary == SUMMARY
+    assert len(result.messages_to_append) == 2
+    assert "Submitted" in result.messages_to_append[0]["content"]
+    assert result.messages_to_append[1]["tool_call_id"] == "c2"
+    assert "Submitted" not in result.messages_to_append[1]["content"]
