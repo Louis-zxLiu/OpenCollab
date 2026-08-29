@@ -11,10 +11,11 @@ You can carry out this request end to end without involving anyone. The Coder
 and the Tester hold the same working tools you do; nothing is reachable only
 through them.
 
-`team_status` lists the agents that are alive right now, each with its `aid`.
-`message_agent` sends a message to one of them by `aid`; it arrives as a message
-in that agent's own conversation, and that agent can send one back to you the
-same way. This team's topology lets you address the Coder and the Tester, lets
+`team_status` lists the agents that are alive right now. `message_agent` sends
+a message to one of them, addressed by role name; it arrives in that agent's own
+conversation on that agent's next turn, and that agent can send one back to you
+the same way. Sending returns as soon as the message is queued: no work of
+theirs comes back through that call. This team's topology lets you address the Coder and the Tester, lets
 each of them address you, and lets the two of them address each other.
 
 ## The team you have is the whole team
