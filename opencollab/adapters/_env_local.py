@@ -20,6 +20,7 @@ from opencollab.adapters._env_process import (
     ProcessCleanupError,
     ProcessRegistry,
     run_process,
+    timed_out_result,
 )
 from opencollab.adapters.safe_anchored_files import (
     create_regular_bytes_atomic_at,
@@ -99,12 +100,8 @@ class LocalEnvironment(Environment):
                 registry=self._processes,
                 output_limit=PROCESS_OUTPUT_CAPTURE_BYTES,
             )
-        except asyncio.TimeoutError:
-            return ExecResult(
-                returncode=-1,
-                stdout="",
-                stderr=f"Command timed out after {timeout:g}s",
-            )
+        except asyncio.TimeoutError as exc:
+            return timed_out_result(exc, -1, timeout)
         except ProcessCleanupError:
             self.revoke()
             raise

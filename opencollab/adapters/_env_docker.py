@@ -22,6 +22,7 @@ from opencollab.adapters._env_process import (
     PROCESS_OUTPUT_CAPTURE_BYTES,
     ProcessCleanupError,
     run_process,
+    timed_out_result,
 )
 from opencollab.application.async_timeout import await_owned_operation
 from opencollab.application.exception_notes import add_exception_note
@@ -458,17 +459,17 @@ class DockerEnvironment(Environment):
                 timeout=timeout,
                 input_bytes=input_bytes,
             )
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError as exc:
             if not await await_owned_operation(
                 self._recover_inner(token),
                 propagate_cancellation=True,
             ):
                 raise ProcessCleanupError("timed out container command did not quiesce")
-            return ExecResult(
-                self._timeout_returncode,
-                "",
-                f"Command timed out after {timeout:g}s",
-            )
+            # Everything the command printed before the deadline goes back with
+            # the timeout. A test run that hung after reporting nine failures
+            # and one that hung immediately used to be the same empty result,
+            # and the only move left was to run it again.
+            return timed_out_result(exc, self._timeout_returncode, timeout)
         except asyncio.CancelledError as exc:
             if not await await_owned_operation(self._recover_inner(token)):
                 add_exception_note(exc, "cancelled container command did not quiesce")

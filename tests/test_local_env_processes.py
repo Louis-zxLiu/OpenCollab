@@ -741,3 +741,46 @@ async def test_local_rejects_invalid_timeout_before_spawn(tmp_path) -> None:
     env = LocalEnvironment(str(tmp_path))
     with pytest.raises(ValueError, match="positive"):
         await env.exec_cmd("true", timeout=0)
+
+
+async def test_a_timed_out_command_returns_what_it_had_already_written(tmp_path):
+    """A killed command must not come back as if it had produced nothing.
+
+    Everything printed before the deadline was read into the capture buffers
+    and then discarded when the reader tasks were cancelled, so a test run that
+    hung after reporting nine failures and one that hung immediately reached the
+    model as the same empty result. The only move left was to run it again --
+    and hit the same deadline.
+
+    Uses ``/bin/sh`` rather than a Python child on purpose: the interpreter's
+    cold start is a large fraction of a short deadline, and the deadline here is
+    already generous enough to sit above the worst case the terminate path
+    allows itself.
+    """
+    env = LocalEnvironment(str(tmp_path))
+    try:
+        result = await env.exec_cmd(
+            "printf 'nine failures so far\\n'; printf 'and a warning\\n' >&2; sleep 30",
+            timeout=1.0,
+        )
+    finally:
+        await env.cleanup()
+
+    assert result.returncode == -1
+    assert "nine failures so far" in result.stdout
+    # The notice comes first so a reader scanning for the failure still finds it.
+    assert result.stderr.splitlines()[0] == "Command timed out after 1s"
+    assert "and a warning" in result.stderr
+
+
+async def test_a_timeout_with_nothing_written_still_reports_only_the_notice(tmp_path):
+    """The empty case has to stay clean: no blank lines, no invented output."""
+    env = LocalEnvironment(str(tmp_path))
+    try:
+        result = await env.exec_cmd("sleep 30", timeout=1.0)
+    finally:
+        await env.cleanup()
+
+    assert result.returncode == -1
+    assert result.stdout == ""
+    assert result.stderr == "Command timed out after 1s"
