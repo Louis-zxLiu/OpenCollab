@@ -269,17 +269,47 @@ def test_build_repo_map_via_env_limits_enumeration_work() -> None:
     assert "truncated" in result
     assert "mkfifo" in env.cmds[0]
     assert "head -n 6" in env.cmds[0]
-    assert "| head" not in env.cmds[0]
-    assert "| sort" not in env.cmds[0]
+    # ``find`` writes to the fifo and is waited on by pid, so ordering the
+    # listing before the cut cannot cost us its exit status -- which is the
+    # property this used to protect by forbidding the words "| sort" and
+    # "| head" outright. It is stated as the property now, because the cut has
+    # to be applied to an *ordered* stream (see below) and that needs a pipe.
+    assert '>"$repo_map_fifo"' in env.cmds[0]
+    assert 'wait "$repo_map_find_pid"' in env.cmds[0]
+    assert "repo_map_find_status=$?" in env.cmds[0]
 
 
-def test_build_repo_map_via_env_checks_find_before_sorting():
-    env = _FakeEnv(stdout="./zeta.py\n./alpha.py\n")
+def test_build_repo_map_via_env_reports_nothing_when_find_itself_failed():
+    """Ordering the listing must not be able to dress up a failed traversal."""
+    env = _FakeEnv(stdout="./alpha.py\n./zeta.py\n", returncode=71)
+
+    assert run(build_repo_map_via_env(env)) == ""
+
+
+def test_build_repo_map_via_env_puts_the_top_of_the_tree_first():
+    """Shallowest first, then alphabetical -- so a cut keeps the top level.
+
+    ``find`` emits its own traversal order, which is neither sorted nor
+    stable, so taking its first N entries kept an arbitrary sample. Observed
+    on django-11292: 300 paths survived and none of them were under
+    ``django/`` -- the source tree the task was about -- while ``js_tests/``
+    and ``tests/`` were listed in detail. Sorting after the cut, which is what
+    used to happen, made that arbitrary sample look systematic.
+    """
+    env = _FakeEnv(
+        stdout="./tests/admin/deep.py\n./zeta.py\n./django/db\n./alpha.py\n./django\n"
+    )
 
     result = run(build_repo_map_via_env(env))
 
-    assert "| sort" not in env.cmds[0]
-    assert result.index("alpha.py") < result.index("zeta.py")
+    listed = [line for line in result.splitlines() if line and not line.startswith("#")]
+    assert [line for line in listed if line] == [
+        "alpha.py",
+        "django",
+        "zeta.py",
+        "django/db",
+        "tests/admin/deep.py",
+    ]
 
 
 def test_build_repo_map_via_env_rejects_find_diagnostics():
