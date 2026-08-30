@@ -234,6 +234,48 @@ async def test_pending_cleanup_wait_covers_unreserved_over_budget_lease():
     timed_out.release_cancel.set()
     await waiter
 
+
+@pytest.mark.asyncio
+async def test_over_budget_escape_is_single_use():
+    """Only one exhausted-pool call may use the forced-write escape."""
+    factory = FakeFactory(
+        [FakeSession(reply="forced"), FakeSession(reply="must not run")]
+    )
+    ctx = WorkflowContext(factory, budget_total=0)
+
+    assert await ctx.agent("forced write", over_budget_ok=True) == "forced"
+    with pytest.raises(WorkflowBudgetExceeded):
+        await ctx.agent("second forced write", over_budget_ok=True)
+
+    assert len(factory.builds) == 1
+
+
+@pytest.mark.asyncio
+async def test_concurrent_over_budget_escapes_allow_only_one_call():
+    """The one-shot escape is claimed atomically when calls race."""
+    release = asyncio.Event()
+    factory = FakeFactory([FakeSession(reply="forced", gate=release)])
+    ctx = WorkflowContext(factory, budget_total=0, max_concurrency=2)
+
+    tasks = [
+        asyncio.create_task(ctx.agent(f"forced-{index}", over_budget_ok=True))
+        for index in range(2)
+    ]
+    try:
+        for _ in range(20):
+            await asyncio.sleep(0)
+            if len(factory.builds) == 1:
+                break
+        release.set()
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+    finally:
+        release.set()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    assert sum(isinstance(result, WorkflowBudgetExceeded) for result in results) == 1
+    assert sum(isinstance(result, str) and result == "forced" for result in results) == 1
+
+
 @pytest.mark.asyncio
 async def test_timeout_keeps_concurrency_slot_until_cancel_cleanup_finishes():
     active = 0
