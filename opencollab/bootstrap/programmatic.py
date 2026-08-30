@@ -141,8 +141,13 @@ def attach_container(
     """Attach to a caller-owned container workspace."""
     container_id = _trimmed(container_id, "container_id")
     workspace = _trimmed(workspace, "workspace")
-    if not posixpath.isabs(workspace) or posixpath.normpath(workspace) != workspace:
-        raise ValueError("workspace must be a normalized absolute container path")
+    if (
+        workspace.startswith("//")
+        or not posixpath.isabs(workspace)
+        or posixpath.normpath(workspace) != workspace
+        or workspace == "/"
+    ):
+        raise ValueError("workspace must be a normalized absolute non-root container path")
     if isinstance(timeout_returncode, bool) or not isinstance(timeout_returncode, int):
         raise ValueError("timeout_returncode must be an integer")
     return DockerWorkspaceEnvironment(

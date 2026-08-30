@@ -245,6 +245,8 @@ def test_attach_container_validates_non_owning_workspace() -> None:
         attach_container(container_id="container-1", workspace="/tmp/../testbed")
     with pytest.raises(ValueError, match="container_id"):
         attach_container(container_id=" container-1 ", workspace="/testbed")
+    with pytest.raises(ValueError, match="non-root"):
+        attach_container(container_id="container-1", workspace="/")
 
 
 def test_builtin_tools_are_fresh_ordered_and_headless_safe() -> None:
