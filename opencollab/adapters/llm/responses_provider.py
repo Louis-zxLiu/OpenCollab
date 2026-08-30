@@ -526,6 +526,7 @@ def _parse_stream(
     messages: list[dict[str, Any]],
     expected_model: str | None = None,
     forced_text_tool: ForcedTextTool | None = None,
+    tools: list[dict[str, Any]] | None = None,
 ) -> LLMResponse:
     actual_model, finish_reason = _validate_terminal_response(
         state.completed_response,
@@ -588,6 +589,7 @@ def _parse_stream(
             messages,
             content,
             tool_calls,
+            tools,
         ),
         finish_reason=("tool_calls" if tool_calls and finish_reason == "stop" else finish_reason),
         reasoning=reasoning,
@@ -602,6 +604,7 @@ def parse_responses_response(
     *,
     expected_model: str,
     forced_text_tool: ForcedTextTool | None = None,
+    tools: list[dict[str, Any]] | None = None,
 ) -> LLMResponse:
     """Parse one completed non-streaming Responses object."""
     _validate_terminal_response(response, expected_model)
@@ -612,7 +615,13 @@ def parse_responses_response(
     for item in output:
         event = type("OutputItemEvent", (), {"item": item, "output_index": len(state.output_items)})()
         _accept_output_item(event, state)
-    return _parse_stream(state, messages, expected_model, forced_text_tool)
+    return _parse_stream(
+        state,
+        messages,
+        expected_model,
+        forced_text_tool,
+        tools,
+    )
 
 
 async def complete_responses(
@@ -662,6 +671,7 @@ async def complete_responses(
                 messages,
                 expected_model=model,
                 forced_text_tool=forced_text_tool,
+                tools=converted_tools,
             )
 
         state = await _create_and_consume_stream(
@@ -671,7 +681,13 @@ async def complete_responses(
             stream_idle_timeout,
             model,
         )
-        return _parse_stream(state, messages, model, forced_text_tool)
+        return _parse_stream(
+            state,
+            messages,
+            model,
+            forced_text_tool,
+            converted_tools,
+        )
 
     if provider_error_time_budget is not None:
 
