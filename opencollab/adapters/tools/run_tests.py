@@ -282,6 +282,10 @@ class RunTestsTool(Tool):
             combined,
             runner=runner,
             target=target,
+            output_truncated=bool(
+                getattr(result, "stdout_truncated", False)
+                or getattr(result, "stderr_truncated", False)
+            ),
         )
         if target:
             if green:
@@ -510,8 +514,6 @@ def _pytest_missing(returncode: int, output: str) -> bool:
     """Whether the run failed because pytest itself is absent."""
     if returncode == 0:
         return False
-    if returncode == 127:
-        return True
     lines = [line.strip() for line in output.splitlines() if line.strip()]
     return len(lines) == 1 and _PYTEST_MISSING_RE.fullmatch(lines[0]) is not None
 
@@ -569,6 +571,13 @@ def _target_has_pass_proof(target: str, passed_lines: list[str]) -> bool:
     for line in passed_lines:
         node_id = line.removeprefix("PASSED ").strip()
         candidate = node_id.removeprefix("./")
+        if has_selector and not target_path:
+            candidate_selector = candidate.partition("::")[2]
+            if candidate_selector == _selector or candidate_selector.startswith(
+                _selector + "["
+            ):
+                return True
+            continue
         if candidate == normalized or candidate.startswith(normalized + "::"):
             return True
         if has_selector and candidate.startswith(normalized + "["):
@@ -589,6 +598,7 @@ def _is_green(
     *,
     runner: str = DEFAULT_RUNNER,
     target: str = "",
+    output_truncated: bool = False,
 ) -> bool:
     """The GREEN verdict's positive-proof specification.
 
@@ -599,6 +609,10 @@ def _is_green(
     pass proof; go: parsed ``PASS`` lines); a runner with no parser-backed
     adapter cannot authorize GREEN and returns ``False`` by construction.
     """
+    if output_truncated:
+        # A bounded capture may have dropped the only pass/failure evidence;
+        # a retained summary cannot certify the complete run.
+        return False
     summaries = _summary_lines(output)
     if _is_pytest_runner(runner) and len(summaries) != 1:
         # One tool invocation represents one pytest session. Multiple result

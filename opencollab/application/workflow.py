@@ -158,6 +158,10 @@ class WorkflowContext(
         self.budget = WorkflowBudget(budget_total, self._sessions)
         self._budget_lock = asyncio.Lock()
         self._budget_waiters = 0
+        # ``over_budget_ok`` is a one-shot escape for a forced final write.
+        # Claiming it under the budget lock prevents concurrent callers from
+        # turning the escape hatch into an unbounded tail.
+        self._over_budget_escape_used = False
         self._active_budget_lease: contextvars.ContextVar[_BudgetLease | None] = (
             contextvars.ContextVar("workflow_budget_lease", default=None)
         )
@@ -772,6 +776,22 @@ class WorkflowContext(
                         f"of {self.budget.total}"
                     )
                 if over_budget_ok and available <= 0:
+                    if self._over_budget_escape_used:
+                        self._trace_budget_decision(
+                            "budget_refusal",
+                            cap=cap,
+                            remaining=remaining,
+                            label=label,
+                            over_budget_ok=True,
+                        )
+                        raise WorkflowBudgetExceeded(
+                            f"workflow budget exhausted: spent {self.budget.spent()} "
+                            f"of {self.budget.total}; the one over-budget escape "
+                            "has already been used"
+                        )
+                    # Claim before tracing/building so failures cannot turn the
+                    # one-shot escape into a retry loop.
+                    self._over_budget_escape_used = True
                     self._trace_budget_decision(
                         "budget_escape",
                         cap=cap,

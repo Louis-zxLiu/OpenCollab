@@ -203,6 +203,11 @@ _EXACT_MODEL_CAPABILITIES: dict[str, ModelCapabilities] = {
     ),
 }
 
+# These provider identifiers describe one bounded model spelling, rather than
+# an open-ended family.  Unknown gateway aliases must not inherit capabilities
+# that have not been verified for them.
+_BOUNDED_CAPABILITY_FAMILIES = frozenset({"k3", "kimi-for-coding"})
+
 # Conservative default output reservation when a model is recognised.
 DEFAULT_MAX_OUTPUT_TOKENS = DEFAULT_MAX_TOKENS_PER_STEP
 
@@ -213,6 +218,8 @@ def model_matches_family(model: str | None, family: str) -> bool:
         return False
     normalized = model.strip().lower().rsplit("/", 1)[-1]
     normalized_family = family.strip().lower()
+    if normalized_family in _BOUNDED_CAPABILITY_FAMILIES:
+        return _canonical_model_id(normalized) == normalized_family
     return normalized == normalized_family or normalized.startswith(
         f"{normalized_family}-"
     )

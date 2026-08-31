@@ -43,6 +43,7 @@ from opencollab.adapters.llm.tool_contracts import (
 )
 from opencollab.adapters.llm.types import (
     LLMResponse,
+    ModelCapabilities,
     model_capabilities,
     rescue_empty_turn,
     to_plain_data,
@@ -129,15 +130,18 @@ def _forced_text_tool(
     model: str,
     converted_tools: list[dict[str, Any]],
     tool_choice: Any,
+    *,
+    capabilities: ModelCapabilities | None = None,
 ) -> ForcedTextTool | None:
     """Bind one named tool through ``text.format`` when forcing is unsupported."""
     choice = _responses_tool_choice(tool_choice, converted_tools)
+    capabilities = capabilities or model_capabilities(model)
     try:
         return forced_text_tool(
             converted_tools,
             choice,
-            supports_forced_tool_choice=(model_capabilities(model).supports_forced_tool_choice),
-            supports_json_schema=model_capabilities(model).supports_responses_json_schema,
+            supports_forced_tool_choice=capabilities.supports_forced_tool_choice,
+            supports_json_schema=capabilities.supports_responses_json_schema,
         )
     except ValueError as exc:
         raise ResponsesProtocolError(str(exc)) from exc
@@ -159,13 +163,13 @@ def _build_request_kwargs(
     instructions, input_items = _messages_to_input(messages)
     if not input_items:
         raise ResponsesProtocolError("Responses request has no input items")
+    capabilities = model_capabilities(model)
     kwargs: dict[str, Any] = {
         "model": model,
         "input": input_items,
         "store": False,
-        "stream": model_capabilities(model).supports_responses_streaming,
+        "stream": capabilities.supports_responses_streaming,
     }
-    capabilities = model_capabilities(model)
     if capabilities.supports_responses_reasoning:
         kwargs["include"] = ["reasoning.encrypted_content"]
     if capabilities.supports_responses_sampling:
@@ -181,12 +185,17 @@ def _build_request_kwargs(
         raise ResponsesProtocolError(f"model {model!r} does not support function tools")
     choice = _responses_tool_choice(tool_choice, converted_tools)
     if converted_tools:
-        text_tool = _forced_text_tool(model, converted_tools, tool_choice)
+        text_tool = _forced_text_tool(
+            model,
+            converted_tools,
+            tool_choice,
+            capabilities=capabilities,
+        )
         if text_tool is not None:
             kwargs["text"] = forced_text_format(text_tool)
         else:
             kwargs["tools"] = converted_tools
-            if not model_capabilities(model).supports_forced_tool_choice and choice is not None and choice != "auto":
+            if not capabilities.supports_forced_tool_choice and choice is not None and choice != "auto":
                 choice = "auto"
             kwargs["tool_choice"] = choice
     if top_p is not None:
