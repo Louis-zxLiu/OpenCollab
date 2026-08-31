@@ -100,6 +100,13 @@ def _positive_concurrency(value: object, name: str) -> int:
     return parsed
 
 
+def _positive_budget(value: object, name: str = "budget") -> int | None:
+    """Normalize an optional per-call budget to a strictly positive integer."""
+    if value is None:
+        return None
+    return _positive_concurrency(value, name)
+
+
 class WorkflowContext(
     WorkflowAgentsMixin,
     WorkflowStructuredMixin,
@@ -752,6 +759,7 @@ class WorkflowContext(
         ``label`` is carried for the trace record only — it names the caller in
         ``budget_refusal`` / ``budget_escape`` and changes no allocation.
         """
+        cap = _positive_budget(cap)
         self._budget_waiters += 1
         try:
             # Let sibling tasks launched by one gather register as contenders

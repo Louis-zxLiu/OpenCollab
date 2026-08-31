@@ -53,6 +53,22 @@ async def test_agent_returns_final_text_and_seeds_prompt():
     assert session.prompt == "solve it"
     assert factory.builds[0]["prompt"] == "solve it"
 
+
+@pytest.mark.parametrize(
+    "budget",
+    [0, -1, 1.5, True, False, "2", float("nan"), float("inf")],
+)
+@pytest.mark.asyncio
+async def test_agent_rejects_invalid_per_call_budget_before_building_session(budget):
+    factory = FakeFactory([])
+    ctx = WorkflowContext(factory)
+
+    with pytest.raises(ValueError, match="budget must be a positive integer"):
+        await ctx.agent("must not start", budget=budget)
+
+    assert factory.builds == []
+
+
 @pytest.mark.parametrize("timeout", [0, -1, float("nan"), True, "bad"])
 @pytest.mark.asyncio
 async def test_agent_rejects_invalid_timeout_before_building_session(timeout):
