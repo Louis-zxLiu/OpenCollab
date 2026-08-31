@@ -29,11 +29,22 @@ from opencollab.application.workflow_runtime import (
 # waits meant to EXPIRE keep their own small timeouts.
 MUST_SETTLE_SECONDS = 10.0
 
-# test_dead_scout_synth_respects_the_callers_deadline separates two outcomes:
-# the caller's deadline was honoured (milliseconds) or it was not, in which case
-# the internal commit cap runs instead. Any value between them tells them apart,
-# so sit far from the fast one rather than a tenth of a second away from it.
-CALLER_DEADLINE_HONOURED_SECONDS = 10.0
+# The deadline test below hands the synth a caller deadline and checks that the
+# synth is bounded by it. A millisecond deadline cannot do that: it can expire
+# while the synth session is still being built, and ``_remaining_timeout`` then
+# raises before ``run_loop`` is ever called — the synth never starts, and the
+# test reads that as a cancellation failure. Half a second is far above the
+# scheduling jitter that costs, so the synth is certain to have started.
+DEAD_SCOUT_CALLER_TIMEOUT_SECONDS = 0.5
+
+# The bound the deadline is *checked* against is a separate number from the
+# hang guard: a guard sized to tell a honoured deadline from the internal commit
+# cap would also pass an implementation that overran the caller by a second.
+# This one is generous against a loaded machine — half a second of slack on top
+# of the deadline, against the scheduling jitter actually measured here (a 10 ms
+# deadline was missed once in fifteen runs on a machine held busy) — while still
+# failing an overrun long before the internal cap could explain it.
+CALLER_DEADLINE_HONOURED_SECONDS = DEAD_SCOUT_CALLER_TIMEOUT_SECONDS + 0.5
 assert CALLER_DEADLINE_HONOURED_SECONDS < DEFAULT_INTERNAL_COMMIT_TIMEOUT_SECONDS
 
 
@@ -371,9 +382,11 @@ async def test_dead_scout_synth_respects_the_callers_deadline():
     class BlockingSynth(FakeSession):
         def __init__(self) -> None:
             super().__init__()
+            self.started = asyncio.Event()
             self.cancelled = asyncio.Event()
 
         async def run_loop(self, cancel_event=None):
+            self.started.set()
             try:
                 await asyncio.Event().wait()
             except asyncio.CancelledError:
@@ -396,15 +409,20 @@ async def test_dead_scout_synth_respects_the_callers_deadline():
         result = await asyncio.wait_for(
             ctx.agent(
                 "scout",
-                timeout=0.01,
+                timeout=DEAD_SCOUT_CALLER_TIMEOUT_SECONDS,
                 enforcement_strength=ENFORCEMENT_ON,
             ),
-            timeout=CALLER_DEADLINE_HONOURED_SECONDS,
+            # A hang guard, nothing more — the elapsed bound below is what
+            # actually holds the implementation to the caller's deadline.
+            timeout=MUST_SETTLE_SECONDS,
         )
     finally:
         await ctx.wait_for_pending_cleanup()
 
     assert result is not None and "evidence cards" in result
+    # Separate "the synth never ran" from "the synth ran and the deadline
+    # cancelled it": only the second says the deadline reached the synth.
+    assert synth.started.is_set()
     assert synth.cancelled.is_set()
     assert asyncio.get_running_loop().time() - started_at < CALLER_DEADLINE_HONOURED_SECONDS
 

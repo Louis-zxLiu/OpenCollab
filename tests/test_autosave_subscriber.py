@@ -122,6 +122,16 @@ def test_autosave_coalesces_generations_not_yet_started():
     assert subscriber.pending_tasks == ()
 
 
+# The sink is released on its own timer rather than by the loop under test: an
+# ``emit`` that waited for its save would otherwise be holding the release it
+# needs, and the block would only surface after the sink's own 10s cap.
+SINK_HELD_SECONDS = 2.0
+
+# Ten hand-offs cost microseconds; an ``emit`` that waited pays the whole hold
+# above on the first one. This bound sits between the two with room to spare.
+NON_BLOCKING_EMIT_SECONDS = 0.5
+
+
 def test_autosave_coalesces_pending_generations_without_blocking_emit():
     current = {"value": ""}
     saved: list[str] = []
@@ -139,14 +149,22 @@ def test_autosave_coalesces_pending_generations_without_blocking_emit():
     subscriber = AutoSaveSubscriber(lambda: None, prepare_fn=prepare)
 
     async def scenario():
-        for index in range(10):
-            current["value"] = str(index)
-            await subscriber.emit(SessionEvent(type="step_end"))
-            # The first save is parked in the sink and nothing has released it,
-            # so an emit that waited for its save could not have returned here.
-            # Not blocking is proved by what has been saved, not by a stopwatch.
-            assert saved == []
-        release.set()
+        releaser = threading.Timer(SINK_HELD_SECONDS, release.set)
+        releaser.start()
+        try:
+            started_at = time.monotonic()
+            for index in range(10):
+                current["value"] = str(index)
+                await subscriber.emit(SessionEvent(type="step_end"))
+                # The first save is parked in the sink and the sink is still
+                # held, so an emit that waited for its save could not have
+                # returned here.
+                assert saved == []
+            # And the hand-offs did not merely decline to wait — they came back.
+            assert time.monotonic() - started_at < NON_BLOCKING_EMIT_SECONDS
+        finally:
+            releaser.cancel()
+            release.set()
         await asyncio.gather(*subscriber.pending_tasks)
 
     asyncio.run(scenario())

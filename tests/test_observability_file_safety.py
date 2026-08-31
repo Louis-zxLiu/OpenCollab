@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -139,6 +140,17 @@ def test_tracer_write_failure_is_sticky(tmp_path, monkeypatch) -> None:
     assert tracer.dropped_steps == 2
 
 
+# The sink is released on its own timer rather than by the caller under test: a
+# ``log_step`` that waited for the write would otherwise be holding the release
+# it needs, and the block would only surface after the sink's own 10s cap.
+SINK_HELD_SECONDS = 2.0
+
+# A ``log_step`` that waited for the sink pays the whole hold above. This bound
+# sits an order of magnitude above the hand-off and well below that hold, so it
+# fails a caller that waited without failing a merely loaded machine.
+NON_BLOCKING_HANDOFF_SECONDS = 0.5
+
+
 def test_tracer_slow_write_does_not_block_log_step(tmp_path, monkeypatch) -> None:
     started = threading.Event()
     release = threading.Event()
@@ -151,14 +163,20 @@ def test_tracer_slow_write_does_not_block_log_step(tmp_path, monkeypatch) -> Non
 
     monkeypatch.setattr("opencollab.adapters.trace.write_locked_text", slow_write)
     tracer = Tracer("run", output_dir=str(tmp_path))
+    releaser = threading.Timer(SINK_HELD_SECONDS, release.set)
+    releaser.start()
     try:
+        handed_off_at = time.monotonic()
         tracer.log_step("slow", {})
-        # The writer really is inside the slow sink, and nothing has released it
-        # yet — so a log_step that waited for the write could not have returned.
-        # Handing off is proved by which events are set, not by how long it took.
+        elapsed = time.monotonic() - handed_off_at
+        # The writer really is inside the slow sink and the sink is still held,
+        # so a log_step that waited for the write could not have returned.
         assert started.wait(10.0)
         assert not left_sink.is_set()
+        # And it did not merely decline to wait for the sink — it came back.
+        assert elapsed < NON_BLOCKING_HANDOFF_SECONDS
     finally:
+        releaser.cancel()
         release.set()
         tracer.close()
 

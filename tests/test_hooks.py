@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shlex
 import sys
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -196,20 +198,63 @@ def test_runner_kills_on_timeout_without_raising():
     assert outcome.allow is True
 
 
-def _delayed_sentinel_command(started, finished) -> str:
-    """A backgrounded descendant that marks its start, waits, then marks its end.
+# The descendant must still be sleeping when a *slow but correct* cleanup gets
+# round to killing it. Cleanup is allowed the whole kill window, so a descendant
+# that wakes inside it writes ``finished`` on cleanup that worked — the same
+# mismatch this module fixes elsewhere, pointing the other way.
+DESCENDANT_OUTLIVES_CLEANUP_SECONDS = HOOK_KILL_WORST_CASE_SECONDS + 5.0
 
-    Both marks are shell redirections rather than a launched program: the callers
+
+def _delayed_sentinel_command(started, finished) -> str:
+    """A backgrounded descendant that records its pid, sleeps, then marks its end.
+
+    The marks are shell builtins rather than a launched program: the callers
     below kill this group on a sub-second timeout, and an interpreter's startup
     does not reliably fit inside one — measured at 0.04-0.35s on the machines
     this suite runs on, against a 0.2s hook timeout.
+
+    ``started`` carries the sleeping descendant's pid, so a caller asks whether
+    that process is gone rather than waiting out a wall-clock window. ``finished``
+    is written only when the sleep runs to completion (``&&`` drops it when a
+    signal ends the wait), and the sleep outlasts every grace the cleanup path
+    may spend, so a cleanup that worked cannot lose a race to it.
     """
     child = (
-        f": > {shlex.quote(str(started))}; "
-        "sleep 0.6; "
-        f": > {shlex.quote(str(finished))}"
+        f"sleep {DESCENDANT_OUTLIVES_CLEANUP_SECONDS} & "
+        f"echo $! > {shlex.quote(str(started))}; "
+        f"wait $! && : > {shlex.quote(str(finished))}"
     )
     return f"{{ {child}; }} & wait"
+
+
+async def _await_descendant_reaped(started) -> None:
+    """Wait, on the loop, until the recorded descendant is gone.
+
+    Bounded by what ``terminate_process`` permits itself rather than by a fixed
+    sleep, so a loaded machine buys time instead of a false failure. The wait
+    has to happen *on the running loop*: the cancellation path finishes its
+    cleanup there, so a caller that closed the loop first would be asking about
+    a descendant nobody is left to kill.
+    """
+    deadline = time.monotonic() + HOOK_KILL_WORST_CASE_SECONDS + 1.0
+    # ``started`` exists as soon as the redirection opens it, which can be a
+    # moment before the pid lands in it.
+    while True:
+        recorded = started.read_text().strip() if started.exists() else ""
+        if recorded:
+            break
+        if time.monotonic() >= deadline:
+            pytest.fail("descendant never recorded its pid")
+        await asyncio.sleep(0.01)
+    descendant = int(recorded)
+    while True:
+        try:
+            os.kill(descendant, 0)
+        except ProcessLookupError:
+            return
+        if time.monotonic() >= deadline:
+            pytest.fail(f"descendant {descendant} outlived the cleanup path")
+        await asyncio.sleep(0.01)
 
 
 def test_runner_timeout_kills_descendant_process_group(tmp_path):
@@ -222,10 +267,12 @@ def test_runner_timeout_kills_descendant_process_group(tmp_path):
         timeout=0.2,
     )
 
-    asyncio.run(ShellHookRunner((spec,)).fire("Stop", {"hook_event_name": "Stop"}))
+    async def _run() -> None:
+        await ShellHookRunner((spec,)).fire("Stop", {"hook_event_name": "Stop"})
+        assert started.exists()
+        await _await_descendant_reaped(started)
 
-    assert started.exists()
-    asyncio.run(asyncio.sleep(0.7))
+    asyncio.run(_run())
     assert not finished.exists()
 
 
@@ -274,7 +321,7 @@ def test_runner_caller_cancellation_kills_descendant_process_group(tmp_path):
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
-        await asyncio.sleep(0.7)
+        await _await_descendant_reaped(started)
 
     asyncio.run(_run())
     assert not finished.exists()
