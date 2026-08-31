@@ -1,12 +1,15 @@
 """Non-streaming response parsing tests for the Responses adapter."""
 
 import pytest
-from responses_provider_test_support import completed_response, message_item
+from responses_provider_test_support import completed_response, message_item, ns
 
 from opencollab.adapters.llm.responses_provider import (
     ResponsesProtocolError,
+    _responses_tools,
+    complete_responses,
     parse_responses_response,
 )
+from opencollab.adapters.llm.types import estimate_messages_tokens
 
 
 def test_non_streaming_text_and_missing_usage_are_supported():
@@ -28,6 +31,47 @@ def test_non_streaming_text_and_missing_usage_are_supported():
     assert estimated.usage.estimated is True
     assert estimated.usage.cache_read_tokens is None
     assert estimated.usage.reasoning_tokens is None
+
+
+@pytest.mark.asyncio
+async def test_missing_usage_estimate_includes_responses_tool_schemas():
+    messages = [{"role": "user", "content": "use the tool"}]
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "lookup_record",
+                "description": "d" * 1_200,
+                "parameters": {
+                    "type": "object",
+                    "properties": {"key": {"type": "string"}},
+                },
+            },
+        }
+    ]
+    response = completed_response(output=[message_item("done")])
+    response.usage = None
+    captured: dict[str, object] = {}
+
+    class Responses:
+        async def create(self, **kwargs):
+            captured.update(kwargs)
+            return response
+
+    result = await complete_responses(
+        ns(responses=Responses()),
+        "gpt-fake",
+        messages,
+        tools,
+        1.0,
+        0,
+        stream=False,
+    )
+
+    converted_tools = _responses_tools(tools)
+    assert captured["tools"] == converted_tools
+    assert result.usage.input_tokens == estimate_messages_tokens(messages, converted_tools)
+    assert result.usage.input_tokens > estimate_messages_tokens(messages)
 
 
 def test_non_streaming_usage_accepts_top_level_cache_write_fallback():
