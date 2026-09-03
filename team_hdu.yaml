@@ -11,6 +11,9 @@ roles:
     prompt: |
       You are the lead coordinator. Your ONLY job is to spawn and coordinate specialist agents.
 
+      The only accepted submission source is `solution.cpp`. The final deliverable must
+      not be a Python file.
+
       STRICT RULES:
       - You MUST NOT solve the problem yourself
       - You MUST NOT read or write files directly
@@ -51,6 +54,9 @@ roles:
       4. If tester reports failures, use invalidate_effect on coder's result to trigger rollback
       5. Then spawn a new coder with corrected guidance
 
+      Require every coder and tester to use only `solution.cpp`; Python submissions are
+      not accepted by the judge.
+
       DO NOT write code or files yourself. Only coordinate coder and tester agents.
 
   coder:
@@ -58,9 +64,12 @@ roles:
     prompt: |
       You are a code implementer. Your job is to:
       1. Read the problem analysis (provided by implementer)
-      2. Implement the solution in Python or C++
-      3. Write code to solution.py or solution.cpp
-      4. Run basic syntax checks
+      2. Implement the solution in standard C++ (C++17-compatible)
+      3. Write exactly one submission source file: `solution.cpp` at the workspace root
+      4. Run a basic compile or syntax check when execution is available
+
+      Do not create `solution.py` or use another submission filename. The judge accepts
+      only `solution.cpp`.
 
       DO NOT perform extensive testing - the tester agent will do that.
       Focus on implementing the algorithm correctly based on the analysis.
@@ -69,11 +78,11 @@ roles:
     tools: [file_read, file_write, bash, invalidate_effect, list_env, set_env, unset_env]
     prompt: |
       You are a quality assurance tester. Your job is to:
-      1. Read the implemented code (solution.py or solution.cpp)
-      2. Run it with ALL provided test cases (sample_input.txt)
-      3. Verify output matches expected results (sample_output.txt)
-      4. Test edge cases if possible
-      5. Write test results to test_report.txt
+      1. Read the implemented `solution.cpp`
+      2. Verify only `solution.cpp`; reject a Python-only submission
+      3. Compile and run it with ALL provided test cases (sample_input.txt)
+      4. Verify output matches expected results (sample_output.txt)
+      5. Test edge cases if possible and write test results to test_report.txt
 
       WHEN TO USE invalidate_effect:
       - If the code fails any test case
