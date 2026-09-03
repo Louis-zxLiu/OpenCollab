@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 
 from opencollab.adapters.env import Environment
 from opencollab.adapters.safety import SandboxInterceptor
@@ -45,8 +46,19 @@ def build_runtime_context(
 ) -> RuntimeContext:
     """Resolve the workspace path and optional tracer into a ``RuntimeContext``."""
     abs_workspace = os.path.abspath(workspace)
+    # Runtime observability belongs to the workspace control plane. Keeping it
+    # under ``.opencollab`` prevents a traced start-up from creating a
+    # top-level, untracked ``trajectories/`` directory before Git worktree
+    # validation runs. The whole control-plane directory is ignored by the
+    # workspace baseline and is never part of an Agent patch.
+    trace_dir = Path(abs_workspace) / ".opencollab" / "trajectories"
     tracer = (
-        Tracer(run_id=f"{run_id_prefix}{uuid.uuid4().hex[:8]}") if trace else None
+        Tracer(
+            run_id=f"{run_id_prefix}{uuid.uuid4().hex[:8]}",
+            output_dir=str(trace_dir),
+        )
+        if trace
+        else None
     )
 
     return RuntimeContext(

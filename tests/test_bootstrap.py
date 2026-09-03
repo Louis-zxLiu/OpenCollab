@@ -360,6 +360,10 @@ def test_build_runtime_context_resolves_workspace_and_tracer(tmp_path, monkeypat
         assert ctx_trace.tracer is not None
         assert os.path.exists(ctx_trace.tracer.path)
         assert os.path.basename(ctx_trace.tracer.path).startswith("bootstrap-")
+        assert os.path.dirname(ctx_trace.tracer.path) == str(
+            workspace / ".opencollab" / "trajectories"
+        )
+        assert not (tmp_path / "trajectories").exists()
     finally:
         if ctx_trace.tracer:
             ctx_trace.tracer.close()
