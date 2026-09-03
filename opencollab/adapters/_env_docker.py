@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 import posixpath
 import re
@@ -24,6 +25,7 @@ from opencollab.adapters._env_process import (
     run_process,
     timed_out_result,
 )
+from opencollab.adapters._env_scope import _CONTROL_ENV_NAMES
 from opencollab.application.async_timeout import await_owned_operation
 from opencollab.application.exception_notes import add_exception_note
 
@@ -271,6 +273,29 @@ class DockerEnvironment(Environment):
                 raise RuntimeError("Attached Docker container identity was ambiguous or changed")
             self._container_id = fields[0].lower()
             self._attached_bound = True
+            await self._capture_native_scope()
+
+    async def _capture_native_scope(self) -> None:
+        """Initialize Scope from the container's native environment."""
+        if self._container_id is None:
+            return
+        try:
+            native = await self._docker(
+                "inspect", "--format", "{{json .Config.Env}}", "--", self._container_id,
+                timeout=DOCKER_CONTROL_TIMEOUT_SECONDS,
+            )
+            values = json.loads(native.stdout.decode("utf-8"))
+            if native.returncode != 0 or not isinstance(values, list):
+                raise RuntimeError("Docker environment inspection failed")
+            parsed = {
+                name: value
+                for item in values
+                if isinstance(item, str) and "=" in item
+                for name, value in (item.split("=", 1),)
+            }
+            self._scope.replace_native(parsed)
+        except (OSError, RuntimeError, ValueError, AssertionError):
+            self._scope.replace_native({})
 
     async def setup(self, mount_dir: str | None = None) -> str:
         async with self._lifecycle_lock:
@@ -318,6 +343,7 @@ class DockerEnvironment(Environment):
             )
         self._container_id = candidate.lower()
         self.host_workspace = host_mount
+        await self._capture_native_scope()
         return self._container_id
 
     async def _discard_failed_setup(self, failure: BaseException) -> NoReturn:
@@ -376,6 +402,10 @@ class DockerEnvironment(Environment):
         return True
 
     def _wrap_command(self, cmd: str) -> str:
+        tombstones = self._scope.tombstones()
+        if tombstones:
+            unset = "; ".join(f"unset {shlex.quote(name)}" for name in tombstones)
+            cmd = f"{unset}; {cmd}"
         if self._command_prefix is None:
             return cmd
         if callable(self._command_prefix):
@@ -392,6 +422,13 @@ class DockerEnvironment(Environment):
             args.extend(("-w", self._exec_workdir))
         for name, value in _GIT_IDENTITY_ENV:
             args.extend(("-e", f"{name}={value}"))
+        scope = self._scope.process_environment()
+        for name in _CONTROL_ENV_NAMES:
+            scope.pop(name, None)
+        for name in sorted(scope):
+            args.extend(("-e", f"{name}={scope[name]}"))
+        for name in self._scope.tombstones():
+            args.extend(("-e", f"{name}"))
         shell_flag = "-lc" if self._command_prefix is not None else "-c"
         args.extend(
             (
@@ -454,6 +491,9 @@ class DockerEnvironment(Environment):
             self._ensure_active()
             self._active_execs[token] = asyncio.current_task()
         try:
+            # Scope state is snapshotted while building argv, but container
+            # commands must remain concurrent so abort can quiesce every
+            # active execution independently.
             result = await self._docker(
                 *self._exec_argv(cmd, token, interactive=input_bytes is not None),
                 timeout=timeout,

@@ -12,6 +12,7 @@ import uuid
 from opencollab.adapters._env_base import Environment, ExecResult, TextFileRange
 from opencollab.adapters._env_local import LocalEnvironment
 from opencollab.adapters._env_process import run_process
+from opencollab.adapters._env_scope import _HostGitCheckpoints
 from opencollab.adapters.git_patch import guarded_staged_diff_command
 from opencollab.adapters.git_worktree_evidence import (
     ABSENT_REF_OLD_VALUE,
@@ -21,6 +22,7 @@ from opencollab.adapters.git_worktree_evidence import (
 )
 from opencollab.application.async_timeout import await_owned_operation
 from opencollab.application.exception_notes import add_exception_note
+from opencollab.domain.rollback import CheckpointBoundary, RestoreResult, ScopeCheckpoint
 
 WORKTREE_GIT_TIMEOUT_SECONDS = 30.0
 _PORCELAIN_STATUS_CHARS = frozenset(" MADRCU?!")
@@ -73,6 +75,7 @@ class WorktreeEnvironment(Environment):
         self._source_subdir = ""
         self._repository_root: str | None = None
         self._git_diff_delivery_pending = False
+        self._scope_checkpoints: _HostGitCheckpoints | None = None
         # The revision the last ``get_diff`` measured against. Read by the
         # scheduler's ``worktree_changes`` record so a row states its own
         # baseline; ``None`` until a diff has been taken, and on the non-Git
@@ -161,7 +164,8 @@ class WorktreeEnvironment(Environment):
             raise
         self.workspace = exposed_workspace
         self.host_workspace = exposed_workspace
-        self._local_env = LocalEnvironment(exposed_workspace)
+        self._local_env = LocalEnvironment(exposed_workspace, _scope=self._scope)
+        self._scope_checkpoints = _HostGitCheckpoints(self._scope, exposed_workspace)
         return exposed_workspace
 
     async def _setup_git_worktree(self) -> None:
@@ -606,6 +610,39 @@ class WorktreeEnvironment(Environment):
         assert self._local_env is not None
         return await self._local_env.exec_cmd(cmd, timeout)
 
+    async def checkpoint_scope(
+        self,
+        boundary: CheckpointBoundary,
+        *,
+        owner_aid: int,
+        causal_frontier: frozenset[str],
+    ) -> ScopeCheckpoint:
+        self._ensure_active()
+        if self._local_env is None:
+            await self.setup()
+        if not self._git_mode or self._scope_checkpoints is None:
+            raise RuntimeError("rollback checkpoints require an isolated Git worktree")
+        return await self._scope_checkpoints.create(
+            boundary,
+            owner_aid=owner_aid,
+            causal_frontier=causal_frontier,
+        )
+
+    async def restore_scope(self, checkpoint: ScopeCheckpoint) -> RestoreResult:
+        self._ensure_active()
+        if self._scope_checkpoints is None:
+            return RestoreResult(
+                checkpoint.owner_aid,
+                checkpoint.checkpoint_id,
+                "failed",
+                reason="Scope is not initialized",
+            )
+        return await self._scope_checkpoints.restore(checkpoint)
+
+    async def discard_scope_checkpoints(self) -> None:
+        if self._scope_checkpoints is not None:
+            await self._scope_checkpoints.discard()
+
     async def read_file(self, path: str) -> str:
         self._ensure_active()
         if self._local_env is None:
@@ -658,6 +695,13 @@ class WorktreeEnvironment(Environment):
 
     async def _cleanup_resources(self) -> None:
         failures: list[BaseException] = []
+        if self._scope_checkpoints is not None:
+            try:
+                await self._scope_checkpoints.discard()
+            except BaseException as exc:
+                failures.append(exc)
+            else:
+                self._scope_checkpoints = None
         if self._local_env is not None:
             try:
                 await self._local_env.cleanup()

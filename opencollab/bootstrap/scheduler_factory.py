@@ -19,6 +19,7 @@ from opencollab.adapters.storage import SessionStore
 from opencollab.adapters.worktree_pool import WorktreePool
 from opencollab.application.event_bus import EventBus
 from opencollab.application.hooks import HookEventSubscriber
+from opencollab.application.rollback import RollbackService
 from opencollab.application.scheduler import LaunchSpec, Scheduler
 from opencollab.bootstrap.config import (
     DEFAULT_TEMPERATURE,
@@ -202,6 +203,8 @@ def build_scheduler(
         )
     lead_save_path = agent_save_path(run_dir, 0, team_cfg.entry) if run_dir else None
 
+    rollback_service = RollbackService(trace_port=ctx.tracer)
+
     session_factory = DefaultSessionFactory(
         SpawnConfig(
             model=cfg["model"],
@@ -242,7 +245,11 @@ def build_scheduler(
         prebuilt_roster=prebuild_team,
         allow_unisolated_shell=allow_unisolated_shell,
         max_steps=max_steps,
+        lineage_controller=rollback_service,
     )
+    rollback_enabled = bool(team_cfg.rollback.get("enabled", False))
+    if rollback_enabled and not use_worktrees:
+        raise ValueError("rollback-enabled Team mode requires isolated worktrees")
     worktree_pool = WorktreePool(
         ctx.workspace,
         use_worktrees=use_worktrees,
@@ -260,6 +267,7 @@ def build_scheduler(
         roles=tuple(team_cfg.roles),
         prebuild_team=prebuild_team,
         serialize_turns=serialize_turns,
+        rollback_service=rollback_service,
     )
 
     # Attach hooks after the scheduler exists so the runner can hold its handle

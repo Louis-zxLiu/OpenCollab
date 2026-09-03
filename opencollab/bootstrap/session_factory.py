@@ -38,6 +38,7 @@ from opencollab.application.ports import (
 )
 from opencollab.application.scheduler import LaunchSpec
 from opencollab.application.session import Session
+from opencollab.application.shaping.rollback import RollbackQuarantineShaper
 from opencollab.bootstrap.container import build_session_runtime, build_skill_store
 from opencollab.bootstrap.context_builder import ContextBuilder, SpawnConfig
 from opencollab.bootstrap.runtime_context import build_workspace_safety_policy
@@ -211,6 +212,7 @@ def build_session(
     seed_user_messages: list[dict[str, Any]] | None = None,
     seed_system_messages: list[dict[str, Any]] | None = None,
     shaper: ShaperPort | None = None,
+    additional_shapers: tuple[ShaperPort, ...] = (),
     team_budget_exhausted: Callable[[], bool] | None = None,
 ) -> Session:
     """Self-wiring ``Session`` factory.
@@ -241,6 +243,7 @@ def build_session(
         seed_user_messages=seed_user_messages,
         seed_system_messages=seed_system_messages,
         shaper=shaper,
+        additional_shapers=additional_shapers,
         team_budget_exhausted=team_budget_exhausted,
     )
     Session.__init__(
@@ -442,6 +445,7 @@ class DefaultSessionFactory:
         prebuilt_roster: bool = False,
         allow_unisolated_shell: bool | None = None,
         max_steps: int = SESSION_MAX_STEPS,
+        lineage_controller: Any = None,
     ):
         self._cfg = cfg
         self._provider_retry_budget = (
@@ -463,6 +467,7 @@ class DefaultSessionFactory:
         # spawned children get their own ``agent_<aid>_<role>.json`` autosave.
         self._save_dir = save_dir
         self._max_steps = int(max_steps)
+        self._lineage_controller = lineage_controller
 
     def _validate_responses_tool_support(self) -> None:
         """Reject statically incompatible team roles before opening a workspace."""
@@ -575,6 +580,11 @@ class DefaultSessionFactory:
             project_context=project_context,
         )
 
+    def _build_lineage_shapers(self) -> tuple[ShaperPort, ...]:
+        if self._lineage_controller is None:
+            return ()
+        return (RollbackQuarantineShaper(self._lineage_controller),)
+
     def build_spawn_session(
         self,
         *,
@@ -634,6 +644,7 @@ class DefaultSessionFactory:
             seed_user_messages=plan.startup_user_messages(),
             seed_system_messages=plan.startup_system_messages(),
             team_budget_exhausted=_team_budget_guard(scheduler),
+            additional_shapers=self._build_lineage_shapers(),
         )
 
     def create_lead_session(
@@ -685,6 +696,7 @@ class DefaultSessionFactory:
             aid=aid,
             seed_system_messages=plan.startup_system_messages(),
             team_budget_exhausted=_team_budget_guard(scheduler),
+            additional_shapers=self._build_lineage_shapers(),
         )
 
 

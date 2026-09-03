@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import copy
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
 from opencollab.domain.pending import PendingEventTable
+from opencollab.domain.rollback import RollbackState
 
 MAX_SCOUT_LEDGER_CARDS = 256
 
@@ -245,6 +246,48 @@ class SessionState:
     # Elapsed provider/tool time for a deferred step whose process-local
     # PendingStep response was released while waiting for child results.
     pending_step_latency: float | None = None
+
+    rollback: RollbackState = field(default_factory=RollbackState)
+
+    @property
+    def lineage_branch_id(self) -> str:
+        return self.rollback.branch
+
+    @lineage_branch_id.setter
+    def lineage_branch_id(self, value: str) -> None:
+        self.rollback = replace(self.rollback, branch=value)
+
+    @property
+    def lineage_epoch(self) -> int:
+        return self.rollback.epoch
+
+    @lineage_epoch.setter
+    def lineage_epoch(self, value: int) -> None:
+        self.rollback = replace(self.rollback, epoch=value)
+
+    @property
+    def lineage_attempt(self) -> int:
+        return self.rollback.attempt
+
+    @lineage_attempt.setter
+    def lineage_attempt(self, value: int) -> None:
+        self.rollback = replace(self.rollback, attempt=value)
+
+    @property
+    def consumed_effect_ids(self) -> set[str]:
+        return set(self.rollback.causal_frontier)
+
+    @consumed_effect_ids.setter
+    def consumed_effect_ids(self, value: set[str]) -> None:
+        self.rollback = replace(self.rollback, causal_frontier=frozenset(value))
+
+    @property
+    def quarantined_effect_ids(self) -> set[str]:
+        return set(self.rollback.quarantined_effects)
+
+    @quarantined_effect_ids.setter
+    def quarantined_effect_ids(self, value: set[str]) -> None:
+        self.rollback = replace(self.rollback, quarantined_effects=frozenset(value))
 
     def __post_init__(self) -> None:
         self._align_timestamps()

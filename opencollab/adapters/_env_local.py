@@ -22,6 +22,7 @@ from opencollab.adapters._env_process import (
     run_process,
     timed_out_result,
 )
+from opencollab.adapters._env_scope import _ScopeState
 from opencollab.adapters.safe_anchored_files import (
     create_regular_bytes_atomic_at,
     open_directory_anchor,
@@ -52,8 +53,8 @@ class LocalEnvironment(Environment):
     local_filesystem = True
     process_isolated = False
 
-    def __init__(self, workspace: str = ".") -> None:
-        super().__init__()
+    def __init__(self, workspace: str = ".", *, _scope: _ScopeState | None = None) -> None:
+        super().__init__(_scope=_scope)
         self.workspace = os.path.realpath(os.path.abspath(workspace))
         if not os.path.isdir(self.workspace):
             raise NotADirectoryError(self.workspace)
@@ -91,20 +92,22 @@ class LocalEnvironment(Environment):
 
     async def exec_cmd(self, cmd: str, timeout: float = 120.0) -> ExecResult:
         self._ensure_active()
-        try:
-            result = await run_process(
-                cmd,
-                shell=True,
-                cwd=self.workspace,
-                timeout=timeout,
-                registry=self._processes,
-                output_limit=PROCESS_OUTPUT_CAPTURE_BYTES,
-            )
-        except asyncio.TimeoutError as exc:
-            return timed_out_result(exc, -1, timeout)
-        except ProcessCleanupError:
-            self.revoke()
-            raise
+        async with self._scope.command_lock:
+            try:
+                result = await run_process(
+                    cmd,
+                    shell=True,
+                    cwd=self.workspace,
+                    timeout=timeout,
+                    registry=self._processes,
+                    output_limit=PROCESS_OUTPUT_CAPTURE_BYTES,
+                    env=self._scope.process_environment(),
+                )
+            except asyncio.TimeoutError as exc:
+                return timed_out_result(exc, -1, timeout)
+            except ProcessCleanupError:
+                self.revoke()
+                raise
         return result.to_exec_result()
 
     async def _execute_file_operation(

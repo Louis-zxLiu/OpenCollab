@@ -14,9 +14,11 @@ from typing import Callable
 from opencollab.adapters.tools.apply_patch import ApplyPatchTool
 from opencollab.adapters.tools.base import Tool
 from opencollab.adapters.tools.bash import BashTool
+from opencollab.adapters.tools.env_scope import ListEnvTool, SetEnvTool, UnsetEnvTool
 from opencollab.adapters.tools.fs import FileReadTool, FileWriteTool, GrepTool
 from opencollab.adapters.tools.git_diff import GitDiffTool
 from opencollab.adapters.tools.human import AskUserTool
+from opencollab.adapters.tools.invalidate_effect import InvalidateEffectTool
 from opencollab.adapters.tools.message import MessageAgentTool, TeamStatusTool
 from opencollab.adapters.tools.run_tests import RunTestsTool
 from opencollab.adapters.tools.spawn import SpawnAgentTool, SpawnWithReviewTool
@@ -37,12 +39,16 @@ STATELESS_TOOL_FACTORIES: dict[str, Callable[[], Tool]] = {
     "grep": GrepTool,
     "submit": SubmitTool,
     "ask_user": AskUserTool,
+    "set_env": SetEnvTool,
+    "unset_env": UnsetEnvTool,
+    "list_env": ListEnvTool,
 }
 SCHEDULER_TOOL_FACTORIES: dict[str, Callable[[SchedulerPort], Tool]] = {
     "spawn_agent": SpawnAgentTool,
     "spawn_with_review": SpawnWithReviewTool,
     "message_agent": MessageAgentTool,
     "team_status": TeamStatusTool,
+    "invalidate_effect": InvalidateEffectTool,
 }
 # Skill-bound tools take a ``SkillStorePort`` so the dispatcher can fetch a
 # skill's body by name. One generic dispatcher serves all skills.
@@ -152,6 +158,10 @@ def build_tools_for_role(
     to constructor kwargs (output caps) so a team file can tune per-tool output
     budgets to its backend. Unknown names or kwargs raise — fail fast at startup.
     """
+    # Resolve exactly the capabilities requested by the role. Built-in and
+    # fallback role bundles declare Scope tools explicitly in team_config;
+    # ad-hoc callers must opt in rather than receiving hidden capabilities.
+    tool_names = list(tool_names)
     validate_unique_tool_names(tool_names)
     limits = validate_tool_limits(tool_limits or {})
     uncappable = set(limits) & frozenset(SCHEDULER_TOOL_FACTORIES)

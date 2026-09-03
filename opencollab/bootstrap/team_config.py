@@ -51,9 +51,15 @@ from opencollab.domain.team import Topology
 # further. ``ask_user`` is the Analyst's alone and is moot for the other two —
 # they are built non-interactive, so the registry resolver drops it regardless.
 # Sorted for a deterministic, reproducible tool order.
-ANALYST_TOOL_NAMES: tuple[str, ...] = ("ask_user", "file_read", "grep", "spawn_agent", "use_skill")
-CODER_TOOL_NAMES: tuple[str, ...] = ("apply_patch", "bash", "file_read", "grep", "run_tests")
-TESTER_TOOL_NAMES: tuple[str, ...] = ("file_read", "git_diff", "grep", "run_tests")
+ANALYST_TOOL_NAMES: tuple[str, ...] = (
+    "ask_user", "file_read", "grep", "list_env", "set_env", "spawn_agent", "unset_env", "use_skill"
+)
+CODER_TOOL_NAMES: tuple[str, ...] = (
+    "apply_patch", "bash", "file_read", "grep", "list_env", "run_tests", "set_env", "unset_env"
+)
+TESTER_TOOL_NAMES: tuple[str, ...] = (
+    "file_read", "git_diff", "grep", "list_env", "run_tests", "set_env", "unset_env"
+)
 
 # Fallback bundle for a role an ``allow_all`` team file spawns without declaring
 # it. Derived from the registry so it stays the single source of truth — add a
@@ -242,6 +248,7 @@ class _TeamFileModel(BaseModel):
     # team tune output budgets to its backend's context size (see
     # ``bootstrap.tool_registry.build_tools_for_role``).
     tool_limits: dict[str, dict[str, int]] = Field(default_factory=dict)
+    rollback: dict[str, bool] = Field(default_factory=dict)
 
     @field_validator("tool_limits", mode="before")
     @classmethod
@@ -263,6 +270,7 @@ class TeamConfig:
     entry: str | None = None
     # Tool name -> constructor kwargs (output caps); applied by the registry.
     tool_limits: dict[str, dict[str, int]] = field(default_factory=dict)
+    rollback: dict[str, bool] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         normalized_tool_limits = validate_tool_limits(self.tool_limits)
@@ -539,6 +547,11 @@ def _build_team_config(data: Any, base_dir: Path) -> TeamConfig:
         hooks=_build_hook_specs(model.hooks),
         entry=_resolve_entry_role(model.entry, roles),
         tool_limits={name: dict(kwargs) for name, kwargs in model.tool_limits.items()},
+        rollback={
+            "enabled": bool(model.rollback.get("enabled", False)),
+            "checkpoint_on_tool_calls": bool(model.rollback.get("checkpoint_on_tool_calls", True)),
+            "persistent_state": bool(model.rollback.get("persistent_state", False)),
+        },
     )
 
 

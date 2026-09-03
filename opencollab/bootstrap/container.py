@@ -307,6 +307,7 @@ def build_session_runtime(
     seed_user_messages: list[dict[str, Any]] | None = None,
     seed_system_messages: list[dict[str, Any]] | None = None,
     shaper: ShaperPort | None = None,
+    additional_shapers: tuple[ShaperPort, ...] = (),
     team_budget_exhausted: Callable[[], bool] | None = None,
 ) -> SessionRuntime:
     """Build a ``SessionRuntime`` with the same construction order
@@ -318,7 +319,8 @@ def build_session_runtime(
     ``seed_system_messages`` retain source-level provenance for layered system
     context; ``seed_user_messages`` are startup user-context messages appended
     after them (e.g. a spawned agent's task);
-    ``shaper`` reshapes the message list before each model call.
+    ``shaper`` overrides the default message pipeline; ``additional_shapers``
+    are appended to the selected pipeline before each model call.
     """
     resolved_env = env if env is not None else LocalEnvironment()
     resolved_store: SessionStorePort = store if store is not None else SessionStore()
@@ -359,8 +361,13 @@ def build_session_runtime(
         auto_save_path,
         provider_retry_budget,
     )
-    resolved_shaper: ShaperPort = (
+    base_shaper: ShaperPort = (
         shaper if shaper is not None else _build_default_shaper(resolved_llm, summarizer)
+    )
+    resolved_shaper: ShaperPort = (
+        ShaperPipeline((base_shaper, *additional_shapers))
+        if additional_shapers
+        else base_shaper
     )
     runner = SessionRunUseCase(
         agent=agent,

@@ -1,20 +1,10 @@
-"""Agent lifecycle for the Scheduler: register, spawn, drive, wake, deliver.
-
-This is the heart of the passive scheduler — the non-blocking spawn, the
-per-agent run/finalize loop, and the wake path that routes a finished child's
-result back into the pending row that suspended its parent.
-
-``LifecycleMixin`` is composed into ``Scheduler`` and relies on the maps and
-helpers created in ``Scheduler.__init__`` (``table``, ``_sessions``,
-``_tasks``, ``_locks``, ``_spawn_origin``, ``_session_factory``,
-``_worktree_pool``, ``_tracer``, and the dedup / messaging / event / topology
-helpers).
-"""
+"""Agent lifecycle capability for the Scheduler."""
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import logging
 import time
 from typing import Any
@@ -22,6 +12,7 @@ from typing import Any
 from opencollab.application.scheduler_types import LaunchSpec
 from opencollab.domain.identity import validate_role_identity
 from opencollab.domain.pending import PendingRowError, RowStatus
+from opencollab.domain.rollback import CheckpointBoundary, LineageEnvelope
 from opencollab.domain.scheduler import SessionControlBlock
 from opencollab.domain.session import SessionPhase
 
@@ -76,6 +67,11 @@ class LifecycleMixin:
             budget=self._entry_start_budget(),
         )
         session.apply_launch(launch)
+        if self._lineage is not None:
+            self._lineage.rebuild_from_messages(session.state.messages)
+            self._lineage.rebuild_from_snapshot(
+                set(session.state.rollback.quarantined_effects)
+            )
         return self.register_lead(session)
 
     async def spawn(
@@ -107,9 +103,6 @@ class LifecycleMixin:
         if self.table.get(parent_aid) is None or parent_aid not in self._sessions:
             raise ValueError(f"Cannot spawn agent: no parent with aid {parent_aid}.")
         role = validate_role_identity(role)
-        # Before the topology check, so one uniform record covers both a request
-        # for a declared role and one for a role this team was never given; the
-        # record carries whether the topology would have allowed the edge.
         self._refuse_spawn_when_prebuilt(parent_aid, role, task, context)
         self._check_topology(parent_aid, role, verb="spawn")
         aid = self.table.allocate_aid()
@@ -120,27 +113,8 @@ class LifecycleMixin:
             self._startup_origin[aid] = (parent_aid, tool_call_id)
         env: Any | None = None
         parent_lease: tuple[int, int] | None = None
-        # Reserve this (role, task) AND its budget synchronously — before the
-        # first await — so a duplicate / batched spawn later in the same
-        # tool-call batch already sees the updated allocation and cannot
-        # oversubscribe the global pool.
-        # Everything from reservation until the driver task is scheduled may raise
-        # (worktree acquire, session build, event emission). The driver task owns
-        # releasing the two reservations on termination — but it only exists once
-        # ``create_task`` below succeeds. So if anything raises before that, the
-        # reservations would leak permanently (the budget grant inflates the pool
-        # for every future spawn, and the inflight key permanently refuses any
-        # re-spawn of this (role, task)). Release both and re-raise so the caller
-        # (execute_deferred) still surfaces the failure into the parent's row.
         try:
-            # ``spawn`` is the authoritative single-flight boundary. This
-            # compare-and-set runs before the first await, so concurrent
-            # coroutines cannot both reserve the same delegated-work identity.
             self._reserve_inflight(aid, parent_aid, role, task, context)
-            # ``spawn`` runs after the parent's current model generation has
-            # completed. Return the parent's unused turn lease before granting
-            # children; the parent will acquire a fresh lease when the complete
-            # pending batch wakes it for its next generation.
             parent_driver = self._tasks.get(parent_aid)
             parent_scb = self.table.get(parent_aid)
             if (
@@ -200,6 +174,8 @@ class LifecycleMixin:
             )
             if self._shutting_down:
                 raise RuntimeError("Cannot spawn agent: scheduler is shutting down.")
+
+            await self._checkpoint_after_spawn(aid, task)
 
             # Start async task. Once this succeeds, _drive_agent owns the
             # reservation release — must be the last statement that can hand off
@@ -359,6 +335,15 @@ class LifecycleMixin:
         start = self._turn_started_at.setdefault(aid, time.monotonic())
 
         try:
+            if aid == 0 and self._lineage is not None and not self._lineage.has_checkpoint(aid):
+                lead_env = getattr(session, "env", None)
+                if lead_env is not None and hasattr(lead_env, "checkpoint_scope"):
+                    self._lineage.register_environment(aid, lead_env)
+                    await self._lineage.checkpoint(
+                        aid,
+                        CheckpointBoundary("scope_initialization"),
+                        session.state.rollback.causal_frontier,
+                    )
             cancel_event = self._turn_cancel_events.get(aid)
             async with self._turn_gate():
                 result = (
@@ -554,6 +539,11 @@ class LifecycleMixin:
         if origin is None:
             return
         parent_aid, tool_call_id = origin
+        lineage_effect = self._create_child_result_effect(
+            child_aid,
+            parent_aid,
+            result,
+        )
         try:
             await self._wake(
                 parent_aid,
@@ -562,6 +552,7 @@ class LifecycleMixin:
                 status,
                 child_aid=child_aid,
                 error=error,
+                lineage_effect=lineage_effect,
             )
         except PendingRowError as exc:
             retry_tool_call_id = await self._recover_delivery_route(
@@ -578,6 +569,7 @@ class LifecycleMixin:
                         status,
                         child_aid=child_aid,
                         error=error,
+                        lineage_effect=lineage_effect,
                     )
                     return
                 except PendingRowError as retry_exc:
@@ -678,6 +670,7 @@ class LifecycleMixin:
         *,
         child_aid: int | None = None,
         error: str | None = None,
+        lineage_effect: Any = None,
     ) -> None:
         """Fill the parent's pending row and, if that completes the batch while
         the parent is suspended, create a resume task. Fill + completeness check
@@ -707,6 +700,20 @@ class LifecycleMixin:
                     if child_scb is not None:
                         child_scb.state.cancel(result)
                         child_scb.result = result
+            if lineage_effect is not None:
+                row = table.rows.get(tool_call_id)
+                if row is not None:
+                    table.rows[tool_call_id] = dataclasses.replace(
+                        row,
+                        lineage=LineageEnvelope(lineage_effect, consumer_aid=parent_aid),
+                    )
+                    parent_scb.state.rollback = dataclasses.replace(
+                        parent_scb.state.rollback,
+                        causal_frontier=self._lineage.consume(
+                            parent_aid,
+                            lineage_effect.effect_id,
+                        ),
+                    )
             table.fill(
                 tool_call_id,
                 result=result,

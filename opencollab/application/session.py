@@ -36,6 +36,7 @@ from opencollab.application.tool_execution import ToolExecutionUseCase
 from opencollab.domain.agent import Agent
 from opencollab.domain.events import SessionRuntimeEvent as SessionEvent
 from opencollab.domain.pending import PendingRow, RowKind, RowStatus
+from opencollab.domain.rollback import RollbackState
 from opencollab.domain.session import SessionPhase, SessionState
 
 if TYPE_CHECKING:
@@ -544,6 +545,37 @@ class Session:
             if restored.phase is SessionPhase.AWAITING_EVENTS
             else None
         )
+        raw_rollback = raw_state.get("rollback")
+        if not isinstance(raw_rollback, dict) and any(
+            key in raw_state
+            for key in (
+                "lineage_branch_id",
+                "lineage_epoch",
+                "lineage_attempt",
+                "consumed_effect_ids",
+                "quarantined_effect_ids",
+            )
+        ):
+            raw_rollback = {
+                "branch": raw_state.get("lineage_branch_id", "main"),
+                "epoch": raw_state.get("lineage_epoch", 0),
+                "attempt": raw_state.get("lineage_attempt", 0),
+                "causal_frontier": raw_state.get("consumed_effect_ids", ()),
+                "quarantined_effects": raw_state.get("quarantined_effect_ids", ()),
+            }
+        if isinstance(raw_rollback, dict):
+            branch = raw_rollback.get("branch", "main")
+            restored.rollback = RollbackState(
+                branch=branch if isinstance(branch, str) and branch else "main",
+                epoch=_snapshot_nonnegative_int(raw_rollback.get("epoch")),
+                attempt=_snapshot_nonnegative_int(raw_rollback.get("attempt")),
+                causal_frontier=frozenset(
+                    str(value) for value in raw_rollback.get("causal_frontier", ())
+                ),
+                quarantined_effects=frozenset(
+                    str(value) for value in raw_rollback.get("quarantined_effects", ())
+                ),
+            )
         restored.terminal_reason = (
             str(raw_state["terminal_reason"])
             if restored.phase.is_terminal()
@@ -703,6 +735,18 @@ class Session:
                 ),
                 "active_turn_start_message_index": self.state.active_turn_start_message_index,
                 "pending_step_latency": self.state.pending_step_latency,
+                "rollback": {
+                    "branch": self.state.rollback.branch,
+                    "epoch": self.state.rollback.epoch,
+                    "attempt": self.state.rollback.attempt,
+                    "causal_frontier": sorted(self.state.rollback.causal_frontier),
+                    "quarantined_effects": sorted(self.state.rollback.quarantined_effects),
+                },
+                "lineage_branch_id": self.state.rollback.branch,
+                "lineage_epoch": self.state.rollback.epoch,
+                "lineage_attempt": self.state.rollback.attempt,
+                "consumed_effect_ids": sorted(self.state.rollback.causal_frontier),
+                "quarantined_effect_ids": sorted(self.state.rollback.quarantined_effects),
             },
         }
         if self.state.pending_user_messages:

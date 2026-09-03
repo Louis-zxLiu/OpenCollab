@@ -19,11 +19,12 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from opencollab.application._scheduler_cleanup import SchedulerCleanupMixin
 from opencollab.application._scheduler_persistence import SchedulerPersistenceMixin
 from opencollab.application._scheduler_review import SchedulerReviewMixin
+from opencollab.application._scheduler_rollback import SchedulerRollbackMixin
 from opencollab.application._scheduler_run import SchedulerRunMixin
 from opencollab.application._scheduler_team import SchedulerTeamMixin
 from opencollab.application.autosave import AutoSaveSubscriber
@@ -42,6 +43,9 @@ from opencollab.application.scheduler_dedup import InflightDedupMixin
 from opencollab.application.scheduler_lifecycle import LifecycleMixin
 from opencollab.application.scheduler_messaging import MessagingMixin
 from opencollab.application.scheduler_types import DuplicateSpawnError as DuplicateSpawnError
+
+if TYPE_CHECKING:
+    from opencollab.application.rollback import RollbackService
 from opencollab.application.scheduler_types import LaunchSpec as LaunchSpec
 from opencollab.application.scheduler_types import QueuedTeammateMessage as QueuedTeammateMessage
 from opencollab.application.scheduler_types import SchedulerStalledError as SchedulerStalledError
@@ -57,6 +61,7 @@ class Scheduler(
     SchedulerRunMixin,
     SchedulerCleanupMixin,
     SchedulerReviewMixin,
+    SchedulerRollbackMixin,
     LifecycleMixin,
     MessagingMixin,
     InflightDedupMixin,
@@ -111,12 +116,14 @@ class Scheduler(
         event_factory: SchedulerEventFactory | None = None,
         prebuild_team: bool = False,
         serialize_turns: bool = False,
+        rollback_service: "RollbackService | None" = None,
     ):
         self._session_factory = session_factory
         self._worktree_pool = worktree_pool
         self._event_sink = event_sink
         self._events = event_factory or default_scheduler_event_factory()
         self._tracer = tracer
+        self._lineage = rollback_service
         self._max_budget_tokens = max_budget_tokens
         self._permission_policy = permission_policy
         self._topology = topology

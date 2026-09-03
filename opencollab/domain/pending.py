@@ -18,6 +18,8 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from enum import Enum
 
+from opencollab.domain.rollback import LineageEnvelope, lineage_envelope_to_dict
+
 
 class RowKind(Enum):
     IMMEDIATE = "immediate"
@@ -47,6 +49,7 @@ class PendingRow:
     error: str | None = None
     started_at: float | None = None
     finished_at: float | None = None
+    lineage: LineageEnvelope | None = None
 
 
 class PendingEventTable:
@@ -94,10 +97,30 @@ class PendingEventTable:
 
     def ordered_results(self) -> list[dict[str, str]]:
         """Tool-result messages in original tool_calls order (by ``order``)."""
-        return [
-            {"role": "tool", "tool_call_id": row.tool_call_id, "content": row.result or ""}
-            for row in sorted(self.rows.values(), key=lambda r: r.order)
-        ]
+        results = []
+        for row in sorted(self.rows.values(), key=lambda r: r.order):
+            content = row.result or ""
+            if row.lineage is not None:
+                if isinstance(row.lineage, dict):
+                    effect = row.lineage.get("effect", {})
+                    effect_id = effect.get("effect_id") if isinstance(effect, dict) else None
+                else:
+                    effect_id = row.lineage.effect.effect_id
+                if effect_id:
+                    content = f"[effect_id: {effect_id}]\n{content}"
+            message = {
+                "role": "tool",
+                "tool_call_id": row.tool_call_id,
+                "content": content,
+            }
+            if row.lineage is not None:
+                message["_lineage"] = (
+                    lineage_envelope_to_dict(row.lineage)
+                    if not isinstance(row.lineage, dict)
+                    else row.lineage
+                )
+            results.append(message)
+        return results
 
     def clear(self) -> None:
         self.rows.clear()

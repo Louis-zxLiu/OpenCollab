@@ -508,8 +508,11 @@ async def test_the_recorded_nodes_are_the_agents_that_were_actually_seated(tmp_p
             "tools": [
                 "file_read",
                 "grep",
+                "list_env",
                 "message_agent",
+                "set_env",
                 "spawn_agent",
+                "unset_env",
                 "use_skill",
             ],
             "permission_mode": "auto",

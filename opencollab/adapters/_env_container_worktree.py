@@ -16,6 +16,7 @@ from opencollab.adapters.git_worktree_evidence import (
     select_diff_base,
     validate_worktree_branch,
 )
+from opencollab.domain.rollback import CheckpointBoundary, RestoreResult, ScopeCheckpoint
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +89,8 @@ class ContainerWorktreeEnvironment(DockerEnvironment):
         self._head_commit: str | None = None
         self._own_commits: tuple[str, ...] = ()
         self._own_commit_count: int | None = None
+        self._scope_checkpoints: dict[str, ScopeCheckpoint] = {}
+        self._checkpoint_sequence = 0
 
     @property
     def diff_base(self) -> str | None:
@@ -108,6 +111,69 @@ class ContainerWorktreeEnvironment(DockerEnvironment):
     def own_commit_count(self) -> int | None:
         """How many commits ``own_commits`` was cut from, or ``None``."""
         return self._own_commit_count
+
+    async def checkpoint_scope(
+        self,
+        boundary: CheckpointBoundary,
+        *,
+        owner_aid: int,
+        causal_frontier: frozenset[str],
+    ) -> ScopeCheckpoint:
+        await self.setup()
+        checkpoint_id = f"cp_{uuid.uuid4().hex}"
+        script = (
+            "set -eu; idx=$(mktemp); trap 'rm -f \"$idx\"' EXIT; "
+            "GIT_INDEX_FILE=$idx git read-tree HEAD; "
+            "GIT_INDEX_FILE=$idx git add -A; tree=$(GIT_INDEX_FILE=$idx git write-tree); "
+            "commit=$(printf '%s\\n' 'OpenCollab checkpoint' | "
+            "GIT_AUTHOR_NAME='OpenCollab Checkpoint' GIT_AUTHOR_EMAIL='checkpoint@opencollab.invalid' "
+            "GIT_COMMITTER_NAME='OpenCollab Checkpoint' GIT_COMMITTER_EMAIL='checkpoint@opencollab.invalid' "
+            "git commit-tree \"$tree\" -p HEAD); "
+            f"git update-ref refs/opencollab/checkpoints/{owner_aid}/{checkpoint_id} "
+            "\"$commit\"; printf '%s' \"$commit\""
+        )
+        result = await self._exec(script, timeout=CONTAINER_GIT_TIMEOUT_SECONDS)
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr or "container Git checkpoint failed")
+        self._checkpoint_sequence += 1
+        checkpoint = ScopeCheckpoint(
+            checkpoint_id=checkpoint_id,
+            owner_aid=owner_aid,
+            sequence=self._checkpoint_sequence,
+            filesystem_revision=result.stdout.strip(),
+            environment=self.snapshot_environment(),
+            causal_frontier=causal_frontier,
+            boundary_kind=boundary.kind,
+            boundary_effect_id=boundary.effect_id,
+        )
+        self._scope_checkpoints[checkpoint_id] = checkpoint
+        return checkpoint
+
+    async def restore_scope(self, checkpoint: ScopeCheckpoint) -> RestoreResult:
+        if self._scope_checkpoints.get(checkpoint.checkpoint_id) != checkpoint:
+            return RestoreResult(
+                checkpoint.owner_aid,
+                checkpoint.checkpoint_id,
+                "failed",
+                reason="checkpoint ownership mismatch",
+            )
+        script = (
+            "set -eu; git read-tree --reset -u "
+            f"{checkpoint.filesystem_revision}; git clean -fd"
+        )
+        result = await self._exec(script, timeout=CONTAINER_GIT_TIMEOUT_SECONDS)
+        if result.returncode != 0:
+            return RestoreResult(checkpoint.owner_aid, checkpoint.checkpoint_id, "failed", reason=result.stderr[:500])
+        self._scope.replace(checkpoint.environment)
+        return RestoreResult(checkpoint.owner_aid, checkpoint.checkpoint_id, "restored")
+
+    async def discard_scope_checkpoints(self) -> None:
+        for checkpoint in tuple(self._scope_checkpoints.values()):
+            await self._exec(
+                f"git update-ref -d refs/opencollab/checkpoints/{checkpoint.owner_aid}/{checkpoint.checkpoint_id}",
+                timeout=CONTAINER_GIT_TIMEOUT_SECONDS,
+            )
+        self._scope_checkpoints.clear()
 
     async def _git(self, workdir: str, *args: str) -> ExecResult:
         """Run one Git command in the container, outside the agent's shell.

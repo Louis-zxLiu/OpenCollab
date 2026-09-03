@@ -6,6 +6,7 @@ import math
 from typing import Any
 
 from opencollab.domain.pending import PendingRow, RowKind, RowStatus
+from opencollab.domain.rollback import lineage_envelope_from_dict, lineage_envelope_to_dict
 from opencollab.domain.session import SessionPhase
 
 # Legacy phase strings from snapshots written before the Lane S1 terminal
@@ -103,6 +104,11 @@ def _serialize_pending_row(row: PendingRow) -> dict[str, object]:
         "error": row.error,
         "started_at": row.started_at,
         "finished_at": row.finished_at,
+        "lineage": (
+            lineage_envelope_to_dict(row.lineage)
+            if row.lineage is not None and not isinstance(row.lineage, dict)
+            else row.lineage
+        ),
     }
 
 
@@ -119,6 +125,7 @@ def _restore_pending_row(value: object) -> PendingRow | None:
     result = value.get("result")
     error = value.get("error")
     finished_at = value.get("finished_at")
+    lineage = value.get("lineage")
     if status is RowStatus.PENDING:
         status = RowStatus.FAILED
         error = "deferred child interrupted by session restore"
@@ -134,4 +141,9 @@ def _restore_pending_row(value: object) -> PendingRow | None:
         error=str(error) if error is not None else None,
         started_at=value.get("started_at"),
         finished_at=finished_at,
+        lineage=(
+            lineage
+            if isinstance(lineage, dict)
+            else lineage_envelope_from_dict(lineage)
+        ),
     )

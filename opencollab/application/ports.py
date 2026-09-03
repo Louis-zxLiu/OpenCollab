@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Protocol, runtime_checkable
 
 from opencollab.domain.hooks import HookOutcome
@@ -9,6 +9,12 @@ from opencollab.domain.skill import SkillManifest
 if TYPE_CHECKING:
     from opencollab.application.scheduler_types import LaunchSpec
     from opencollab.application.tool_execution import DeferredCall, ToolRuntime
+    from opencollab.domain.rollback import (
+        CheckpointBoundary,
+        EnvironmentSnapshot,
+        RestoreResult,
+        ScopeCheckpoint,
+    )
 
 
 class EnvironmentPort(Protocol):
@@ -29,6 +35,18 @@ class EnvironmentPort(Protocol):
         ...
 
     async def exec_cmd(self, cmd: str, timeout: float = 120.0) -> Any:
+        ...
+
+    def snapshot_environment(self) -> "EnvironmentSnapshot":
+        ...
+
+    def set_environment_variable(self, name: str, value: str) -> None:
+        ...
+
+    def unset_environment_variable(self, name: str) -> None:
+        ...
+
+    def environment_view(self) -> Mapping[str, str]:
         ...
 
     async def read_file(self, path: str) -> str:
@@ -54,6 +72,26 @@ class EnvironmentPort(Protocol):
         ...
 
     async def cleanup(self) -> None:
+        ...
+
+
+@runtime_checkable
+class CheckpointableEnvironmentPort(EnvironmentPort, Protocol):
+    """Environment whose filesystem and Scope can be restored together."""
+
+    async def checkpoint_scope(
+        self,
+        boundary: "CheckpointBoundary",
+        *,
+        owner_aid: int,
+        causal_frontier: frozenset[str],
+    ) -> "ScopeCheckpoint":
+        ...
+
+    async def restore_scope(self, checkpoint: "ScopeCheckpoint") -> "RestoreResult":
+        ...
+
+    async def discard_scope_checkpoints(self) -> None:
         ...
 
 
@@ -526,4 +564,18 @@ class WorktreePoolPort(Protocol):
         ...
 
     async def release_env(self, env: EnvironmentPort) -> None:
+        ...
+
+
+
+class RollbackCheckpointStorePort(Protocol):
+    """Optional persistence for encrypted rollback state."""
+
+    def save(self, run_id: str, state: Mapping[str, Any]) -> None:
+        ...
+
+    def load(self, run_id: str) -> dict[str, Any] | None:
+        ...
+
+    def delete(self, run_id: str) -> None:
         ...

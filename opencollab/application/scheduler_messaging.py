@@ -150,11 +150,25 @@ class MessagingMixin:
             message_id = uuid.uuid4().hex
             from_role = self._role_of(from_aid)
             to_role = self._role_of(to_aid)
+            effect = None
+            if self._lineage is not None:
+                sender_state = self._sessions[from_aid].state
+                effect = self._lineage.create_effect(
+                    producer_aid=from_aid,
+                    attempt=sender_state.rollback.attempt,
+                    branch_id=sender_state.rollback.branch,
+                    epoch=sender_state.rollback.epoch,
+                    kind="teammate_message",
+                    parent_effect_ids=tuple(sorted(sender_state.rollback.causal_frontier)),
+                    content=content,
+                )
+                self._lineage.register_consumer(effect.effect_id, to_aid)
             xml = self._format_teammate_message(
                 from_aid,
                 summary,
                 content,
                 message_id=message_id,
+                effect_id=effect.effect_id if effect else None,
             )
             message_bytes = self._encoded_size(xml)
             observed: dict[str, Any] = {
@@ -476,12 +490,14 @@ class MessagingMixin:
         content: str,
         *,
         message_id: str = "",
+        effect_id: str = "",
     ) -> str:
         sender = f"A{from_aid}"
         message_id_attr = f" message_id={quoteattr(message_id)}" if message_id else ""
+        effect_id_attr = f" effect_id={quoteattr(effect_id)}" if effect_id else ""
         return (
             f"<teammate-message teammate_id={quoteattr(sender)} "
-            f"summary={quoteattr(summary)}{message_id_attr}>\n"
+            f"summary={quoteattr(summary)}{message_id_attr}{effect_id_attr}>\n"
             f"{escape(content)}\n"
             "</teammate-message>"
         )
@@ -495,7 +511,8 @@ class MessagingMixin:
                 f"<teammate-message teammate_id={quoteattr(sender)} "
                 f"summary={quoteattr(message.summary)} "
                 f"sent_at={quoteattr(message.sent_at)}"
-                f"{f' message_id={quoteattr(message.message_id)}' if message.message_id else ''}>\n"
+                f"{f' message_id={quoteattr(message.message_id)}' if message.message_id else ''}"
+                f"{f' effect_id={quoteattr(message.effect_id)}' if message.effect_id else ''}>\n"
                 f"{escape(message.content)}\n"
                 "</teammate-message>"
             )

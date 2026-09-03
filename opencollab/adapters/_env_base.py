@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
+import os
+from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+from opencollab.domain.rollback import EnvironmentSnapshot
+
+if TYPE_CHECKING:
+    from opencollab.adapters._env_scope import _ScopeState
 
 ENV_FILE_WRITE_LIMIT_BYTES = 4 * 1024 * 1024
 
@@ -36,8 +44,25 @@ class Environment:
     local_filesystem: bool = False
     process_isolated: bool = False
 
-    def __init__(self) -> None:
+    def __init__(self, *, _scope: "_ScopeState | None" = None) -> None:
+        if _scope is None:
+            from opencollab.adapters._env_scope import _ScopeState
+
+            _scope = _ScopeState(os.environ.copy())
         self._aborted = False
+        self._scope = _scope
+
+    def snapshot_environment(self) -> EnvironmentSnapshot:
+        return self._scope.snapshot()
+
+    def set_environment_variable(self, name: str, value: str) -> None:
+        self._scope.set(name, value)
+
+    def unset_environment_variable(self, name: str) -> None:
+        self._scope.unset(name)
+
+    def environment_view(self) -> Mapping[str, str]:
+        return self._scope.view()
 
     @property
     def revoked(self) -> bool:

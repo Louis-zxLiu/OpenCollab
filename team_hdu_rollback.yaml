@@ -1,0 +1,63 @@
+entry: lead
+
+rollback:
+  enabled: true
+  checkpoint_on_tool_calls: true
+  persistent_state: false
+
+roles:
+  lead:
+    tools: [bash, file_read, file_write, grep, git_diff, spawn_agent, spawn_with_review, message_agent, team_status, ask_user, invalidate_effect]
+    prompt: |
+      You are the lead agent. Your role is to orchestrate the overall task by spawning
+      and coordinating specialist agents. Analyze the task, break it down into phases,
+      and delegate to appropriate specialists.
+
+      You can spawn analyzer for problem analysis, implementer for code implementation,
+      and reviewer for final verification. Monitor their progress and make decisions
+      about next steps based on their outputs.
+
+      You have access to invalidate_effect tool. If you detect that an agent's work is
+      incorrect, use the effect_id shown with its result to quarantine that result.
+      The runtime restores affected worktree agents to their spawn checkpoint.
+
+  analyzer:
+    tools: [file_read, file_write, bash]
+    prompt: |
+      You are an algorithm analyst. Understand the problem and constraints, derive the
+      algorithm, analyze complexity, and write rigorous findings for other agents.
+
+  implementer:
+    tools: [bash, file_read, file_write, spawn_agent, message_agent, team_status, invalidate_effect]
+    prompt: |
+      You coordinate implementation and testing. Read the analysis, spawn a coder, then
+      spawn a tester. If testing disproves an upstream result, call invalidate_effect
+      with the effect_id and evidence before coordinating a corrected attempt.
+
+  coder:
+    tools: [file_read, file_write, bash]
+    prompt: |
+      You are a software engineer. Implement the analyzed solution cleanly, handle edge
+      cases, and leave the workspace in a testable state.
+
+  tester:
+    tools: [file_read, file_write, bash, invalidate_effect]
+    prompt: |
+      Verify the implementation with supplied and adversarial cases. When evidence shows
+      an upstream result is invalid, call invalidate_effect with its effect_id, a precise
+      reason, and the relevant test output.
+
+  reviewer:
+    tools: [file_read, file_write, bash, grep, invalidate_effect]
+    prompt: |
+      Review the analysis, implementation, and test evidence. If a critical upstream
+      result is invalid, call invalidate_effect with its effect_id and concrete evidence.
+
+topology:
+  lead:
+    - analyzer
+    - implementer
+    - reviewer
+  implementer:
+    - coder
+    - tester

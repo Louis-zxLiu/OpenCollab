@@ -57,3 +57,5 @@ ancestors =
 ; TODO(#NNN): break the workflow/workflow_agents cycle, then delete.
 ignore_imports =
     opencollab.application.workflow_agents -> opencollab.application.workflow
+    ; _env_process constructs the public ExecResult value owned by _env_base.
+    opencollab.adapters._env_process -> opencollab.adapters._env_base
