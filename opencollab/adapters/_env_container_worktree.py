@@ -9,6 +9,7 @@ from collections.abc import Callable
 
 from opencollab.adapters._env_base import ExecResult
 from opencollab.adapters._env_docker import DockerEnvironment
+from opencollab.adapters._env_scope import _ScopeState
 from opencollab.adapters.git_patch import guarded_staged_diff_command
 from opencollab.adapters.git_worktree_evidence import (
     ABSENT_REF_OLD_VALUE,
@@ -63,6 +64,7 @@ class ContainerWorktreeEnvironment(DockerEnvironment):
         branch_name: str | None = None,
         command_prefix: Callable[[str], str] | str | None = None,
         timeout_returncode: int = -1,
+        _scope: _ScopeState | None = None,
     ) -> None:
         branch = validate_worktree_branch(
             branch_name or f"opencollab-wt-{uuid.uuid4().hex[:12]}"
@@ -76,6 +78,7 @@ class ContainerWorktreeEnvironment(DockerEnvironment):
             exec_workdir=worktree_dir,
             command_prefix=command_prefix,
             timeout_returncode=timeout_returncode,
+            _scope=_scope,
         )
         self.source_workspace = repository_root
         self._repository_root = repository_root
@@ -91,6 +94,7 @@ class ContainerWorktreeEnvironment(DockerEnvironment):
         self._own_commit_count: int | None = None
         self._scope_checkpoints: dict[str, ScopeCheckpoint] = {}
         self._checkpoint_sequence = 0
+        self.bind_workspace(worktree_dir)
 
     @property
     def diff_base(self) -> str | None:

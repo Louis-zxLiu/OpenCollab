@@ -9,11 +9,18 @@ collaborator graph for a multi-agent run.
 from __future__ import annotations
 
 import os
+import subprocess
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from opencollab.adapters.env import Environment
+from opencollab.adapters.env import (
+    ContainerWorktreeEnvironment,
+    DockerEnvironment,
+    Environment,
+    WorktreeEnvironment,
+)
 from opencollab.adapters.hooks import ShellHookRunner
 from opencollab.adapters.storage import SessionStore
 from opencollab.adapters.worktree_pool import WorktreePool
@@ -99,6 +106,28 @@ def _reject_unwalkable_edges(team: TeamConfig) -> None:
         "those roles' entries from `topology:`."
     )
 
+
+
+def _rollback_git_preflight(workspace: str) -> None:
+    """Validate the source before any rollback-enabled Agent is seated."""
+    root = os.path.realpath(os.path.abspath(workspace))
+
+    def git(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ("git", *args), cwd=root, text=True, capture_output=True,
+            check=False, timeout=15,
+        )
+
+    probe = git("rev-parse", "--show-toplevel", "--verify", "HEAD^{commit}")
+    if probe.returncode != 0:
+        raise ValueError("rollback-enabled Team requires a Git workspace with a resolvable HEAD")
+    status = git("status", "--porcelain=v1", "-z", "--untracked-files=all")
+    if status.returncode != 0:
+        raise ValueError("cannot inspect rollback source Git workspace")
+    if status.stdout:
+        raise ValueError("rollback source workspace must be a clean Git baseline")
+    if git("worktree", "list").returncode != 0:
+        raise ValueError("Git worktree support is unavailable for rollback-enabled Team mode")
 
 
 def build_scheduler(
@@ -190,6 +219,33 @@ def build_scheduler(
     )
     if prebuild_team:
         _reject_unwalkable_edges(team_cfg)
+    rollback_enabled = bool(team_cfg.rollback.get("enabled", False))
+    if rollback_enabled and not use_worktrees:
+        raise ValueError("rollback-enabled Team mode requires isolated worktrees")
+    if rollback_enabled:
+        if environment is None:
+            _rollback_git_preflight(ctx.workspace)
+            lead_environment: Environment | None = WorktreeEnvironment(
+                ctx.workspace,
+                branch_name=f"opencollab-lead-{uuid.uuid4().hex[:8]}",
+                require_git=True,
+            )
+        elif isinstance(environment, DockerEnvironment) and environment.container_reference:
+            lead_environment = ContainerWorktreeEnvironment(
+                container_id=environment.container_reference,
+                repository_root=environment.workspace,
+                worktree_root="/opencollab-worktrees",
+                branch_name=f"opencollab-lead-{uuid.uuid4().hex[:8]}",
+                command_prefix=environment.command_prefix,
+            )
+        elif callable(getattr(environment, "checkpoint_scope", None)):
+            lead_environment = environment
+        else:
+            raise ValueError(
+                "rollback-enabled Team requires a checkpointable isolated lead environment"
+            )
+    else:
+        lead_environment = environment
     event_bus = EventBus(ctx.event_sink)
 
     # Per-run folder: every agent's transcript plus a team.json manifest land
@@ -235,7 +291,7 @@ def build_scheduler(
         ),
         team_cfg=team_cfg,
         lead_workspace=ctx.workspace,
-        lead_environment=environment,
+        lead_environment=lead_environment,
         interactive=interactive,
         save_dir=run_dir,
         allow_unisolated_child_tests=allow_unisolated_child_tests,
@@ -247,14 +303,14 @@ def build_scheduler(
         max_steps=max_steps,
         lineage_controller=rollback_service,
     )
-    rollback_enabled = bool(team_cfg.rollback.get("enabled", False))
-    if rollback_enabled and not use_worktrees:
-        raise ValueError("rollback-enabled Team mode requires isolated worktrees")
     worktree_pool = WorktreePool(
         ctx.workspace,
         use_worktrees=use_worktrees,
         base_environment=environment,
+        rollback_enabled=rollback_enabled,
     )
+    if lead_environment is not None and lead_environment is not environment:
+        worktree_pool.track(lead_environment)
 
     scheduler = Scheduler(
         session_factory=session_factory,
@@ -268,6 +324,7 @@ def build_scheduler(
         prebuild_team=prebuild_team,
         serialize_turns=serialize_turns,
         rollback_service=rollback_service,
+        rollback_enabled=rollback_enabled,
     )
 
     # Attach hooks after the scheduler exists so the runner can hold its handle

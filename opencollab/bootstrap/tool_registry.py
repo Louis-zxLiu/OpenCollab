@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import Callable
 
+from opencollab.adapters.tools.adopt_child import AdoptChildChangesTool
 from opencollab.adapters.tools.apply_patch import ApplyPatchTool
 from opencollab.adapters.tools.base import Tool
 from opencollab.adapters.tools.bash import BashTool
@@ -44,6 +45,7 @@ STATELESS_TOOL_FACTORIES: dict[str, Callable[[], Tool]] = {
     "list_env": ListEnvTool,
 }
 SCHEDULER_TOOL_FACTORIES: dict[str, Callable[[SchedulerPort], Tool]] = {
+    "adopt_child_changes": AdoptChildChangesTool,
     "spawn_agent": SpawnAgentTool,
     "spawn_with_review": SpawnWithReviewTool,
     "message_agent": MessageAgentTool,

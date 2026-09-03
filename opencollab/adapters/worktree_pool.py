@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import uuid
 
+from opencollab.adapters._env_scope import _ScopeState
 from opencollab.adapters.env import (
     ContainerWorktreeEnvironment,
     DockerEnvironment,
@@ -56,16 +57,28 @@ class WorktreePool:
         *,
         use_worktrees: bool,
         base_environment: Environment | None = None,
+        rollback_enabled: bool = False,
     ):
         self._workspace = workspace
         self._use_worktrees = use_worktrees
         self._base_environment = base_environment
+        self._rollback_enabled = bool(rollback_enabled)
         self._envs: list[Environment] = []
 
-    async def acquire(self, role: str) -> Environment:
+    async def acquire(
+        self,
+        role: str,
+        *,
+        parent_environment: Environment | None = None,
+    ) -> Environment:
         """Create (and remember) an isolated env for a spawned agent of this role."""
         role = validate_role_identity(role)
         base = self._base_environment
+        if self._rollback_enabled and not self._use_worktrees:
+            raise RuntimeError("rollback-enabled Team mode requires isolated Git worktrees")
+        seed = None
+        if parent_environment is not None:
+            seed = _ScopeState(parent_environment.snapshot_environment().as_dict())
         if not self._use_worktrees:
             # Without isolation every agent works where the run works, which is
             # the supplied environment when there is one and the host workspace
@@ -73,14 +86,27 @@ class WorktreePool:
             # it belongs to whoever handed it in.
             if base is not None:
                 return base
-            env = LocalEnvironment(self._workspace)
+            try:
+                env = LocalEnvironment(self._workspace, _scope=seed)
+            except TypeError as exc:
+                if "_scope" not in str(exc):
+                    raise
+                env = LocalEnvironment(self._workspace)
             self._envs.append(env)
             return env
 
         branch = f"opencollab-{role_storage_slug(role)}-{uuid.uuid4().hex[:8]}"
-        env = self._build_worktree(branch, base)
+        env = self._build_worktree(branch, base, scope=seed)
         try:
             await env.setup()
+            if seed is not None:
+                # Container setup captures its native environment. A child
+                # Scope is nevertheless forked from its parent, so restore the
+                # captured seed after setup while retaining the child PWD.
+                previous_pwd = env.environment_view().get("PWD")
+                env._scope.replace(seed.snapshot())
+                if previous_pwd is not None:
+                    env.bind_workspace(previous_pwd)
         except BaseException as original:
             try:
                 await _finish_cleanup(env.cleanup())
@@ -96,10 +122,21 @@ class WorktreePool:
         self._envs.append(env)
         return env
 
-    def _build_worktree(self, branch: str, base: Environment | None) -> Environment:
+    def _build_worktree(
+        self,
+        branch: str,
+        base: Environment | None,
+        *,
+        scope: _ScopeState | None = None,
+    ) -> Environment:
         """An isolated view of wherever the run's repository actually is."""
         if base is None:
-            return WorktreeEnvironment(self._workspace, branch_name=branch)
+            return WorktreeEnvironment(
+                self._workspace,
+                branch_name=branch,
+                require_git=self._rollback_enabled,
+                _scope=scope,
+            )
         if isinstance(base, DockerEnvironment) and base.container_reference is not None:
             return ContainerWorktreeEnvironment(
                 container_id=base.container_reference,
@@ -107,13 +144,24 @@ class WorktreePool:
                 worktree_root=CONTAINER_WORKTREE_ROOT,
                 branch_name=branch,
                 command_prefix=base.command_prefix,
+                _scope=scope,
             )
         if getattr(base, "local_filesystem", False):
-            return WorktreeEnvironment(base.workspace, branch_name=branch)
+            return WorktreeEnvironment(
+                base.workspace,
+                branch_name=branch,
+                require_git=self._rollback_enabled,
+                _scope=scope,
+            )
         raise TypeError(
             "worktree isolation is not available for this environment: "
             f"{type(base).__name__}"
         )
+
+    def track(self, env: Environment) -> None:
+        """Track a lazily initialized environment (used for the Lead Scope)."""
+        if env not in self._envs:
+            self._envs.append(env)
 
     async def release(self) -> None:
         """Tear down every environment this pool has handed out.

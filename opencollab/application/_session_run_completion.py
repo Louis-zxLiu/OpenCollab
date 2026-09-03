@@ -257,6 +257,14 @@ class _SessionRunCompletionMixin:
             raise RuntimeError("Cannot execute tools before calling LLM")
 
         original_tool_calls = list(pending.response.tool_calls)
+        checkpoint = getattr(self, "_checkpoint_callback", None)
+        if checkpoint is not None:
+            names = {
+                call.get("function", {}).get("name")
+                for call in original_tool_calls
+            }
+            if "invalidate_effect" not in names:
+                await checkpoint("tool_call")
         preflight = getattr(self.tool_execution, "preflight_tool_batch", None)
         rejected_batch = getattr(
             self.tool_execution,
@@ -285,6 +293,7 @@ class _SessionRunCompletionMixin:
                 if tool_calls
                 else ToolProcessingResult()
             )
+            self._assert_epoch()
             result.messages_to_append = self._ordered_tool_messages(
                 original_tool_calls,
                 result.messages_to_append,
@@ -317,6 +326,7 @@ class _SessionRunCompletionMixin:
                 continue
 
             proc = await self.tool_execution.process([tc])
+            self._assert_epoch()
             proc.apply_hashes_to(self.state)
             observations.reads_executed += proc.reads_executed
             observations.write_succeeded |= proc.write_succeeded

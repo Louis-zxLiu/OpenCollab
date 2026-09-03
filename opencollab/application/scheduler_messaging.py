@@ -47,6 +47,7 @@ from opencollab.application._scheduler_constants import (
 )
 from opencollab.application.scheduler_types import QueuedTeammateMessage
 from opencollab.domain.identity import role_collision_key
+from opencollab.domain.rollback import CheckpointBoundary
 from opencollab.domain.session import SessionPhase
 
 logger = logging.getLogger(__name__)
@@ -147,11 +148,24 @@ class MessagingMixin:
                 return refuse(
                     "scheduler_shutting_down", "Error: scheduler is shutting down."
                 )
+            if self._lineage is not None and self._rollback_enabled:
+                sender_env = getattr(self._sessions[from_aid], "env", None)
+                if sender_env is None or not callable(getattr(sender_env, "checkpoint_scope", None)):
+                    return refuse(
+                        "checkpoint_unavailable",
+                        "Error: sender Scope cannot be checkpointed before message delivery.",
+                    )
+                self._lineage.register_environment(from_aid, sender_env)
+                await self._lineage.checkpoint(
+                    from_aid,
+                    CheckpointBoundary("teammate_message"),
+                    self._sessions[from_aid].state.rollback.causal_frontier,
+                )
             message_id = uuid.uuid4().hex
             from_role = self._role_of(from_aid)
             to_role = self._role_of(to_aid)
             effect = None
-            if self._lineage is not None:
+            if self._lineage is not None and self._rollback_enabled:
                 sender_state = self._sessions[from_aid].state
                 effect = self._lineage.create_effect(
                     producer_aid=from_aid,

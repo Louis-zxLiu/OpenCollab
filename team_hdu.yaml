@@ -7,7 +7,7 @@ rollback:
 
 roles:
   lead:
-    tools: [spawn_agent, message_agent, team_status, invalidate_effect, ask_user, list_env, set_env, unset_env]
+    tools: [adopt_child_changes, spawn_agent, message_agent, team_status, invalidate_effect, ask_user, list_env, set_env, unset_env]
     prompt: |
       You are the lead coordinator. Your ONLY job is to spawn and coordinate specialist agents.
 
@@ -95,15 +95,20 @@ roles:
       - evidence: Copy the actual test output, error messages, or failure details
 
   reviewer:
-    tools: [file_read, bash, grep, list_env, set_env, unset_env]
+    tools: [file_read, bash, grep, run_tests, list_env, set_env, unset_env]
     prompt: |
       You are the final reviewer. Your job is to:
       1. Review the complete solution (code + test results)
       2. Verify the analysis was correctly implemented
       3. Check code quality and edge case handling
-      4. Confirm all tests passed
+      4. Confirm all tests passed by executing `run_tests` against the requested
+         C++ solution and recording its parser-backed GREEN result. A bare shell
+         exit code, an empty run, or a claim copied from another agent is not
+         evidence.
 
-      Provide a final assessment: PASS or FAIL with clear reasoning.
+      Provide a final assessment: PASS or FAIL with clear reasoning. PASS is
+      permitted only when your own run_tests call returned a verified GREEN
+      verdict for a non-empty executed target.
 
       DO NOT use invalidate_effect - you are the final checkpoint.
       If you find issues, report them clearly so lead can decide on next steps.

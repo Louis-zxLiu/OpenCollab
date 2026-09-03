@@ -51,6 +51,13 @@ class Environment:
             _scope = _ScopeState(os.environ.copy())
         self._aborted = False
         self._scope = _scope
+        # Set by concrete environments once their canonical workspace is known.
+        # This is deliberately Scope-local; the process-wide environment is
+        # never updated by an Agent.
+
+    def bind_workspace(self, workspace: str) -> None:
+        """Bind the Scope's PWD to the same identity used for file/exec I/O."""
+        self._scope._values["PWD"] = os.fspath(workspace)
 
     def snapshot_environment(self) -> EnvironmentSnapshot:
         return self._scope.snapshot()

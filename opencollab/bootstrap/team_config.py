@@ -52,7 +52,8 @@ from opencollab.domain.team import Topology
 # they are built non-interactive, so the registry resolver drops it regardless.
 # Sorted for a deterministic, reproducible tool order.
 ANALYST_TOOL_NAMES: tuple[str, ...] = (
-    "ask_user", "file_read", "grep", "list_env", "set_env", "spawn_agent", "unset_env", "use_skill"
+    "ask_user", "file_read", "grep", "list_env", "set_env", "spawn_agent",
+    "unset_env", "use_skill",
 )
 CODER_TOOL_NAMES: tuple[str, ...] = (
     "apply_patch", "bash", "file_read", "grep", "list_env", "run_tests", "set_env", "unset_env"

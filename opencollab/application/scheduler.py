@@ -117,6 +117,7 @@ class Scheduler(
         prebuild_team: bool = False,
         serialize_turns: bool = False,
         rollback_service: "RollbackService | None" = None,
+        rollback_enabled: bool = False,
     ):
         self._session_factory = session_factory
         self._worktree_pool = worktree_pool
@@ -124,6 +125,7 @@ class Scheduler(
         self._events = event_factory or default_scheduler_event_factory()
         self._tracer = tracer
         self._lineage = rollback_service
+        self._rollback_enabled = bool(rollback_enabled)
         self._max_budget_tokens = max_budget_tokens
         self._permission_policy = permission_policy
         self._topology = topology
@@ -218,6 +220,11 @@ class Scheduler(
         self._shutting_down = False
         self._cleanup_task: asyncio.Task[None] | None = None
         self._fallback_autosavers: dict[int, AutoSaveSubscriber] = {}
+        # Rollback barriers are per Agent.  An invalidation closes the event
+        # before restoring the Scope; new driver tasks wait until the atomic
+        # restore and epoch increment have completed.
+        self._rollback_pending: set[int] = set()
+        self._rollback_barriers: dict[int, asyncio.Event] = {}
         self._scheduler_persistence_errors: list[Exception] = []
         # Bootstrap-owned resources whose process/persistence state must be
         # proven quiescent before scheduler cleanup may release worktrees.

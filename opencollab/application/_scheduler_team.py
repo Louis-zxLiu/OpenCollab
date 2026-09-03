@@ -164,6 +164,42 @@ def _parse_worktree_diff(diff: str) -> list[tuple[str, str]]:
 
 
 class SchedulerTeamMixin:
+    async def adopt_child_changes(self, parent_aid: int, child_aid: int, revision: str) -> str:
+        """Validate and explicitly cherry-pick a child's revision into parent Scope."""
+        if parent_aid != 0:
+            raise PermissionError("only the coordinating Agent may adopt child changes")
+        if not isinstance(child_aid, int) or child_aid < 0 or not revision.strip():
+            raise ValueError("child_aid and revision are required")
+        child = self._sessions.get(child_aid)
+        parent = self._sessions.get(parent_aid)
+        if child is None or parent is None:
+            raise ValueError("unknown child or coordinating Agent")
+        child_env = getattr(child, "env", None)
+        parent_env = getattr(parent, "env", None)
+        if child_env is None or parent_env is None:
+            raise RuntimeError("child and coordinating Agent must have isolated worktrees")
+        expected = getattr(child_env, "head_commit", None)
+        if expected and expected != revision:
+            raise ValueError("revision does not match the child's recorded HEAD")
+        probe = await parent_env.exec_cmd(
+            f"git cat-file -e {revision}^{{commit}}", timeout=30
+        )
+        if probe.returncode != 0:
+            raise ValueError("revision is not a valid Git commit")
+        clean = await parent_env.exec_cmd("git status --porcelain", timeout=30)
+        if clean.returncode != 0 or clean.stdout.strip():
+            raise RuntimeError("coordinating worktree must be clean before adoption")
+        result = await parent_env.exec_cmd(f"git cherry-pick -x {revision}", timeout=120)
+        if result.returncode != 0:
+            await parent_env.exec_cmd("git cherry-pick --abort", timeout=30)
+            raise RuntimeError((result.stderr or "Git adoption failed").strip()[:500])
+        if self._tracer is not None:
+            self._tracer.log_step(
+                step_type="child_changes_adopted",
+                payload={"parent_aid": parent_aid, "child_aid": child_aid, "revision": revision},
+            )
+        return f"Adopted child Agent {child_aid} revision {revision} into the coordinating worktree."
+
     @property
     def lead_session(self) -> Any:
         """Agent 0's session (the interactive entry)."""
@@ -319,7 +355,17 @@ class SchedulerTeamMixin:
                     f"Cannot prebuild role '{role}': a team token budget of "
                     f"{self._max_budget_tokens} leaves nothing for it."
                 )
-            env = await self._worktree_pool.acquire(role)
+            lead_session = self._sessions.get(0)
+            parent_environment = getattr(lead_session, "env", None)
+            try:
+                env = await self._worktree_pool.acquire(
+                    role,
+                    parent_environment=parent_environment,
+                )
+            except TypeError as exc:
+                if "parent_environment" not in str(exc):
+                    raise
+                env = await self._worktree_pool.acquire(role)
             session = self._session_factory.build_spawn_session(
                 role=role,
                 env=env,
@@ -342,6 +388,7 @@ class SchedulerTeamMixin:
             await self.emit_scheduler_event(
                 self._events.agent_spawned(aid, 0, role, "")
             )
+            await self._checkpoint_after_spawn(aid, f"prebuilt {role}")
         except BaseException:
             await self._rollback_failed_spawn(aid, env)
             raise
@@ -590,7 +637,13 @@ class SchedulerTeamMixin:
                 + f"\n\n... [{len(diff) - WORKTREE_DIFF_MAX_CHARS} chars truncated] ...\n\n"
                 + diff[-WORKTREE_DIFF_KEEP_CHARS:]
             )
-        return result + f"\n\n[Changes made in worktree]\n```diff\n{diff}\n```"
+        evidence = []
+        for label in ("diff_base", "head_commit", "own_commit_count"):
+            value = getattr(env, label, None)
+            if value is not None:
+                evidence.append(f"{label}={value}")
+        metadata = f"\n[{', '.join(evidence)}]" if evidence else ""
+        return result + f"\n\n[Changes made in worktree]{metadata}\n```diff\n{diff}\n```"
 
     async def _trace_worktree_changes(self, aid: int, role: str, env: EnvironmentPort) -> None:
         """Record one agent's worktree changes as a structured trace row.

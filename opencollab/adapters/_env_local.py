@@ -56,6 +56,7 @@ class LocalEnvironment(Environment):
     def __init__(self, workspace: str = ".", *, _scope: _ScopeState | None = None) -> None:
         super().__init__(_scope=_scope)
         self.workspace = os.path.realpath(os.path.abspath(workspace))
+        self.bind_workspace(self.workspace)
         if not os.path.isdir(self.workspace):
             raise NotADirectoryError(self.workspace)
         self._workspace_fd: int | None = open_directory_anchor(self.workspace)

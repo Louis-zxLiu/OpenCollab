@@ -25,7 +25,7 @@ from opencollab.adapters._env_process import (
     run_process,
     timed_out_result,
 )
-from opencollab.adapters._env_scope import _CONTROL_ENV_NAMES
+from opencollab.adapters._env_scope import _CONTROL_ENV_NAMES, _ScopeState
 from opencollab.application.async_timeout import await_owned_operation
 from opencollab.application.exception_notes import add_exception_note
 
@@ -174,8 +174,9 @@ class DockerEnvironment(Environment):
         command_prefix: Callable[[str], str] | str | None = None,
         timeout_returncode: int = -1,
         backing_environment: Environment | None = None,
+        _scope: _ScopeState | None = None,
     ) -> None:
-        super().__init__()
+        super().__init__(_scope=_scope)
         if container_id is not None and backing_environment is not None:
             raise ValueError("an attached Docker environment cannot own a backing environment")
         if (
@@ -186,6 +187,7 @@ class DockerEnvironment(Environment):
             raise ValueError("timeout_returncode must be a non-zero integer")
         self._image = _validate_image(image)
         self.workspace = workspace
+        self.bind_workspace(workspace)
         self._attached = container_id is not None
         self._attached_reference = (
             _validate_container_reference(container_id) if container_id is not None else None

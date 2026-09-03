@@ -10,6 +10,7 @@ import time
 from typing import Any
 
 from opencollab.application.scheduler_types import LaunchSpec
+from opencollab.application.session_run import StaleEpochError
 from opencollab.domain.identity import validate_role_identity
 from opencollab.domain.pending import PendingRowError, RowStatus
 from opencollab.domain.rollback import CheckpointBoundary, LineageEnvelope
@@ -67,7 +68,7 @@ class LifecycleMixin:
             budget=self._entry_start_budget(),
         )
         session.apply_launch(launch)
-        if self._lineage is not None:
+        if self._lineage is not None and self._rollback_enabled:
             self._lineage.rebuild_from_messages(session.state.messages)
             self._lineage.rebuild_from_snapshot(
                 set(session.state.rollback.quarantined_effects)
@@ -136,7 +137,19 @@ class LifecycleMixin:
                 )
 
             # Build environment
-            env = await self._worktree_pool.acquire(role)
+            parent_session = self._sessions.get(parent_aid)
+            parent_environment = getattr(parent_session, "env", None)
+            try:
+                env = await self._worktree_pool.acquire(
+                    role,
+                    parent_environment=parent_environment,
+                )
+            except TypeError as exc:
+                # Keep third-party test/integration pools source-compatible;
+                # built-in WorktreePool always accepts and uses the seed.
+                if "parent_environment" not in str(exc):
+                    raise
+                env = await self._worktree_pool.acquire(role)
             self._startup_envs[aid] = env
             if self._shutting_down:
                 raise RuntimeError("Cannot spawn agent: scheduler is shutting down.")
@@ -184,6 +197,16 @@ class LifecycleMixin:
             self._startup_tasks.pop(aid, None)
             self._startup_envs.pop(aid, None)
             self._startup_origin.pop(aid, None)
+        except StaleEpochError:
+            # Rollback changed the Agent epoch while this driver was in an LLM
+            # or tool boundary. SessionRunUseCase already discarded the stale
+            # response; leave the Agent non-terminal so the coordinator can
+            # dispatch the corrected attempt.
+            self._release_leases(aid)
+            scb.state.set_phase(SessionPhase.IDLE)
+            if not self._shutting_down and aid not in self._rollback_pending:
+                self._start_agent_task(aid, session)
+            return
         except asyncio.CancelledError:
             # Driver task was never scheduled, so nothing will release these.
             await self._rollback_failed_spawn(aid, env)
@@ -274,6 +297,39 @@ class LifecycleMixin:
         )
         return task
 
+    def _bind_rollback_runtime(self, aid: int, session: Any) -> None:
+        """Connect a Session runner to the scheduler's monotonic epoch fence."""
+        runner = getattr(session, "runner", None)
+        setter = getattr(runner, "set_epoch_provider", None)
+        if callable(setter):
+            setter(lambda aid=aid: self._sessions[aid].state.rollback.epoch)
+        checkpoint_setter = getattr(runner, "set_checkpoint_callback", None)
+        if (
+            callable(checkpoint_setter)
+            and self._lineage is not None
+            and self._rollback_enabled
+        ):
+            async def checkpoint(boundary: str, aid: int = aid) -> None:
+                env = getattr(self._sessions[aid], "env", None)
+                if env is None or not callable(getattr(env, "checkpoint_scope", None)):
+                    raise RuntimeError(f"Agent {aid} has no checkpointable Scope")
+                self._lineage.register_environment(aid, env)
+                await self._lineage.checkpoint(
+                    aid,
+                    CheckpointBoundary(boundary),
+                    self._sessions[aid].state.rollback.causal_frontier,
+                )
+            checkpoint_setter(checkpoint)
+        barrier = self._rollback_barriers.setdefault(aid, asyncio.Event())
+        if aid not in self._rollback_pending:
+            barrier.set()
+
+    async def _await_rollback_barrier(self, aid: int) -> None:
+        if self._lineage is None:
+            return
+        barrier = self._rollback_barriers.setdefault(aid, asyncio.Event())
+        await barrier.wait()
+
     def _agent_task_done(self, aid: int, task: asyncio.Task[None]) -> None:
         """Consume a finished driver and release only its own registry entry."""
         if self._tasks.get(aid) is task:
@@ -335,9 +391,23 @@ class LifecycleMixin:
         start = self._turn_started_at.setdefault(aid, time.monotonic())
 
         try:
-            if aid == 0 and self._lineage is not None and not self._lineage.has_checkpoint(aid):
+            self._bind_rollback_runtime(aid, session)
+            await self._await_rollback_barrier(aid)
+            if (
+                aid == 0
+                and self._lineage is not None
+                and self._rollback_enabled
+                and not self._lineage.has_checkpoint(aid)
+            ):
                 lead_env = getattr(session, "env", None)
-                if lead_env is not None and hasattr(lead_env, "checkpoint_scope"):
+                if lead_env is not None and callable(getattr(lead_env, "checkpoint_scope", None)):
+                    # The lead worktree is intentionally lazy because scheduler
+                    # construction is synchronous.  Materialize it before the
+                    # first checkpoint/model call so its PWD, file tools, and
+                    # Git identity all refer to the same real worktree.
+                    setup = getattr(lead_env, "setup", None)
+                    if callable(setup):
+                        await setup()
                     self._lineage.register_environment(aid, lead_env)
                     await self._lineage.checkpoint(
                         aid,
@@ -539,6 +609,19 @@ class LifecycleMixin:
         if origin is None:
             return
         parent_aid, tool_call_id = origin
+        if self._lineage is not None and self._rollback_enabled:
+            parent_session = self._sessions.get(parent_aid)
+            parent_env = getattr(parent_session, "env", None) if parent_session is not None else None
+            if parent_env is None or not callable(getattr(parent_env, "checkpoint_scope", None)):
+                raise RuntimeError(
+                    f"Agent {parent_aid} has no checkpointable Scope before child delivery"
+                )
+            self._lineage.register_environment(parent_aid, parent_env)
+            await self._lineage.checkpoint(
+                parent_aid,
+                CheckpointBoundary("child_result"),
+                parent_session.state.rollback.causal_frontier,
+            )
         lineage_effect = self._create_child_result_effect(
             child_aid,
             parent_aid,

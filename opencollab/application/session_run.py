@@ -6,7 +6,7 @@ import logging
 import math
 import time
 import uuid
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 from opencollab.application._session_run_completion import _SessionRunCompletionMixin
 from opencollab.application._session_run_shared import (
@@ -42,6 +42,10 @@ from opencollab.domain.session import SessionPhase, SessionState
 
 logger = logging.getLogger(__name__)
 
+
+class StaleEpochError(RuntimeError):
+    """Raised when a rollback invalidates the turn currently being executed."""
+
 __all__ = [
     "DEFAULT_COMMIT_RESERVE",
     "DEFAULT_DEFERRABLE_TOOLS",
@@ -54,6 +58,7 @@ __all__ = [
     "PendingStep",
     "SUBMIT_TOOL_NAME",
     "SessionRunUseCase",
+    "StaleEpochError",
     "_EMPTY_STOP_NUDGE",
     "_EMPTY_STOP_PLACEHOLDER",
     "_WIND_DOWN_NUDGE",
@@ -91,6 +96,7 @@ class SessionRunUseCase(_SessionRunCompletionMixin):
         submit_tool_name: str = SUBMIT_TOOL_NAME,
         watchdog_k: int = DEFAULT_WATCHDOG_K,
         low_yield_m: int = DEFAULT_LOW_YIELD_M,
+        epoch_provider: Callable[[], int] | None = None,
     ):
         self.agent = agent
         self._initial_agent_tools = tuple(getattr(agent, "tools", ()) or ())
@@ -183,6 +189,28 @@ class SessionRunUseCase(_SessionRunCompletionMixin):
         # Successful responses that arrived only after their caller timeout.
         # They count against the budget but never enter a later turn's history.
         self._late_provider_usage: tuple[int, ...] = ()
+        self._epoch_provider = epoch_provider
+        self._epoch_at_turn: int | None = None
+        self._checkpoint_callback: Callable[[str], Awaitable[None]] | None = None
+
+    def set_epoch_provider(self, provider: Callable[[], int] | None) -> None:
+        """Bind the scheduler's per-Agent epoch fence after construction."""
+        self._epoch_provider = provider
+
+    def set_checkpoint_callback(
+        self, callback: Callable[[str], Awaitable[None]] | None
+    ) -> None:
+        """Bind an optional scheduler checkpoint hook for ordinary tool batches."""
+        self._checkpoint_callback = callback
+
+    def _assert_epoch(self) -> None:
+        if self._epoch_provider is None or self._epoch_at_turn is None:
+            return
+        current = self._epoch_provider()
+        if current != self._epoch_at_turn:
+            raise StaleEpochError(
+                f"stale Agent epoch {self._epoch_at_turn}; current epoch is {current}"
+            )
 
     def reset_runtime_for_user_turn(self) -> None:
         """Restore agent capabilities narrowed by the previous turn."""
@@ -266,10 +294,18 @@ class SessionRunUseCase(_SessionRunCompletionMixin):
         if self.pending_cleanup_tasks:
             raise RuntimeError("prior provider generation is still draining")
         try:
+            self._epoch_at_turn = self._epoch_provider() if self._epoch_provider else None
             self._prepare_turn()
             while not self._should_suspend():
                 await self.advance(cancel_event)
 
+        except StaleEpochError:
+            # Rollback owns the durable state transition. The stale turn must
+            # be discarded without converting the Agent into ERROR.
+            self.reset_for_restore()
+            self.state.clear_active_turn()
+            self.state.set_phase(SessionPhase.IDLE)
+            raise
         except asyncio.CancelledError:
             if self.tracer:
                 self.tracer.flush()
@@ -657,6 +693,7 @@ class SessionRunUseCase(_SessionRunCompletionMixin):
         except _ContextOverflowStop:
             await self._stop_on_context_overflow()
             return
+        self._assert_epoch()
         latency = time.monotonic() - start
         input_tokens, total_tokens = _normalize_completion_usage(response.usage)
         self.state.add_used_tokens(total_tokens)

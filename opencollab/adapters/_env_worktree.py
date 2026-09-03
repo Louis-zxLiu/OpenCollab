@@ -12,7 +12,7 @@ import uuid
 from opencollab.adapters._env_base import Environment, ExecResult, TextFileRange
 from opencollab.adapters._env_local import LocalEnvironment
 from opencollab.adapters._env_process import run_process
-from opencollab.adapters._env_scope import _HostGitCheckpoints
+from opencollab.adapters._env_scope import _HostGitCheckpoints, _ScopeState
 from opencollab.adapters.git_patch import guarded_staged_diff_command
 from opencollab.adapters.git_worktree_evidence import (
     ABSENT_REF_OLD_VALUE,
@@ -52,8 +52,15 @@ class WorktreeEnvironment(Environment):
     local_filesystem = True
     process_isolated = False
 
-    def __init__(self, source_workspace: str, branch_name: str | None = None) -> None:
-        super().__init__()
+    def __init__(
+        self,
+        source_workspace: str,
+        branch_name: str | None = None,
+        *,
+        require_git: bool = False,
+        _scope: _ScopeState | None = None,
+    ) -> None:
+        super().__init__(_scope=_scope)
         self._source = os.path.realpath(os.path.abspath(source_workspace))
         if not os.path.isdir(self._source):
             raise NotADirectoryError(self._source)
@@ -68,6 +75,7 @@ class WorktreeEnvironment(Environment):
         self._local_env: LocalEnvironment | None = None
         self._base_commit: str | None = None
         self._git_mode = False
+        self._require_git = require_git
         self._branch_owned = False
         self._owned_branch_oid: str | None = None
         self._worktree_registered = False
@@ -112,6 +120,8 @@ class WorktreeEnvironment(Environment):
         if probe.stdout_truncated or probe.stderr_truncated:
             raise RuntimeError("git repository probe output was truncated")
         self._git_mode = probe.returncode == 0
+        if self._require_git and not self._git_mode:
+            raise RuntimeError("rollback-enabled Agent requires a Git repository")
         if self._git_mode:
             top_level = await self._git("rev-parse", "--show-toplevel")
             if (
@@ -164,6 +174,7 @@ class WorktreeEnvironment(Environment):
             raise
         self.workspace = exposed_workspace
         self.host_workspace = exposed_workspace
+        self.bind_workspace(exposed_workspace)
         self._local_env = LocalEnvironment(exposed_workspace, _scope=self._scope)
         self._scope_checkpoints = _HostGitCheckpoints(self._scope, exposed_workspace)
         return exposed_workspace
