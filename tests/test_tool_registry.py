@@ -67,6 +67,11 @@ def test_stateless_tools_resolve_without_any_dependency():
     assert {t.name for t in tools} == {"bash", "file_read"}
 
 
+def test_adopt_effect_is_omitted_without_scheduler():
+    tools = build_tools_for_role(["adopt_effect", "file_read"])
+    assert [tool.name for tool in tools] == ["file_read"]
+
+
 def test_a_registry_denied_an_unisolated_shell_restricts_command_tools():
     bash, run_tests = build_tools_for_role(
         ["bash", "run_tests"], allow_unisolated_shell=False

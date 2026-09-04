@@ -178,6 +178,8 @@ def build_tools_for_role(
             )
         elif name in SCHEDULER_TOOL_FACTORIES:
             if scheduler is None:
+                if name == "adopt_effect":
+                    continue
                 raise ValueError(f"Tool '{name}' requires a scheduler but none was provided.")
             tools.append(SCHEDULER_TOOL_FACTORIES[name](scheduler))
         elif name in SKILL_TOOL_FACTORIES:
