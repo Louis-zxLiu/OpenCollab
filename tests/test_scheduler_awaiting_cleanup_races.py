@@ -92,7 +92,7 @@ def test_cleanup_is_bounded_when_worktree_release_ignores_cancellation():
             self.cancellations = 0
             self.release_calls = 0
 
-        async def acquire(self, role):
+        async def acquire(self, role, **kwargs):
             return None
 
         async def release(self):
@@ -142,7 +142,7 @@ def test_cleanup_does_not_release_pool_while_session_owned_task_survives():
         def __init__(self):
             self.release_calls = 0
 
-        async def acquire(self, role):
+        async def acquire(self, role, **kwargs):
             return None
 
         async def release(self):
@@ -225,7 +225,7 @@ def test_cleanup_surfaces_synchronous_worktree_release_failure():
     error = OSError("pool release failed")
 
     class FailingReleasePool:
-        async def acquire(self, role):
+        async def acquire(self, role, **kwargs):
             return None
 
         def release(self):
@@ -251,7 +251,7 @@ def test_cleanup_retries_transient_failure_then_caches_success():
         def __init__(self):
             self.release_calls = 0
 
-        async def acquire(self, role):
+        async def acquire(self, role, **kwargs):
             return None
 
         def release(self):
@@ -286,7 +286,7 @@ def test_concurrent_cleanup_callers_share_the_inflight_attempt():
             self.started = asyncio.Event()
             self.release_gate = asyncio.Event()
 
-        async def acquire(self, role):
+        async def acquire(self, role, **kwargs):
             return None
 
         async def release_pool(self):
@@ -401,7 +401,7 @@ def test_spawn_blocked_in_acquire_cannot_resurrect_after_cleanup():
             self.cancellations = 0
             self.env = object()
 
-        async def acquire(self, role):
+        async def acquire(self, role, **kwargs):
             self.acquire_calls += 1
             self.started.set()
             while not self.gate.is_set():

@@ -78,7 +78,7 @@ class RecordingFactory:
 
 
 class _NoWorktrees:
-    async def acquire(self, role):
+    async def acquire(self, role, **kwargs):
         return None
 
     async def release(self):

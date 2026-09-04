@@ -34,7 +34,7 @@ def test_cleanup_rejects_invalid_timeout_before_any_side_effect(invalid_timeout)
         def __init__(self):
             self.release_calls = 0
 
-        async def acquire(self, role):
+        async def acquire(self, role, **kwargs):
             return None
 
         async def release(self):
@@ -82,7 +82,7 @@ def test_active_startup_prevents_quiescence_until_child_finishes():
             self.started = asyncio.Event()
             self.release = asyncio.Event()
 
-        async def acquire(self, role):
+        async def acquire(self, role, **kwargs):
             self.started.set()
             await self.release.wait()
             return None

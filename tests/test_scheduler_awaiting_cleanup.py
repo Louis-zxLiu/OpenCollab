@@ -139,7 +139,7 @@ def test_cancelled_spawn_before_driver_fails_parent_row_without_ghost_child():
             self.started = asyncio.Event()
             self.gate = asyncio.Event()
 
-        async def acquire(self, role):
+        async def acquire(self, role, **kwargs):
             self.started.set()
             await self.gate.wait()
 
@@ -259,7 +259,7 @@ def test_cleanup_is_bounded_when_session_ignores_both_cancellations():
             self.env = env
             self.released = asyncio.Event()
 
-        async def acquire(self, role):
+        async def acquire(self, role, **kwargs):
             return self.env
 
         async def release(self):
@@ -347,7 +347,7 @@ def test_cleanup_caller_cancellation_waits_for_owned_teardown_then_propagates():
             self.release_gate = asyncio.Event()
             self.finished = False
 
-        async def acquire(self, role):
+        async def acquire(self, role, **kwargs):
             return None
 
         async def release(self):

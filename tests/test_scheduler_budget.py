@@ -71,7 +71,7 @@ class RecordingFactory:
 
 
 class _NoopWorktreePool:
-    async def acquire(self, role):
+    async def acquire(self, role, **kwargs):
         return None
 
     async def release(self):
@@ -82,7 +82,7 @@ class _RaisingWorktreePool:
     """A pool whose acquire always raises — simulates a spawn that fails after
     the two reservations are booked but before the driver task is scheduled."""
 
-    async def acquire(self, role):
+    async def acquire(self, role, **kwargs):
         raise RuntimeError("worktree acquire failed")
 
     async def release(self):
@@ -109,7 +109,7 @@ class _BlockingAcquirePool:
         self.started = asyncio.Event()
         self.release = asyncio.Event()
 
-    async def acquire(self, role):
+    async def acquire(self, role, **kwargs):
         self.started.set()
         await self.release.wait()
 
