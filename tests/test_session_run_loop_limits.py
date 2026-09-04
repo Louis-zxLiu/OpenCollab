@@ -255,7 +255,7 @@ def test_timeout_quarantines_late_success_and_records_its_usage():
             self.cancel_seen = asyncio.Event()
             self.release = asyncio.Event()
 
-        async def complete(self, messages, tools=None, temperature=0.0):
+        async def complete(self, messages, tools=None, temperature=0.0, **kwargs):
             del messages, tools, temperature
             self.calls += 1
             self.active_calls += 1
@@ -343,7 +343,7 @@ def test_late_protected_provider_usage_consumes_budget_reserve():
 def test_provider_timeout_is_not_relabelled_as_generation_ceiling():
 
     class ProviderTimeoutLLM:
-        async def complete(self, messages, tools=None, temperature=0.0):
+        async def complete(self, messages, tools=None, temperature=0.0, **kwargs):
             raise asyncio.TimeoutError("provider transport timeout")
 
     state = SessionState(messages=[{"role": "system", "content": "sys"}])

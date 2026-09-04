@@ -40,7 +40,7 @@ class FakeLLM:
         self.responses = list(responses)
         self.calls = []
 
-    async def complete(self, messages, tools=None, temperature=0.0):
+    async def complete(self, messages, tools=None, temperature=0.0, **kwargs):
         self.calls.append({"messages": copy.deepcopy(messages)})
         return self.responses.pop(0)
 

@@ -242,7 +242,7 @@ class OverflowThenOkLLM:
         self.ok_response = ok_response
         self.calls = []
 
-    async def complete(self, messages, tools=None, temperature=0.0):
+    async def complete(self, messages, tools=None, temperature=0.0, **kwargs):
         self.calls.append(copy.deepcopy(messages))
         if len(self.calls) == 1:
             raise FakeOverflowError("prompt is too long")
@@ -254,7 +254,7 @@ class AlwaysOverflowLLM:
     def __init__(self):
         self.calls = []
 
-    async def complete(self, messages, tools=None, temperature=0.0):
+    async def complete(self, messages, tools=None, temperature=0.0, **kwargs):
         self.calls.append(copy.deepcopy(messages))
         raise FakeOverflowError("prompt is too long")
 
@@ -287,7 +287,7 @@ class SlowLLM:
         self.delay = delay
         self.calls = []
 
-    async def complete(self, messages, tools=None, temperature=0.0):
+    async def complete(self, messages, tools=None, temperature=0.0, **kwargs):
         self.calls.append(copy.deepcopy(messages))
         await asyncio.sleep(self.delay)
         return self.response

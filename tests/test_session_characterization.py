@@ -185,7 +185,7 @@ async def test_session_rejects_a_second_runner_while_a_turn_is_active():
             self.started = asyncio.Event()
             self.release = asyncio.Event()
 
-        async def complete(self, messages, tools=None, temperature=0.0):
+        async def complete(self, messages, tools=None, temperature=0.0, **kwargs):
             del messages, tools, temperature
             self.calls += 1
             self.started.set()
@@ -218,7 +218,7 @@ async def test_session_rejects_user_message_while_provider_turn_is_active():
             self.started = asyncio.Event()
             self.release = asyncio.Event()
 
-        async def complete(self, messages, tools=None, temperature=0.0):
+        async def complete(self, messages, tools=None, temperature=0.0, **kwargs):
             del messages, tools, temperature
             self.started.set()
             await self.release.wait()
@@ -246,7 +246,7 @@ async def test_direct_run_loop_cancellation_leaves_session_reusable():
             self.calls = 0
             self.started = asyncio.Event()
 
-        async def complete(self, messages, tools=None, temperature=0.0):
+        async def complete(self, messages, tools=None, temperature=0.0, **kwargs):
             del messages, tools, temperature
             self.calls += 1
             if self.calls == 1:

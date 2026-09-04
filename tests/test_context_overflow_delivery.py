@@ -54,7 +54,7 @@ class ScriptedLLM:
         self.responses = list(responses)
         self.calls = []
 
-    async def complete(self, messages, tools=None, temperature=0.0):
+    async def complete(self, messages, tools=None, temperature=0.0, **kwargs):
         self.calls.append({"messages": copy.deepcopy(messages)})
         item = self.responses.pop(0)
         if isinstance(item, BaseException):
@@ -66,7 +66,7 @@ class AlwaysOverflowChildLLM:
     def __init__(self):
         self.calls = []
 
-    async def complete(self, messages, tools=None, temperature=0.0):
+    async def complete(self, messages, tools=None, temperature=0.0, **kwargs):
         self.calls.append({"messages": copy.deepcopy(messages)})
         raise FakeOverflowError("prompt is too long")
 

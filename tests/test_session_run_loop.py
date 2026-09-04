@@ -103,6 +103,14 @@ def test_remaining_budget_caps_next_model_output_request():
     assert state.used_tokens == 500
 
 
+def test_default_per_step_output_limit_reaches_model_request():
+    llm = FakeLLM([llm_response(content="done")])
+    runner = build_runner(llm=llm)
+
+    assert run(runner.run_loop()) == "done"
+    assert llm.calls[0]["max_output_tokens"] == 8_192
+
+
 def test_input_reservation_exhausting_budget_stops_before_model_call():
     events, bus = collect_events()
     state = SessionState(

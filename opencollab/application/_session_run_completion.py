@@ -543,8 +543,7 @@ class _SessionRunCompletionMixin:
             max(1, int(configured_output_tokens)),
             output_budget,
         )
-        if max_output_tokens != DEFAULT_MAX_TOKENS_PER_STEP:
-            extra["max_output_tokens"] = max_output_tokens
+        extra["max_output_tokens"] = max_output_tokens
         reasoning_effort = getattr(self.agent, "reasoning_effort", None)
         if reasoning_effort is not None:
             extra["reasoning_effort"] = reasoning_effort
