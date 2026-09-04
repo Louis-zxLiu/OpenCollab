@@ -52,14 +52,36 @@ from opencollab.domain.team import Topology
 # they are built non-interactive, so the registry resolver drops it regardless.
 # Sorted for a deterministic, reproducible tool order.
 ANALYST_TOOL_NAMES: tuple[str, ...] = (
-    "ask_user", "file_read", "grep", "list_env", "set_env", "spawn_agent",
-    "unset_env", "use_skill",
+    "adopt_effect",
+    "ask_user",
+    "file_read",
+    "grep",
+    "list_env",
+    "set_env",
+    "spawn_agent",
+    "unset_env",
+    "use_skill",
 )
 CODER_TOOL_NAMES: tuple[str, ...] = (
-    "apply_patch", "bash", "file_read", "grep", "list_env", "run_tests", "set_env", "unset_env"
+    "adopt_effect",
+    "apply_patch",
+    "bash",
+    "file_read",
+    "grep",
+    "list_env",
+    "run_tests",
+    "set_env",
+    "unset_env",
 )
 TESTER_TOOL_NAMES: tuple[str, ...] = (
-    "file_read", "git_diff", "grep", "list_env", "run_tests", "set_env", "unset_env"
+    "adopt_effect",
+    "file_read",
+    "git_diff",
+    "grep",
+    "list_env",
+    "run_tests",
+    "set_env",
+    "unset_env",
 )
 
 # Fallback bundle for a role an ``allow_all`` team file spawns without declaring
@@ -67,18 +89,14 @@ TESTER_TOOL_NAMES: tuple[str, ...] = (
 # tool there and the fallback picks it up, no hand-maintained list to drift. It
 # is work tools only: no coordination (it must not fan out further) and no skill
 # dispatch.
-BASE_TOOL_NAMES: tuple[str, ...] = tuple(
-    sorted(KNOWN_TOOL_NAMES - COORDINATION_TOOL_NAMES - {"use_skill"})
-)
+BASE_TOOL_NAMES: tuple[str, ...] = tuple(sorted(KNOWN_TOOL_NAMES - COORDINATION_TOOL_NAMES - {"use_skill"}))
 
 # The three bundles above are hand-written subsets, so a rename in the registry
 # would silently leave a role short a tool. Fail at import instead.
 for _role_bundle in (ANALYST_TOOL_NAMES, CODER_TOOL_NAMES, TESTER_TOOL_NAMES):
     _unknown = sorted(set(_role_bundle) - KNOWN_TOOL_NAMES)
     if _unknown:
-        raise RuntimeError(
-            f"built-in team declares tools missing from the registry: {_unknown}"
-        )
+        raise RuntimeError(f"built-in team declares tools missing from the registry: {_unknown}")
 
 # Built-in default prompts live as data files next to this module (``prompts/``)
 # so they read as prose, not Python string literals, and ship with the package —
@@ -165,6 +183,7 @@ class RoleConfig(BaseModel):
             raise ValueError("role temperature must not be a boolean")
         return value
 
+
 class _RoleFileModel(BaseModel):
     """On-disk role entry; ``prompt`` or ``prompt_file`` (resolved at load)."""
 
@@ -214,6 +233,7 @@ class _RoleFileModel(BaseModel):
         if isinstance(value, bool):
             raise ValueError("role temperature must not be a boolean")
         return value
+
 
 class _HookActionFileModel(BaseModel):
     """On-disk hook entry: one action bound to a lifecycle event."""
@@ -297,10 +317,7 @@ class TeamConfig:
             if normalized_roles:
                 canonical_entry = role_names.get(role_collision_key(entry))
                 if canonical_entry is None:
-                    raise ValueError(
-                        f"entry role '{entry}' is not declared in roles "
-                        f"({sorted(normalized_roles)})."
-                    )
+                    raise ValueError(f"entry role '{entry}' is not declared in roles ({sorted(normalized_roles)}).")
                 entry = canonical_entry
 
         canonical_edges: dict[str, frozenset[str]] = {}
@@ -399,20 +416,11 @@ def _resolve_entry_role(explicit: str | None, roles: dict[str, RoleConfig]) -> s
     """
     if explicit is not None:
         explicit = validate_role_identity(explicit)
-        canonical = {
-            role_collision_key(role): role
-            for role in roles
-        }.get(role_collision_key(explicit))
+        canonical = {role_collision_key(role): role for role in roles}.get(role_collision_key(explicit))
         if canonical is None:
-            raise ValueError(
-                f"entry role '{explicit}' is not declared in roles "
-                f"({sorted(roles)})."
-            )
+            raise ValueError(f"entry role '{explicit}' is not declared in roles ({sorted(roles)}).")
         return canonical
-    canonical_roles = {
-        role_collision_key(role): role
-        for role in roles
-    }
+    canonical_roles = {role_collision_key(role): role for role in roles}
     lead = canonical_roles.get(role_collision_key("lead"))
     if lead is not None:
         return lead
@@ -438,26 +446,18 @@ def _resolve_prompt(entry: _RoleFileModel, base_dir: Path, role_name: str) -> st
         prompt_path = Path(os.path.abspath(base_dir / entry.prompt_file))
         base_absolute = Path(os.path.abspath(base_dir))
         try:
-            contained = os.path.commonpath((base_absolute, prompt_path)) == str(
-                base_absolute
-            )
+            contained = os.path.commonpath((base_absolute, prompt_path)) == str(base_absolute)
         except ValueError:
             contained = False
         if not contained:
-            raise ValueError(
-                f"Role '{role_name}': prompt_file escapes team directory: "
-                f"{prompt_path}"
-            )
+            raise ValueError(f"Role '{role_name}': prompt_file escapes team directory: {prompt_path}")
         try:
             text = read_regular_text(
                 prompt_path,
                 max_bytes=MAX_ROLE_PROMPT_BYTES,
             )
         except (OSError, UnicodeDecodeError, ValueError) as exc:
-            raise ValueError(
-                f"Role '{role_name}': prompt_file cannot be read safely: "
-                f"{prompt_path}"
-            ) from exc
+            raise ValueError(f"Role '{role_name}': prompt_file cannot be read safely: {prompt_path}") from exc
         return text
     raise ValueError(f"Role '{role_name}': must set 'prompt' or 'prompt_file'.")
 
@@ -466,10 +466,7 @@ def _build_hook_specs(hooks: dict[str, list[_HookActionFileModel]]) -> tuple[Hoo
     specs: list[HookSpec] = []
     for event_name, actions in hooks.items():
         if event_name not in HOOK_EVENT_NAMES:
-            raise ValueError(
-                f"Unknown hook event '{event_name}'. "
-                f"Known events: {sorted(HOOK_EVENT_NAMES)}"
-            )
+            raise ValueError(f"Unknown hook event '{event_name}'. Known events: {sorted(HOOK_EVENT_NAMES)}")
         for action in actions:
             if action.type not in HOOK_ACTION_TYPES:
                 raise ValueError(
@@ -478,8 +475,7 @@ def _build_hook_specs(hooks: dict[str, list[_HookActionFileModel]]) -> tuple[Hoo
                 )
             if action.type not in EXECUTABLE_HOOK_ACTION_TYPES:
                 raise ValueError(
-                    f"Hook action type '{action.type}' for event '{event_name}' "
-                    "is recognized but not implemented"
+                    f"Hook action type '{action.type}' for event '{event_name}' is recognized but not implemented"
                 )
             specs.append(
                 HookSpec(
@@ -534,13 +530,10 @@ def _build_team_config(data: Any, base_dir: Path) -> TeamConfig:
             destination_key = role_collision_key(destination_identity)
             if destination_key in destination_keys:
                 raise ValueError(
-                    "topology destination identities collide after normalization "
-                    f"for source {raw_source!r}"
+                    f"topology destination identities collide after normalization for source {raw_source!r}"
                 )
             destination_keys.add(destination_key)
-            destinations.append(
-                canonical_roles.get(destination_key, destination_identity)
-            )
+            destinations.append(canonical_roles.get(destination_key, destination_identity))
         edges[source] = frozenset(destinations)
     return TeamConfig(
         roles=roles,

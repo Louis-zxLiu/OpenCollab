@@ -12,10 +12,12 @@ from types import MappingProxyType
 
 from opencollab.adapters._env_process import PROCESS_OUTPUT_CAPTURE_BYTES, run_process
 from opencollab.domain.rollback import (
+    AdoptionResult,
     CheckpointBoundary,
     EnvironmentSnapshot,
     RestoreResult,
     ScopeCheckpoint,
+    WorkspaceRevision,
 )
 
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -44,11 +46,7 @@ class _ScopeState:
 
     def __init__(self, initial: Mapping[str, str]) -> None:
         self.command_lock = asyncio.Lock()
-        self._values = {
-            name: value
-            for name, value in initial.items()
-            if name not in _CONTROL_ENV_NAMES
-        }
+        self._values = {name: value for name, value in initial.items() if name not in _CONTROL_ENV_NAMES}
         self._native_names = frozenset(self._values)
 
     def snapshot(self) -> EnvironmentSnapshot:
@@ -75,11 +73,7 @@ class _ScopeState:
         return tuple(sorted(self._native_names - self._values.keys()))
 
     def replace_native(self, initial: Mapping[str, str]) -> None:
-        values = {
-            name: value
-            for name, value in initial.items()
-            if name not in _CONTROL_ENV_NAMES
-        }
+        values = {name: value for name, value in initial.items() if name not in _CONTROL_ENV_NAMES}
         self._values = values
         self._native_names = frozenset(values)
 
@@ -186,6 +180,77 @@ class _HostGitCheckpoints:
                 "restored",
                 files_changed=len([item for item in changed.split("\0") if item]),
             )
+
+    async def capture_revision(
+        self,
+        reference_id: str,
+        *,
+        owner_aid: int,
+        base_revision: str,
+    ) -> WorkspaceRevision:
+        """Freeze tracked and untracked Scope files without changing its index."""
+        async with self._scope.command_lock:
+            fd, index_path = tempfile.mkstemp(prefix="opencollab-effect-index-")
+            os.close(fd)
+            os.unlink(index_path)
+            env = self._scope.process_environment()
+            env.update(
+                GIT_INDEX_FILE=index_path,
+                GIT_AUTHOR_NAME="OpenCollab Effect",
+                GIT_AUTHOR_EMAIL="effect@opencollab.invalid",
+                GIT_COMMITTER_NAME="OpenCollab Effect",
+                GIT_COMMITTER_EMAIL="effect@opencollab.invalid",
+            )
+            try:
+                await self._git("read-tree", "HEAD", env=env)
+                await self._git("add", "-A", env=env)
+                tree = await self._git("write-tree", env=env)
+                base_tree = await self._git("rev-parse", f"{base_revision}^{{tree}}", env=env)
+                commit = await self._git(
+                    "commit-tree",
+                    tree,
+                    "-p",
+                    base_revision,
+                    "-m",
+                    f"OpenCollab effect {reference_id}",
+                    env=env,
+                )
+                ref = f"refs/opencollab/effects/{owner_aid}/{reference_id}"
+                await self._git("update-ref", ref, commit, env=env)
+            finally:
+                try:
+                    os.unlink(index_path)
+                except FileNotFoundError:
+                    pass
+            self._refs[f"effect_{owner_aid}_{reference_id}"] = ref
+            return WorkspaceRevision(commit, base_revision, tree != base_tree)
+
+    async def adopt_revision(self, revision: WorkspaceRevision) -> AdoptionResult:
+        """Apply an immutable revision only to a clean coordinating Scope."""
+        async with self._scope.command_lock:
+            if not revision.changed:
+                return AdoptionResult("skipped", revision=revision.revision)
+            env = self._scope.process_environment()
+            env.update(
+                GIT_COMMITTER_NAME="OpenCollab Effect",
+                GIT_COMMITTER_EMAIL="effect@opencollab.invalid",
+            )
+            try:
+                await self._git("cat-file", "-e", f"{revision.revision}^{{commit}}")
+                parent = await self._git("rev-parse", f"{revision.revision}^")
+                if parent != revision.base_revision:
+                    return AdoptionResult("failed", reason="workspace revision base mismatch")
+                status = await self._git("status", "--porcelain", "--untracked-files=all")
+                if status:
+                    return AdoptionResult("conflict", reason="Scope is not clean")
+                await self._git("cherry-pick", "-x", revision.revision, env=env)
+                return AdoptionResult("adopted", revision=revision.revision)
+            except RuntimeError as exc:
+                try:
+                    await self._git("cherry-pick", "--abort")
+                except RuntimeError:
+                    pass
+                return AdoptionResult("failed", reason=str(exc)[:500])
 
     async def discard(self) -> None:
         async with self._scope.command_lock:

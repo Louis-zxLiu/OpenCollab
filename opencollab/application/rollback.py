@@ -14,6 +14,7 @@ from opencollab.domain.rollback import (
     EffectRef,
     RestoreResult,
     ScopeCheckpoint,
+    WorkspaceRevision,
     compute_content_hash,
     compute_descendants,
     reduce_causal_frontier,
@@ -64,6 +65,35 @@ class RollbackService:
         if effect_id not in self._effects:
             raise ValueError(f"unknown effect_id: {effect_id}")
         self._consumers.setdefault(effect_id, set()).add(consumer_aid)
+
+    def consumer_can_access(self, effect_id: str, consumer_aid: int) -> bool:
+        """Whether delivery made this Effect visible to the Agent."""
+        return consumer_aid in self._consumers.get(effect_id, ())
+
+    def attach_workspace_revision(
+        self,
+        effect_id: str,
+        revision: WorkspaceRevision,
+    ) -> EffectRef:
+        effect = self._effects.get(effect_id)
+        if effect is None:
+            raise ValueError(f"unknown effect_id: {effect_id}")
+        updated = replace(
+            effect,
+            workspace_revision=revision.revision,
+            base_workspace_revision=revision.base_revision,
+        )
+        self._effects[effect_id] = updated
+        return updated
+
+    def workspace_revision(self, effect_id: str) -> WorkspaceRevision | None:
+        effect = self._effects.get(effect_id)
+        if effect is None or effect.workspace_revision is None or effect.base_workspace_revision is None:
+            return None
+        return WorkspaceRevision(
+            revision=effect.workspace_revision,
+            base_revision=effect.base_workspace_revision,
+        )
 
     def consume(self, consumer_aid: int, effect_id: str) -> frozenset[str]:
         frontier = reduce_causal_frontier(
@@ -121,11 +151,7 @@ class RollbackService:
 
     def select_checkpoint(self, aid: int, invalidated: set[str]) -> ScopeCheckpoint | None:
         checkpoints = self._checkpoints.get(aid, ())
-        relevant = [
-            checkpoint
-            for checkpoint in checkpoints
-            if not (set(checkpoint.causal_frontier) & invalidated)
-        ]
+        relevant = [checkpoint for checkpoint in checkpoints if not (set(checkpoint.causal_frontier) & invalidated)]
         return max(relevant, key=lambda checkpoint: checkpoint.sequence, default=None)
 
     async def restore_affected(self, invalidated: set[str]) -> dict[int, RestoreResult | None]:
@@ -149,6 +175,7 @@ class RollbackService:
 
     def rebuild_from_messages(self, messages: list[dict[str, Any]]) -> None:
         from opencollab.domain.rollback import lineage_envelope_from_dict
+
         for message in messages:
             envelope = lineage_envelope_from_dict(message.get("_lineage"))
             if envelope is None:

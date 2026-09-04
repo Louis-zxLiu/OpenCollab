@@ -39,11 +39,7 @@ def _shell_state(agent: Any, env: Any) -> str:
       answered with a refusal instead of being run.
     """
     bash = next(
-        (
-            tool
-            for tool in getattr(agent, "tools", ())
-            if getattr(tool, "name", None) == "bash"
-        ),
+        (tool for tool in getattr(agent, "tools", ()) if getattr(tool, "name", None) == "bash"),
         None,
     )
     if bash is None:
@@ -82,7 +78,7 @@ def _side_path(token: str, prefix: str) -> str | None:
     token = _git_unquote(token.split("\t", 1)[0].strip())
     if token == "/dev/null":
         return None
-    return token[len(prefix):] if token.startswith(prefix) else token
+    return token[len(prefix) :] if token.startswith(prefix) else token
 
 
 def _header_line_paths(line: str) -> tuple[str | None, str | None]:
@@ -94,25 +90,25 @@ def _header_line_paths(line: str) -> tuple[str | None, str | None]:
     of every non-rename entry, and a rename carries explicit ``rename
     from``/``rename to`` lines anyway.
     """
-    rest = line[len(_DIFF_HEADER):].strip()
+    rest = line[len(_DIFF_HEADER) :].strip()
     if rest.startswith('"'):
         closing = rest.find('" "')
         if closing == -1:
             return None, None
         return (
             _side_path(rest[: closing + 1], "a/"),
-            _side_path(rest[closing + 2:], "b/"),
+            _side_path(rest[closing + 2 :], "b/"),
         )
     if not rest.startswith("a/"):
         return None, None
     body = rest[2:]
     half = (len(body) - 3) // 2
-    if half > 0 and body[half: half + 3] == " b/" and body[:half] == body[half + 3:]:
+    if half > 0 and body[half : half + 3] == " b/" and body[:half] == body[half + 3 :]:
         return body[:half], body[:half]
     marker = body.find(" b/")
     if marker == -1:
         return None, None
-    return body[:marker], body[marker + 3:]
+    return body[:marker], body[marker + 3 :]
 
 
 def _classify_block(block: list[str]) -> list[tuple[str, str]]:
@@ -127,9 +123,9 @@ def _classify_block(block: list[str]) -> list[tuple[str, str]]:
         elif line.startswith("deleted file mode"):
             deleted = True
         elif line.startswith("rename from "):
-            rename_from = _git_unquote(line[len("rename from "):].strip())
+            rename_from = _git_unquote(line[len("rename from ") :].strip())
         elif line.startswith("rename to "):
-            rename_to = _git_unquote(line[len("rename to "):].strip())
+            rename_to = _git_unquote(line[len("rename to ") :].strip())
         elif line.startswith("--- "):
             old_path = _side_path(line[4:], "a/")
         elif line.startswith("+++ "):
@@ -164,42 +160,6 @@ def _parse_worktree_diff(diff: str) -> list[tuple[str, str]]:
 
 
 class SchedulerTeamMixin:
-    async def adopt_child_changes(self, parent_aid: int, child_aid: int, revision: str) -> str:
-        """Validate and explicitly cherry-pick a child's revision into parent Scope."""
-        if parent_aid != 0:
-            raise PermissionError("only the coordinating Agent may adopt child changes")
-        if not isinstance(child_aid, int) or child_aid < 0 or not revision.strip():
-            raise ValueError("child_aid and revision are required")
-        child = self._sessions.get(child_aid)
-        parent = self._sessions.get(parent_aid)
-        if child is None or parent is None:
-            raise ValueError("unknown child or coordinating Agent")
-        child_env = getattr(child, "env", None)
-        parent_env = getattr(parent, "env", None)
-        if child_env is None or parent_env is None:
-            raise RuntimeError("child and coordinating Agent must have isolated worktrees")
-        expected = getattr(child_env, "head_commit", None)
-        if expected and expected != revision:
-            raise ValueError("revision does not match the child's recorded HEAD")
-        probe = await parent_env.exec_cmd(
-            f"git cat-file -e {revision}^{{commit}}", timeout=30
-        )
-        if probe.returncode != 0:
-            raise ValueError("revision is not a valid Git commit")
-        clean = await parent_env.exec_cmd("git status --porcelain", timeout=30)
-        if clean.returncode != 0 or clean.stdout.strip():
-            raise RuntimeError("coordinating worktree must be clean before adoption")
-        result = await parent_env.exec_cmd(f"git cherry-pick -x {revision}", timeout=120)
-        if result.returncode != 0:
-            await parent_env.exec_cmd("git cherry-pick --abort", timeout=30)
-            raise RuntimeError((result.stderr or "Git adoption failed").strip()[:500])
-        if self._tracer is not None:
-            self._tracer.log_step(
-                step_type="child_changes_adopted",
-                payload={"parent_aid": parent_aid, "child_aid": child_aid, "revision": revision},
-            )
-        return f"Adopted child Agent {child_aid} revision {revision} into the coordinating worktree."
-
     @property
     def lead_session(self) -> Any:
         """Agent 0's session (the interactive entry)."""
@@ -308,8 +268,7 @@ class SchedulerTeamMixin:
             lead = self.table.get(0)
             if lead is None:
                 raise RuntimeError(
-                    "Cannot prebuild the team: agent 0 does not exist yet. "
-                    "Call create_init_process() first."
+                    "Cannot prebuild the team: agent 0 does not exist yet. Call create_init_process() first."
                 )
             entry_key = role_collision_key(lead.agent.name)
             built: list[tuple[int, Any]] = []
@@ -357,13 +316,19 @@ class SchedulerTeamMixin:
                 )
             lead_session = self._sessions.get(0)
             parent_environment = getattr(lead_session, "env", None)
+            parent_workspace_revision = None
+            if self._rollback_enabled and parent_environment is not None:
+                capture = getattr(parent_environment, "capture_workspace_revision", None)
+                if callable(capture):
+                    parent_workspace_revision = await capture(f"prebuilt_{aid}", owner_aid=0)
             try:
                 env = await self._worktree_pool.acquire(
                     role,
                     parent_environment=parent_environment,
+                    parent_workspace_revision=parent_workspace_revision,
                 )
             except TypeError as exc:
-                if "parent_environment" not in str(exc):
+                if not {"parent_environment", "parent_workspace_revision"}.intersection(str(exc)):
                     raise
                 env = await self._worktree_pool.acquire(role)
             session = self._session_factory.build_spawn_session(
@@ -385,9 +350,7 @@ class SchedulerTeamMixin:
                 )
             )
             self._sessions[aid] = session
-            await self.emit_scheduler_event(
-                self._events.agent_spawned(aid, 0, role, "")
-            )
+            await self.emit_scheduler_event(self._events.agent_spawned(aid, 0, role, ""))
             await self._checkpoint_after_spawn(aid, f"prebuilt {role}")
         except BaseException:
             await self._rollback_failed_spawn(aid, env)
@@ -403,9 +366,7 @@ class SchedulerTeamMixin:
             session = self._sessions.get(aid)
             agent = getattr(session, "agent", None) or scb.agent
             tools = sorted(
-                str(name)
-                for tool in getattr(agent, "tools", ())
-                if (name := getattr(tool, "name", None)) is not None
+                str(name) for tool in getattr(agent, "tools", ()) if (name := getattr(tool, "name", None)) is not None
             )
             env = getattr(session, "env", None)
             nodes.append(
@@ -418,9 +379,7 @@ class SchedulerTeamMixin:
                     # permission policy is wired and something outside the agent
                     # answers yes/no; "auto" means nothing does.
                     "permission_mode": (
-                        "confirm"
-                        if getattr(session, "permission_policy", None) is not None
-                        else "auto"
+                        "confirm" if getattr(session, "permission_policy", None) is not None else "auto"
                     ),
                     "workspace": getattr(env, "workspace", None),
                     # True only for a real worktree. Under ``use_worktrees=False``
@@ -509,10 +468,7 @@ class SchedulerTeamMixin:
             logger.error("assigned topology trace failed: %s", exc)
 
     def _live_roster(self) -> list[dict[str, Any]]:
-        return [
-            {"aid": aid, "role": self.table.entries[aid].agent.name}
-            for aid in sorted(self.table.entries)
-        ]
+        return [{"aid": aid, "role": self.table.entries[aid].agent.name} for aid in sorted(self.table.entries)]
 
     def _refuse_spawn_when_prebuilt(
         self,
@@ -537,11 +493,7 @@ class SchedulerTeamMixin:
         declared = {role_collision_key(name) for name in self._roles}
         requested_key = role_collision_key(role)
         seated = next(
-            (
-                entry
-                for entry in roster
-                if role_collision_key(entry["role"]) == requested_key
-            ),
+            (entry for entry in roster if role_collision_key(entry["role"]) == requested_key),
             None,
         )
         self._trace_spawn_refused(
@@ -554,8 +506,7 @@ class SchedulerTeamMixin:
         )
         listing = ", ".join(f"{entry['role']} (aid {entry['aid']})" for entry in roster)
         head = (
-            f"Not spawned: '{role}' is already on this team as aid "
-            f"{seated['aid']}."
+            f"Not spawned: '{role}' is already on this team as aid {seated['aid']}."
             if seated is not None
             else f"Not spawned: '{role}' is not a role on this team."
         )
@@ -604,9 +555,7 @@ class SchedulerTeamMixin:
                     "requester_role": self._role_of(parent_aid),
                     "requested_role": role,
                     "requested_role_declared": declared,
-                    "topology_allowed": not self._topology_forbids(
-                        self._role_of(parent_aid), role
-                    ),
+                    "topology_allowed": not self._topology_forbids(self._role_of(parent_aid), role),
                     "declared_roles": list(self._roles),
                     "live_roster": roster,
                     "task": str(task)[:SPAWN_REFUSAL_TASK_CHARS],
@@ -694,9 +643,7 @@ class SchedulerTeamMixin:
                 if op != "deleted":
                     try:
                         content = await env.read_file(path)
-                        entry["content_sha"] = hashlib.sha256(
-                            content.encode("utf-8")
-                        ).hexdigest()
+                        entry["content_sha"] = hashlib.sha256(content.encode("utf-8")).hexdigest()
                     except Exception as exc:
                         entry["sha_error"] = type(exc).__name__
                 files.append(entry)

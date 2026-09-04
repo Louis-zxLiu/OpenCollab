@@ -92,8 +92,7 @@ def _reject_unwalkable_edges(team: TeamConfig) -> None:
     detail = "\n".join(
         f"  - role '{source}' may address {', '.join(destinations)} "
         f"but its tools are [{', '.join(tools)}]\n"
-        f"    unwalkable edges: "
-        + ", ".join(f"{source} -> {destination}" for destination in destinations)
+        f"    unwalkable edges: " + ", ".join(f"{source} -> {destination}" for destination in destinations)
         for source, destinations, tools in offenders
     )
     named = ", ".join(f"'{source}'" for source, _, _ in offenders)
@@ -107,15 +106,18 @@ def _reject_unwalkable_edges(team: TeamConfig) -> None:
     )
 
 
-
 def _rollback_git_preflight(workspace: str) -> None:
     """Validate the source before any rollback-enabled Agent is seated."""
     root = os.path.realpath(os.path.abspath(workspace))
 
     def git(*args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            ("git", *args), cwd=root, text=True, capture_output=True,
-            check=False, timeout=15,
+            ("git", *args),
+            cwd=root,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=15,
         )
 
     probe = git("rev-parse", "--show-toplevel", "--verify", "HEAD^{commit}")
@@ -238,11 +240,19 @@ def build_scheduler(
                 branch_name=f"opencollab-lead-{uuid.uuid4().hex[:8]}",
                 command_prefix=environment.command_prefix,
             )
-        elif callable(getattr(environment, "checkpoint_scope", None)):
+        elif all(
+            callable(getattr(environment, name, None))
+            for name in (
+                "checkpoint_scope",
+                "restore_scope",
+                "capture_workspace_revision",
+                "adopt_workspace_revision",
+            )
+        ):
             lead_environment = environment
         else:
             raise ValueError(
-                "rollback-enabled Team requires a checkpointable isolated lead environment"
+                "rollback-enabled Team requires a checkpointable, revision-capable isolated lead environment"
             )
     else:
         lead_environment = environment
@@ -252,11 +262,7 @@ def build_scheduler(
     # here. Known before the factory so spawned children inherit the same dir.
     run_dir: str | None = None
     if auto_save:
-        run_dir = (
-            os.path.abspath(os.fspath(save_dir))
-            if save_dir is not None
-            else make_run_dir(ctx.workspace)
-        )
+        run_dir = os.path.abspath(os.fspath(save_dir)) if save_dir is not None else make_run_dir(ctx.workspace)
     lead_save_path = agent_save_path(run_dir, 0, team_cfg.entry) if run_dir else None
 
     rollback_service = RollbackService(trace_port=ctx.tracer)
@@ -271,9 +277,7 @@ def build_scheduler(
             llm_timeout=cfg.get("llm_timeout", 600.0),
             temperature=cfg.get("temperature", DEFAULT_TEMPERATURE),
             top_p=cfg.get("top_p", DEFAULT_TOP_P),
-            max_output_tokens=cfg.get(
-                "max_output_tokens", DEFAULT_MAX_TOKENS_PER_STEP
-            ),
+            max_output_tokens=cfg.get("max_output_tokens", DEFAULT_MAX_TOKENS_PER_STEP),
             context_window=cfg.get("context_window"),
             thinking=cfg.get("thinking", DEFAULT_THINKING),
             thinking_params=resolve_thinking_params(cfg.get("thinking_params")),
@@ -373,9 +377,7 @@ def build_scheduler(
             prepare_fn=_prepare_manifest,
         )
 
-    scheduler.create_init_process(
-        LaunchSpec(session_file=session_file, auto_save_path=lead_save_path)
-    )
+    scheduler.create_init_process(LaunchSpec(session_file=session_file, auto_save_path=lead_save_path))
     return scheduler
 
 

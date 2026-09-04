@@ -15,6 +15,29 @@ BoundaryKind = Literal[
     "tool_call",
 ]
 RestoreStatus = Literal["restored", "skipped", "pending", "failed"]
+_AdoptionStatus = Literal["adopted", "skipped", "conflict", "failed"]
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceRevision:
+    """Immutable Git snapshot exported by one Agent Scope."""
+
+    revision: str
+    base_revision: str
+    changed: bool = True
+
+    def __post_init__(self) -> None:
+        if not self.revision or not self.base_revision:
+            raise ValueError("workspace revision and base revision are required")
+
+
+@dataclass(frozen=True, slots=True)
+class AdoptionResult:
+    """Outcome of applying an immutable workspace revision to one Scope."""
+
+    status: _AdoptionStatus
+    revision: str | None = None
+    reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,6 +52,8 @@ class EffectRef:
     parent_effect_ids: tuple[str, ...] = ()
     content_hash: str = ""
     status: EffectStatus = "untrusted"
+    workspace_revision: str | None = None
+    base_workspace_revision: str | None = None
 
     def __post_init__(self) -> None:
         if not self.effect_id:
@@ -39,6 +64,8 @@ class EffectRef:
             raise ValueError("parent effect IDs must be unique")
         if self.effect_id in self.parent_effect_ids:
             raise ValueError("an effect cannot be its own parent")
+        if (self.workspace_revision is None) != (self.base_workspace_revision is None):
+            raise ValueError("workspace revision and base revision must be supplied together")
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,6 +223,8 @@ def lineage_envelope_to_dict(envelope: LineageEnvelope) -> dict[str, Any]:
             "parent_effect_ids": list(effect.parent_effect_ids),
             "content_hash": effect.content_hash,
             "status": effect.status,
+            "workspace_revision": effect.workspace_revision,
+            "base_workspace_revision": effect.base_workspace_revision,
         },
         "consumer_aid": envelope.consumer_aid,
         "source_message_id": envelope.source_message_id,
@@ -217,13 +246,17 @@ def lineage_envelope_from_dict(value: object) -> LineageEnvelope | None:
                 parent_effect_ids=tuple(str(item) for item in effect.get("parent_effect_ids", ())),
                 content_hash=str(effect.get("content_hash", "")),
                 status=effect.get("status", "untrusted"),
+                workspace_revision=(
+                    str(effect["workspace_revision"]) if effect.get("workspace_revision") is not None else None
+                ),
+                base_workspace_revision=(
+                    str(effect["base_workspace_revision"])
+                    if effect.get("base_workspace_revision") is not None
+                    else None
+                ),
             ),
             consumer_aid=(int(value["consumer_aid"]) if value.get("consumer_aid") is not None else None),
-            source_message_id=(
-                str(value["source_message_id"])
-                if value.get("source_message_id") is not None
-                else None
-            ),
+            source_message_id=(str(value["source_message_id"]) if value.get("source_message_id") is not None else None),
         )
     except (KeyError, TypeError, ValueError):
         return None

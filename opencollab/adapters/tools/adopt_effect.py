@@ -1,4 +1,4 @@
-"""Explicitly adopt a completed child revision into the coordinating Scope."""
+"""Adopt an immutable workspace Effect into the calling Agent Scope."""
 
 from __future__ import annotations
 
@@ -9,22 +9,19 @@ from opencollab.adapters.tools.base import Tool
 TOOL_DEFINITION = {
     "type": "function",
     "function": {
-        "name": "adopt_child_changes",
-        "description": "Adopt a completed child Git revision into this Agent worktree.",
+        "name": "adopt_effect",
+        "description": "Adopt a visible immutable workspace Effect into this Agent Scope.",
         "parameters": {
             "type": "object",
-            "properties": {
-                "child_aid": {"type": "integer", "minimum": 0},
-                "revision": {"type": "string"},
-            },
-            "required": ["child_aid", "revision"],
+            "properties": {"effect_id": {"type": "string"}},
+            "required": ["effect_id"],
         },
     },
 }
 
 
-class AdoptChildChangesTool(Tool):
-    name = "adopt_child_changes"
+class AdoptEffectTool(Tool):
+    name = "adopt_effect"
     description = TOOL_DEFINITION["function"]["description"]
     parameters = TOOL_DEFINITION["function"]["parameters"]
 
@@ -33,9 +30,10 @@ class AdoptChildChangesTool(Tool):
 
     async def execute_with_runtime(self, params: dict[str, Any], runtime: Any) -> str:
         try:
-            return await self._scheduler.adopt_child_changes(
-                runtime.aid, int(params["child_aid"]), str(params["revision"])
-            )
+            effect_id = str(params["effect_id"]).strip()
+            if not effect_id:
+                raise ValueError("effect_id is required")
+            return await self._scheduler.adopt_effect(runtime.aid, effect_id)
         except (KeyError, TypeError, ValueError, RuntimeError) as exc:
             return f"Error: {exc}"
 
@@ -43,3 +41,5 @@ class AdoptChildChangesTool(Tool):
     def get_definition() -> dict[str, Any]:
         return TOOL_DEFINITION
 
+
+__all__ = ["AdoptEffectTool"]

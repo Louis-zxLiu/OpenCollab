@@ -10,10 +10,12 @@ if TYPE_CHECKING:
     from opencollab.application.scheduler_types import LaunchSpec
     from opencollab.application.tool_execution import DeferredCall, ToolRuntime
     from opencollab.domain.rollback import (
+        AdoptionResult,
         CheckpointBoundary,
         EnvironmentSnapshot,
         RestoreResult,
         ScopeCheckpoint,
+        WorkspaceRevision,
     )
 
 
@@ -24,36 +26,27 @@ class EnvironmentPort(Protocol):
     local_filesystem: bool
 
     @property
-    def revoked(self) -> bool:
-        ...
+    def revoked(self) -> bool: ...
 
-    def revoke(self) -> None:
-        ...
+    def revoke(self) -> None: ...
 
     async def setup(self, mount_dir: str | None = None) -> str:
         """Prepare the environment and return its ready workspace identity."""
         ...
 
-    async def exec_cmd(self, cmd: str, timeout: float = 120.0) -> Any:
-        ...
+    async def exec_cmd(self, cmd: str, timeout: float = 120.0) -> Any: ...
 
-    def snapshot_environment(self) -> "EnvironmentSnapshot":
-        ...
+    def snapshot_environment(self) -> "EnvironmentSnapshot": ...
 
-    def set_environment_variable(self, name: str, value: str) -> None:
-        ...
+    def set_environment_variable(self, name: str, value: str) -> None: ...
 
-    def unset_environment_variable(self, name: str) -> None:
-        ...
+    def unset_environment_variable(self, name: str) -> None: ...
 
-    def environment_view(self) -> Mapping[str, str]:
-        ...
+    def environment_view(self) -> Mapping[str, str]: ...
 
-    async def read_file(self, path: str) -> str:
-        ...
+    async def read_file(self, path: str) -> str: ...
 
-    async def write_file(self, path: str, content: str) -> None:
-        ...
+    async def write_file(self, path: str, content: str) -> None: ...
 
     async def write_temp_file(
         self,
@@ -61,18 +54,15 @@ class EnvironmentPort(Protocol):
         *,
         prefix: str,
         suffix: str = ".tmp",
-    ) -> str:
-        ...
+    ) -> str: ...
 
-    async def remove_file(self, path: str) -> None:
-        ...
+    async def remove_file(self, path: str) -> None: ...
 
     async def abort(self) -> None:
         """Revoke future side effects and stop owned environment resources."""
         ...
 
-    async def cleanup(self) -> None:
-        ...
+    async def cleanup(self) -> None: ...
 
 
 @runtime_checkable
@@ -85,14 +75,28 @@ class CheckpointableEnvironmentPort(EnvironmentPort, Protocol):
         *,
         owner_aid: int,
         causal_frontier: frozenset[str],
-    ) -> "ScopeCheckpoint":
-        ...
+    ) -> "ScopeCheckpoint": ...
 
-    async def restore_scope(self, checkpoint: "ScopeCheckpoint") -> "RestoreResult":
-        ...
+    async def restore_scope(self, checkpoint: "ScopeCheckpoint") -> "RestoreResult": ...
 
-    async def discard_scope_checkpoints(self) -> None:
-        ...
+    async def discard_scope_checkpoints(self) -> None: ...
+
+
+@runtime_checkable
+class RevisionCapableEnvironmentPort(CheckpointableEnvironmentPort, Protocol):
+    """Isolated Git Scope that can exchange immutable filesystem effects."""
+
+    async def capture_workspace_revision(
+        self,
+        reference_id: str,
+        *,
+        owner_aid: int,
+    ) -> "WorkspaceRevision": ...
+
+    async def adopt_workspace_revision(
+        self,
+        revision: "WorkspaceRevision",
+    ) -> "AdoptionResult": ...
 
 
 @runtime_checkable
@@ -103,8 +107,7 @@ class DiffCapablePort(Protocol):
     to a finished child's result before delivering it to the parent.
     """
 
-    async def get_diff(self) -> str:
-        ...
+    async def get_diff(self) -> str: ...
 
 
 @runtime_checkable
@@ -134,29 +137,24 @@ class WorkingTreeProbe(Protocol):
 
 
 class SafetyPolicyPort(Protocol):
-    def check_path(self, target_path: str) -> str:
-        ...
+    def check_path(self, target_path: str) -> str: ...
 
-    def check_cmd(self, cmd: str) -> None:
-        ...
+    def check_cmd(self, cmd: str) -> None: ...
 
-    def is_risky(self, cmd: str) -> bool:
-        ...
+    def is_risky(self, cmd: str) -> bool: ...
 
     def check_cmd_interactive(
         self,
         cmd: str,
         confirm_fn: Callable[[str], Awaitable[bool]] | None = None,
-    ) -> Awaitable[None]:
-        ...
+    ) -> Awaitable[None]: ...
 
 
 SafetyPolicyFactory = Callable[[Any], SafetyPolicyPort | None]
 
 
 class PermissionPort(Protocol):
-    async def confirm(self, prompt: str) -> bool:
-        ...
+    async def confirm(self, prompt: str) -> bool: ...
 
 
 class AskUserPort(Protocol):
@@ -169,13 +167,11 @@ class AskUserPort(Protocol):
     interactive even in auto-approve (yolo) mode.
     """
 
-    async def ask(self, question: str) -> str:
-        ...
+    async def ask(self, question: str) -> str: ...
 
 
 class EventPublisherPort(Protocol):
-    async def emit(self, event: Any) -> None:
-        ...
+    async def emit(self, event: Any) -> None: ...
 
 
 class ShaperPort(Protocol):
@@ -188,8 +184,7 @@ class ShaperPort(Protocol):
     record. Shapers compose in order via ``ShaperPipeline``.
     """
 
-    def shape(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        ...
+    def shape(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]: ...
 
 
 class HookPort(Protocol):
@@ -202,8 +197,7 @@ class HookPort(Protocol):
     signature churn.
     """
 
-    async def fire(self, event_name: str, payload: dict[str, Any]) -> HookOutcome:
-        ...
+    async def fire(self, event_name: str, payload: dict[str, Any]) -> HookOutcome: ...
 
 
 class ToolPort(Protocol):
@@ -218,15 +212,13 @@ class ToolPort(Protocol):
     default_timeout: float | None
     disable_outer_timeout: bool
 
-    def to_openai_schema(self) -> dict[str, Any]:
-        ...
+    def to_openai_schema(self) -> dict[str, Any]: ...
 
     async def execute_with_runtime(
         self,
         params: dict[str, Any],
         runtime: "ToolRuntime",
-    ) -> "str | DeferredCall":
-        ...
+    ) -> "str | DeferredCall": ...
 
 
 class SkillStorePort(Protocol):
@@ -268,8 +260,7 @@ class SessionFactoryPort(Protocol):
         scheduler: SchedulerPort | None = None,
         task: str | None = None,
         context: str = "",
-    ) -> Any:
-        ...
+    ) -> Any: ...
 
     def create_lead_session(
         self,
@@ -311,8 +302,7 @@ class WorkflowSessionFactoryPort(Protocol):
         tool_choice: Any = None,
         thinking: bool | None = None,
         env: Any | None = None,
-    ) -> Any:
-        ...    # ``thinking`` None -> factory default; False -> force reasoning off.
+    ) -> Any: ...  # ``thinking`` None -> factory default; False -> force reasoning off.
 
     async def acquire_isolated_env(self, *, label: str | None = None) -> Any:
         """Hand out a workspace of this agent's own, for ``isolation=True``.
@@ -390,17 +380,19 @@ class SchedulerPort(Protocol):
         """Read-only roster: one dict per agent (aid, role, parent_aid, phase, busy)."""
         ...
 
+    async def adopt_effect(self, consumer_aid: int, effect_id: str) -> str:
+        """Adopt an accessible Effect's immutable workspace revision."""
+        ...
+
 
 class CompletionUsage(Protocol):
     """Token accounting attached to a completion."""
 
     @property
-    def input_tokens(self) -> int:
-        ...
+    def input_tokens(self) -> int: ...
 
     @property
-    def total_tokens(self) -> int:
-        ...
+    def total_tokens(self) -> int: ...
 
 
 class CompletionResponse(Protocol):
@@ -412,20 +404,16 @@ class CompletionResponse(Protocol):
     """
 
     @property
-    def content(self) -> str | None:
-        ...
+    def content(self) -> str | None: ...
 
     @property
-    def tool_calls(self) -> list[dict[str, Any]]:
-        ...
+    def tool_calls(self) -> list[dict[str, Any]]: ...
 
     @property
-    def usage(self) -> CompletionUsage:
-        ...
+    def usage(self) -> CompletionUsage: ...
 
     @property
-    def finish_reason(self) -> str | None:
-        ...
+    def finish_reason(self) -> str | None: ...
 
     @property
     def reasoning(self) -> str | None:
@@ -463,8 +451,7 @@ class LLMPort(Protocol):
         top_p: float | None = None,
         max_output_tokens: int | None = None,
         response_session_id: str | None = None,
-    ) -> CompletionResponse:
-        ...
+    ) -> CompletionResponse: ...
 
 
 class SessionStorePort(Protocol):
@@ -476,18 +463,15 @@ class SessionStorePort(Protocol):
         messages: list[dict[str, Any]],
         *,
         meta: dict[str, Any] | None = None,
-    ) -> None:
-        ...
+    ) -> None: ...
 
     def load_messages(
         self,
         path: str,
         system_prompt: str,
-    ) -> list[dict[str, Any]]:
-        ...
+    ) -> list[dict[str, Any]]: ...
 
-    def save_manifest(self, path: str, manifest: dict[str, Any]) -> None:
-        ...
+    def save_manifest(self, path: str, manifest: dict[str, Any]) -> None: ...
 
 
 @runtime_checkable
@@ -498,16 +482,14 @@ class SnapshotStorePort(Protocol):
         self,
         path: str,
         system_prompt: str,
-    ) -> dict[str, Any]:
-        ...
+    ) -> dict[str, Any]: ...
 
 
 @runtime_checkable
 class JournalSnapshotStorePort(Protocol):
     """Optional incremental autosave writer with atomic compaction."""
 
-    def has_snapshot(self, path: str) -> bool:
-        ...
+    def has_snapshot(self, path: str) -> bool: ...
 
     def append_snapshot_delta(
         self,
@@ -519,8 +501,7 @@ class JournalSnapshotStorePort(Protocol):
         meta: dict[str, Any],
         seen_result_hashes_reset: bool = False,
         seen_result_hashes_added: list[str] | None = None,
-    ) -> None:
-        ...
+    ) -> None: ...
 
     def checkpoint_snapshot(
         self,
@@ -529,8 +510,7 @@ class JournalSnapshotStorePort(Protocol):
         *,
         meta: dict[str, Any],
         sequence: int,
-    ) -> None:
-        ...
+    ) -> None: ...
 
 
 class TracePort(Protocol):
@@ -543,11 +523,9 @@ class TracePort(Protocol):
         payload: dict[str, Any],
         tokens: int = 0,
         latency: float = 0.0,
-    ) -> None:
-        ...
+    ) -> None: ...
 
-    def flush(self) -> None:
-        ...
+    def flush(self) -> None: ...
 
 
 # Callable that estimates a token cost for a messages list.
@@ -557,25 +535,24 @@ TokenEstimatorPort = Callable[[list[dict[str, Any]]], int]
 class WorktreePoolPort(Protocol):
     """Per-spawn worktree environment lifecycle."""
 
-    async def acquire(self, role: str) -> Any:
-        ...
+    async def acquire(
+        self,
+        role: str,
+        *,
+        parent_environment: EnvironmentPort | None = None,
+        parent_workspace_revision: "WorkspaceRevision | None" = None,
+    ) -> Any: ...
 
-    async def release(self) -> None:
-        ...
+    async def release(self) -> None: ...
 
-    async def release_env(self, env: EnvironmentPort) -> None:
-        ...
-
+    async def release_env(self, env: EnvironmentPort) -> None: ...
 
 
 class RollbackCheckpointStorePort(Protocol):
     """Optional persistence for encrypted rollback state."""
 
-    def save(self, run_id: str, state: Mapping[str, Any]) -> None:
-        ...
+    def save(self, run_id: str, state: Mapping[str, Any]) -> None: ...
 
-    def load(self, run_id: str) -> dict[str, Any] | None:
-        ...
+    def load(self, run_id: str) -> dict[str, Any] | None: ...
 
-    def delete(self, run_id: str) -> None:
-        ...
+    def delete(self, run_id: str) -> None: ...

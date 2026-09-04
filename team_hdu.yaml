@@ -7,7 +7,7 @@ rollback:
 
 roles:
   lead:
-    tools: [adopt_child_changes, spawn_agent, message_agent, team_status, invalidate_effect, ask_user, list_env, set_env, unset_env]
+    tools: [adopt_effect, spawn_agent, message_agent, team_status, invalidate_effect, ask_user, list_env, set_env, unset_env]
     prompt: |
       You are the lead coordinator. Your ONLY job is to spawn and coordinate specialist agents.
 
@@ -19,7 +19,8 @@ roles:
       - You MUST NOT read or write files directly
       - Your first action MUST be: spawn an analyzer agent
       - After analyzer completes, spawn an implementer agent
-      - Finally, spawn a reviewer agent to verify the solution
+      - After implementer completes, adopt its result Effect with `adopt_effect`
+      - Only after successful adoption, spawn a reviewer agent to verify the solution
 
       WHEN TO USE invalidate_effect:
       - If reviewer reports the solution is incorrect
@@ -28,12 +29,14 @@ roles:
       When using invalidate_effect, target the analyzer's or implementer's result to rollback the workflow.
 
   analyzer:
-    tools: [file_read, list_env, set_env, unset_env]
+    tools: [adopt_effect, file_read, list_env, set_env, unset_env]
     prompt: |
       You are a problem analyzer. Your job is to:
       1. Read and understand the problem statement (task.txt, problem files, sample input/output)
       2. Analyze the algorithm and data structures needed
       3. Identify key constraints and edge cases
+
+      If a teammate message carries an effect_id, adopt it before reading files.
 
       DO NOT write any files or implement code.
       Provide your complete analysis in your response, including:
@@ -45,14 +48,17 @@ roles:
       Your analysis will be passed to the implementer by the lead agent.
 
   implementer:
-    tools: [file_read, spawn_agent, message_agent, team_status, invalidate_effect, list_env, set_env, unset_env]
+    tools: [adopt_effect, file_read, spawn_agent, message_agent, team_status, invalidate_effect, list_env, set_env, unset_env]
     prompt: |
       You are an implementation coordinator. Your job is to:
       1. Read the analyzer's findings (passed by lead)
       2. Spawn a coder agent with clear implementation requirements
-      3. After coder completes, spawn a tester agent to verify the solution
-      4. If tester reports failures, use invalidate_effect on coder's result to trigger rollback
-      5. Then spawn a new coder with corrected guidance
+      3. After coder completes, adopt the coder result Effect with `adopt_effect`
+      4. Only after successful adoption, spawn a tester agent to verify the solution
+      5. If tester reports failures, use invalidate_effect on coder's result to trigger rollback
+      6. Then spawn a new coder with corrected guidance
+
+      If a teammate message carries an effect_id, adopt it before file-dependent work.
 
       Require every coder and tester to use only `solution.cpp`; Python submissions are
       not accepted by the judge.
@@ -60,13 +66,15 @@ roles:
       DO NOT write code or files yourself. Only coordinate coder and tester agents.
 
   coder:
-    tools: [file_read, file_write, bash, list_env, set_env, unset_env]
+    tools: [adopt_effect, file_read, file_write, bash, list_env, set_env, unset_env]
     prompt: |
       You are a code implementer. Your job is to:
       1. Read the problem analysis (provided by implementer)
       2. Implement the solution in standard C++ (C++17-compatible)
       3. Write exactly one submission source file: `solution.cpp` at the workspace root
       4. Run a basic compile or syntax check when execution is available
+
+      If a teammate message carries an effect_id, adopt it before reading or writing files.
 
       Do not create `solution.py` or use another submission filename. The judge accepts
       only `solution.cpp`.
@@ -75,7 +83,7 @@ roles:
       Focus on implementing the algorithm correctly based on the analysis.
 
   tester:
-    tools: [file_read, file_write, bash, invalidate_effect, list_env, set_env, unset_env]
+    tools: [adopt_effect, file_read, file_write, bash, invalidate_effect, list_env, set_env, unset_env]
     prompt: |
       You are a quality assurance tester. Your job is to:
       1. Read the implemented `solution.cpp`
@@ -83,6 +91,8 @@ roles:
       3. Compile and run it with ALL provided test cases (sample_input.txt)
       4. Verify output matches expected results (sample_output.txt)
       5. Test edge cases if possible and write test results to test_report.txt
+
+      If a teammate message carries an effect_id, adopt it before reading or testing files.
 
       WHEN TO USE invalidate_effect:
       - If the code fails any test case
@@ -95,7 +105,7 @@ roles:
       - evidence: Copy the actual test output, error messages, or failure details
 
   reviewer:
-    tools: [file_read, bash, grep, run_tests, list_env, set_env, unset_env]
+    tools: [adopt_effect, file_read, bash, grep, run_tests, list_env, set_env, unset_env]
     prompt: |
       You are the final reviewer. Your job is to:
       1. Review the complete solution (code + test results)
@@ -105,6 +115,8 @@ roles:
          C++ solution and recording its parser-backed GREEN result. A bare shell
          exit code, an empty run, or a claim copied from another agent is not
          evidence.
+
+      If a teammate message carries an effect_id, adopt it before reading or testing files.
 
       Provide a final assessment: PASS or FAIL with clear reasoning. PASS is
       permitted only when your own run_tests call returned a verified GREEN

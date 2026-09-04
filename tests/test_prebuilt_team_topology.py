@@ -58,9 +58,7 @@ CONFIG = {
 }
 # The team the handoff experiment runs: three peers, two of them carrying bash
 # so they can hand a commit to each other over git.
-HANDOFF_TEAM_FILE = (
-    Path(__file__).resolve().parents[1] / "configs" / "team.handoff.experiment.yaml"
-)
+HANDOFF_TEAM_FILE = Path(__file__).resolve().parents[1] / "configs" / "team.handoff.experiment.yaml"
 
 
 SCHEDULER_STANDIN = object()
@@ -117,9 +115,7 @@ def _prebuildable_default() -> TeamConfig:
     """
     team = default_team_config()
     roles = dict(team.roles)
-    roles["analyst"] = roles["analyst"].model_copy(
-        update={"tools": sorted({*ANALYST_TOOL_NAMES, "message_agent"})}
-    )
+    roles["analyst"] = roles["analyst"].model_copy(update={"tools": sorted({*ANALYST_TOOL_NAMES, "message_agent"})})
     return TeamConfig(roles=roles, topology=team.topology, entry=team.entry)
 
 
@@ -256,9 +252,7 @@ async def test_a_prebuilt_peer_is_a_child_of_the_init_process_with_no_join_route
 
 async def test_each_prebuilt_teammate_gets_its_own_worktree(tmp_path):
     workspace = _repo(tmp_path / "repo")
-    scheduler, tracer = _scheduler(
-        tmp_path, prebuild_team=True, use_worktrees=True, workspace=workspace
-    )
+    scheduler, tracer = _scheduler(tmp_path, prebuild_team=True, use_worktrees=True, workspace=workspace)
     try:
         await scheduler.ensure_team_prebuilt()
         spaces = {aid: scheduler._sessions[aid].env.workspace for aid in sorted(scheduler._sessions)}
@@ -303,16 +297,10 @@ async def test_a_five_role_team_seats_and_every_seat_gets_the_same_cap(tmp_path)
     names = ("lead", "a", "b", "c", "d")
     team.write_text(
         "entry: lead\n"
-        "roles:\n"
-        + "".join(
-            f"  {name}:\n    prompt: work as the {name}\n    tools: [file_read]\n"
-            for name in names
-        ),
+        "roles:\n" + "".join(f"  {name}:\n    prompt: work as the {name}\n    tools: [file_read]\n" for name in names),
         encoding="utf-8",
     )
-    scheduler, tracer = _scheduler(
-        tmp_path, prebuild_team=True, team_config_path=str(team)
-    )
+    scheduler, tracer = _scheduler(tmp_path, prebuild_team=True, team_config_path=str(team))
     try:
         assert await scheduler.ensure_team_prebuilt() == (1, 2, 3, 4)
         assert sorted(scheduler._sessions) == [0, 1, 2, 3, 4]
@@ -323,9 +311,7 @@ async def test_a_five_role_team_seats_and_every_seat_gets_the_same_cap(tmp_path)
         assert cap == int(total * PER_AGENT_BUDGET_SHARE / len(names))
         assert scheduler._per_agent_cap() == cap
         # One cap for the whole team — agent 0 has no larger allowance.
-        assert [
-            scheduler._sessions[aid].max_budget_tokens for aid in sorted(scheduler._sessions)
-        ] == [cap] * len(names)
+        assert [scheduler._sessions[aid].max_budget_tokens for aid in sorted(scheduler._sessions)] == [cap] * len(names)
         # Seating five agents committed nothing: the pool is shared, so an agent
         # that has not spent freezes nothing for the ones that have.
         assert scheduler.allocated_tokens == 0
@@ -386,9 +372,7 @@ async def test_a_refused_spawn_records_who_wanted_which_role_and_whether_it_exis
         tool, runtime = _spawn_tool(scheduler)
         # One role the team was never given, and one it already has. Both are
         # refused, and the record has to tell them apart.
-        await tool.execute_with_runtime(
-            {"role": "reviewer", "task": "check the patch", "context": "abc"}, runtime
-        )
+        await tool.execute_with_runtime({"role": "reviewer", "task": "check the patch", "context": "abc"}, runtime)
         await tool.execute_with_runtime({"role": "coder", "task": "implement it"}, runtime)
         tracer.flush()
     finally:
@@ -462,9 +446,11 @@ async def test_the_recorded_edges_are_the_team_config_edges(tmp_path):
 
     declared = default_team_config().topology
     expected = sorted(
-        ({"from_role": source, "to_role": destination}
-         for source, destinations in declared.edges.items()
-         for destination in destinations),
+        (
+            {"from_role": source, "to_role": destination}
+            for source, destinations in declared.edges.items()
+            for destination in destinations
+        ),
         key=lambda edge: (edge["from_role"], edge["to_role"]),
     )
     assert _payloads(tracer.path, "assigned.topology_edges") == [
@@ -485,9 +471,7 @@ async def test_the_recorded_nodes_are_the_agents_that_were_actually_seated(tmp_p
     scheduler, tracer = _scheduler(tmp_path, prebuild_team=True)
     try:
         await scheduler.ensure_team_prebuilt()
-        workspaces = {
-            aid: scheduler._sessions[aid].env.workspace for aid in sorted(scheduler._sessions)
-        }
+        workspaces = {aid: scheduler._sessions[aid].env.workspace for aid in sorted(scheduler._sessions)}
         tracer.flush()
     finally:
         tracer.close()
@@ -506,6 +490,7 @@ async def test_the_recorded_nodes_are_the_agents_that_were_actually_seated(tmp_p
             # makes: without it the Analyst's two edges are unwalkable and the
             # team is refused before it is seated.
             "tools": [
+                "adopt_effect",
                 "file_read",
                 "grep",
                 "list_env",
@@ -625,9 +610,7 @@ async def test_a_child_the_model_spawns_is_not_a_seat_and_keeps_the_hard_default
     )
     env = LocalEnvironment(str(workspace))
     # A stand-in scheduler: the coordination tools only store the reference.
-    ad_hoc = factory.build_spawn_session(
-        role="coder", env=env, budget=10_000, aid=1, scheduler=SCHEDULER_STANDIN
-    )
+    ad_hoc = factory.build_spawn_session(role="coder", env=env, budget=10_000, aid=1, scheduler=SCHEDULER_STANDIN)
     assert _bash(ad_hoc).require_process_isolation is True
 
     seated = DefaultSessionFactory(
@@ -636,9 +619,7 @@ async def test_a_child_the_model_spawns_is_not_a_seat_and_keeps_the_hard_default
         lead_workspace=str(workspace),
         interactive=True,
         prebuilt_roster=True,
-    ).build_spawn_session(
-        role="coder", env=env, budget=10_000, aid=1, scheduler=SCHEDULER_STANDIN
-    )
+    ).build_spawn_session(role="coder", env=env, budget=10_000, aid=1, scheduler=SCHEDULER_STANDIN)
     assert _bash(seated).require_process_isolation is False
 
 
@@ -801,8 +782,7 @@ async def test_every_seat_gets_the_same_step_ceiling(tmp_path):
     try:
         await scheduler.ensure_team_prebuilt()
         ceilings = {
-            scb.agent.name: scheduler._sessions[aid].max_steps
-            for aid, scb in sorted(scheduler.table.entries.items())
+            scb.agent.name: scheduler._sessions[aid].max_steps for aid, scb in sorted(scheduler.table.entries.items())
         }
     finally:
         tracer.close()
@@ -821,16 +801,12 @@ async def test_the_default_ceiling_is_one_number_not_a_privilege(tmp_path):
     )
     try:
         await scheduler.ensure_team_prebuilt()
-        ceilings = {
-            scheduler._sessions[aid].max_steps
-            for aid in scheduler.table.entries
-        }
+        ceilings = {scheduler._sessions[aid].max_steps for aid in scheduler.table.entries}
     finally:
         tracer.close()
         await scheduler.cleanup()
 
     assert ceilings == {SESSION_MAX_STEPS}
-
 
 
 async def test_a_run_records_whether_its_turns_were_serialized(tmp_path):
@@ -844,9 +820,7 @@ async def test_a_run_records_whether_its_turns_were_serialized(tmp_path):
     on_dir.mkdir()
     off_dir = tmp_path / "off"
     off_dir.mkdir()
-    serialized, serialized_tracer = _scheduler(
-        on_dir, prebuild_team=True, serialize_turns=True
-    )
+    serialized, serialized_tracer = _scheduler(on_dir, prebuild_team=True, serialize_turns=True)
     try:
         await serialized.ensure_team_prebuilt()
         serialized_tracer.flush()
@@ -874,9 +848,7 @@ async def test_serializing_turns_does_not_narrow_who_may_address_whom(tmp_path):
     Whether the models hand work to each other has to stay their decision, so
     the declared edges must come out identical under either setting.
     """
-    scheduler, tracer = _scheduler(
-        tmp_path, prebuild_team=True, serialize_turns=True
-    )
+    scheduler, tracer = _scheduler(tmp_path, prebuild_team=True, serialize_turns=True)
     try:
         await scheduler.ensure_team_prebuilt()
         tracer.flush()

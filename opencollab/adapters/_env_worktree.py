@@ -22,7 +22,13 @@ from opencollab.adapters.git_worktree_evidence import (
 )
 from opencollab.application.async_timeout import await_owned_operation
 from opencollab.application.exception_notes import add_exception_note
-from opencollab.domain.rollback import CheckpointBoundary, RestoreResult, ScopeCheckpoint
+from opencollab.domain.rollback import (
+    AdoptionResult,
+    CheckpointBoundary,
+    RestoreResult,
+    ScopeCheckpoint,
+    WorkspaceRevision,
+)
 
 WORKTREE_GIT_TIMEOUT_SECONDS = 30.0
 _PORCELAIN_STATUS_CHARS = frozenset(" MADRCU?!")
@@ -59,6 +65,7 @@ class WorktreeEnvironment(Environment):
         *,
         require_git: bool = False,
         _scope: _ScopeState | None = None,
+        base_revision: str | None = None,
     ) -> None:
         super().__init__(_scope=_scope)
         self._source = os.path.realpath(os.path.abspath(source_workspace))
@@ -66,9 +73,7 @@ class WorktreeEnvironment(Environment):
             raise NotADirectoryError(self._source)
         self.source_workspace = self._source
         self.host_workspace = None
-        self._branch = validate_worktree_branch(
-            branch_name or f"opencollab-wt-{uuid.uuid4().hex[:12]}"
-        )
+        self._branch = validate_worktree_branch(branch_name or f"opencollab-wt-{uuid.uuid4().hex[:12]}")
         self._worktree_dir: str | None = None
         self._copy_baseline_dir: str | None = None
         self._copy_exported_diff: str | None = None
@@ -76,6 +81,7 @@ class WorktreeEnvironment(Environment):
         self._base_commit: str | None = None
         self._git_mode = False
         self._require_git = require_git
+        self._requested_base_revision = base_revision
         self._branch_owned = False
         self._owned_branch_oid: str | None = None
         self._worktree_registered = False
@@ -124,11 +130,7 @@ class WorktreeEnvironment(Environment):
             raise RuntimeError("rollback-enabled Agent requires a Git repository")
         if self._git_mode:
             top_level = await self._git("rev-parse", "--show-toplevel")
-            if (
-                top_level.returncode != 0
-                or top_level.stdout_truncated
-                or top_level.stderr_truncated
-            ):
+            if top_level.returncode != 0 or top_level.stdout_truncated or top_level.stderr_truncated:
                 raise RuntimeError("cannot resolve Git repository root")
             repository_root = os.path.realpath(top_level.stdout.strip())
             self._repository_root = repository_root
@@ -146,10 +148,7 @@ class WorktreeEnvironment(Environment):
             else:
                 await self._setup_directory_copy()
             assert self._worktree_dir is not None
-            exposed_workspace = os.path.join(
-                self._worktree_dir,
-                self._source_subdir,
-            )
+            exposed_workspace = os.path.normpath(os.path.join(self._worktree_dir, self._source_subdir))
             if not os.path.isdir(exposed_workspace):
                 raise RuntimeError("source subdirectory is absent from the worktree")
         except BaseException as original:
@@ -167,9 +166,7 @@ class WorktreeEnvironment(Environment):
                 raise original
             except BaseException as cleanup_error:
                 add_exception_note(
-                    original,
-                    "worktree setup cleanup failed: "
-                    f"{type(cleanup_error).__name__}: {cleanup_error}"
+                    original, f"worktree setup cleanup failed: {type(cleanup_error).__name__}: {cleanup_error}"
                 )
             raise
         self.workspace = exposed_workspace
@@ -186,17 +183,10 @@ class WorktreeEnvironment(Environment):
             "-z",
             "--untracked-files=all",
         )
-        if (
-            status.returncode != 0
-            or status.stdout_truncated
-            or status.stderr_truncated
-        ):
+        if status.returncode != 0 or status.stdout_truncated or status.stderr_truncated:
             raise RuntimeError("cannot verify that the source workspace is clean")
         if status.stdout:
-            raise RuntimeError(
-                "source workspace has uncommitted changes: "
-                f"{_dirty_path_preview(status.stdout)}"
-            )
+            raise RuntimeError(f"source workspace has uncommitted changes: {_dirty_path_preview(status.stdout)}")
         branch_probe = await self._git(
             "show-ref",
             "--verify",
@@ -210,7 +200,11 @@ class WorktreeEnvironment(Environment):
         base = await self._git("rev-parse", "--verify", "HEAD^{commit}")
         if base.returncode != 0 or base.stdout_truncated or base.stderr_truncated:
             raise RuntimeError("cannot resolve worktree base commit")
-        self._base_commit = base.stdout.strip()
+        self._base_commit = self._requested_base_revision or base.stdout.strip()
+        if self._requested_base_revision:
+            check = await self._git("cat-file", "-e", f"{self._base_commit}^{{commit}}")
+            if check.returncode != 0:
+                raise RuntimeError("requested parent workspace revision is unavailable")
         claimed = await self._git(
             "update-ref",
             f"refs/heads/{self._branch}",
@@ -272,11 +266,7 @@ class WorktreeEnvironment(Environment):
         )
         if configured.returncode == 1:
             return []
-        if (
-            configured.returncode != 0
-            or configured.stdout_truncated
-            or configured.stderr_truncated
-        ):
+        if configured.returncode != 0 or configured.stdout_truncated or configured.stderr_truncated:
             raise RuntimeError("cannot inspect Git submodule configuration")
 
         submodules: list[tuple[str, str, str]] = []
@@ -291,28 +281,19 @@ class WorktreeEnvironment(Environment):
                 raise RuntimeError("invalid Git submodule path configuration")
             name = key[len(prefix) : -len(suffix)]
             normalized_path = configured_path.replace("\\", "/").strip("/")
-            if (
-                not normalized_path
-                or normalized_path == ".."
-                or normalized_path.startswith("../")
-            ):
+            if not normalized_path or normalized_path == ".." or normalized_path.startswith("../"):
                 raise RuntimeError("invalid Git submodule path configuration")
             if source_prefix and not (
-                normalized_path == source_prefix
-                or normalized_path.startswith(f"{source_prefix}/")
+                normalized_path == source_prefix or normalized_path.startswith(f"{source_prefix}/")
             ):
                 continue
-            source_module = os.path.realpath(
-                os.path.join(source_repository, *normalized_path.split("/"))
-            )
+            source_module = os.path.realpath(os.path.join(source_repository, *normalized_path.split("/")))
             try:
                 contained = os.path.commonpath((source_repository, source_module))
             except ValueError:
                 contained = ""
             if contained != source_repository or not os.path.isdir(source_module):
-                raise RuntimeError(
-                    f"Git submodule is not initialized in source workspace: {configured_path}"
-                )
+                raise RuntimeError(f"Git submodule is not initialized in source workspace: {configured_path}")
             available = await self._git_in(
                 source_module,
                 "rev-parse",
@@ -324,9 +305,7 @@ class WorktreeEnvironment(Environment):
                 or available.stderr_truncated
                 or os.path.realpath(available.stdout.strip()) != source_module
             ):
-                raise RuntimeError(
-                    f"Git submodule is not initialized in source workspace: {configured_path}"
-                )
+                raise RuntimeError(f"Git submodule is not initialized in source workspace: {configured_path}")
             submodules.append((name, normalized_path, source_module))
         return submodules
 
@@ -363,16 +342,9 @@ class WorktreeEnvironment(Environment):
                     "--",
                     normalized_path,
                 )
-                if (
-                    updated.returncode != 0
-                    or updated.stdout_truncated
-                    or updated.stderr_truncated
-                ):
+                if updated.returncode != 0 or updated.stdout_truncated or updated.stderr_truncated:
                     detail = updated.stderr.strip() or "submodule checkout failed"
-                    raise RuntimeError(
-                        "cannot initialize source-available submodule "
-                        f"{normalized_path}: {detail}"
-                    )
+                    raise RuntimeError(f"cannot initialize source-available submodule {normalized_path}: {detail}")
                 target_module = os.path.realpath(
                     os.path.join(
                         target_repository,
@@ -499,9 +471,7 @@ class WorktreeEnvironment(Environment):
         if head.returncode != 0 or head.stdout_truncated or head.stderr_truncated:
             return
         self._head_commit = head.stdout.strip() or None
-        listed = await self._git_in(
-            worktree, "rev-list", f"{base_revision}..HEAD"
-        )
+        listed = await self._git_in(worktree, "rev-list", f"{base_revision}..HEAD")
         if listed.returncode != 0 or listed.stdout_truncated or listed.stderr_truncated:
             return
         self._own_commits, self._own_commit_count = parse_own_commits(listed.stdout)
@@ -566,19 +536,12 @@ class WorktreeEnvironment(Environment):
         self._diff_base = base_revision
         await self._resolve_own_commits(base_revision)
         self._git_diff_delivery_pending = True
-        result = await self._local_env.exec_cmd(
-            guarded_staged_diff_command(base_revision=base_revision)
-        )
+        result = await self._local_env.exec_cmd(guarded_staged_diff_command(base_revision=base_revision))
         if result.stdout_truncated or result.stderr_truncated:
-            raise RuntimeError(
-                f"worktree diff exceeded capture limit; worktree retained at {self.workspace}"
-            )
+            raise RuntimeError(f"worktree diff exceeded capture limit; worktree retained at {self.workspace}")
         if result.returncode != 0:
             detail = result.stderr.strip() or f"git exited with status {result.returncode}"
-            raise RuntimeError(
-                f"worktree diff extraction failed: {detail}; "
-                f"worktree retained at {self.workspace}"
-            )
+            raise RuntimeError(f"worktree diff extraction failed: {detail}; worktree retained at {self.workspace}")
         self._git_diff_delivery_pending = False
         return result.stdout
 
@@ -597,8 +560,7 @@ class WorktreeEnvironment(Environment):
             detail = result.stderr.strip() or f"git exited with status {result.returncode}"
             raise RuntimeError(f"non-Git worktree diff extraction failed: {detail}")
         return (
-            result.stdout
-            .replace(f"a{self._copy_baseline_dir}/", "a/")
+            result.stdout.replace(f"a{self._copy_baseline_dir}/", "a/")
             .replace(f"a{self._worktree_dir}/", "a/")
             .replace(f"b{self._copy_baseline_dir}/", "b/")
             .replace(f"b{self._worktree_dir}/", "b/")
@@ -610,8 +572,7 @@ class WorktreeEnvironment(Environment):
         current = await self._directory_copy_diff()
         if current != (self._copy_exported_diff or ""):
             raise RuntimeError(
-                "refusing to clean unexported non-Git worktree changes; "
-                "call get_diff() and deliver its artifact first"
+                "refusing to clean unexported non-Git worktree changes; call get_diff() and deliver its artifact first"
             )
 
     async def exec_cmd(self, cmd: str, timeout: float = 120.0) -> ExecResult:
@@ -638,6 +599,37 @@ class WorktreeEnvironment(Environment):
             owner_aid=owner_aid,
             causal_frontier=causal_frontier,
         )
+
+    async def capture_workspace_revision(self, reference_id: str, *, owner_aid: int) -> WorkspaceRevision:
+        self._ensure_active()
+        if self._local_env is None:
+            await self.setup()
+        if not self._git_mode or self._scope_checkpoints is None:
+            raise RuntimeError("workspace Effects require an isolated Git worktree")
+        if self._base_commit is None:
+            raise RuntimeError("workspace Effect base revision is unavailable")
+        return await self._scope_checkpoints.capture_revision(
+            reference_id,
+            owner_aid=owner_aid,
+            base_revision=self._base_commit,
+        )
+
+    async def current_workspace_revision(self) -> str:
+        self._ensure_active()
+        if self._local_env is None:
+            await self.setup()
+        result = await self._git_in(self.workspace, "rev-parse", "HEAD")
+        if result.returncode != 0:
+            raise RuntimeError("cannot resolve current workspace revision")
+        return result.stdout.strip()
+
+    async def adopt_workspace_revision(self, revision: WorkspaceRevision) -> AdoptionResult:
+        self._ensure_active()
+        if self._local_env is None:
+            await self.setup()
+        if not self._git_mode or self._scope_checkpoints is None:
+            return AdoptionResult("failed", reason="Scope is not an isolated Git worktree")
+        return await self._scope_checkpoints.adopt_revision(revision)
 
     async def restore_scope(self, checkpoint: ScopeCheckpoint) -> RestoreResult:
         self._ensure_active()
@@ -772,8 +764,7 @@ class WorktreeEnvironment(Environment):
             await self._ensure_directory_copy_changes_exported()
             if self._git_mode and self._git_diff_delivery_pending:
                 raise RuntimeError(
-                    "refusing to clean undelivered Git worktree changes; "
-                    f"worktree retained at {self.workspace}"
+                    f"refusing to clean undelivered Git worktree changes; worktree retained at {self.workspace}"
                 )
             self.revoke()
             await await_owned_operation(
@@ -786,13 +777,13 @@ class WorktreeEnvironment(Environment):
             await self._ensure_directory_copy_changes_exported()
             if self._git_mode and self._git_diff_delivery_pending:
                 raise RuntimeError(
-                    "refusing to clean undelivered Git worktree changes; "
-                    f"worktree retained at {self.workspace}"
+                    f"refusing to clean undelivered Git worktree changes; worktree retained at {self.workspace}"
                 )
             self.revoke()
             await await_owned_operation(
                 self._cleanup_resources(),
                 propagate_cancellation=True,
             )
+
 
 __all__ = ["WorktreeEnvironment"]

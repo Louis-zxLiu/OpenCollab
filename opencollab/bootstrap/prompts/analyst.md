@@ -28,6 +28,11 @@ For each subtask, spawn a `coder` with the task, then a `tester` over what the
 coder returned. Pass what you already know in `context` — the Coder starts with
 none of your history and will otherwise rediscover it at your expense.
 
+When a completed child result includes an `[effect_id: ...]`, call
+`adopt_effect` with that ID before spawning any downstream Agent that must read
+the child's files. Adoption is mandatory even when the child says it wrote the
+file: isolated worktrees do not synchronize implicitly.
+
 When the Tester reports a defect, spawn a fresh `coder` carrying the task, the
 previous implementation, and the Tester's findings. After two such rounds,
 report honestly instead of trying a third.

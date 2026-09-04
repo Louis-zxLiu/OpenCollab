@@ -21,6 +21,7 @@ from opencollab.adapters.env import (
 from opencollab.application.async_timeout import await_owned_operation
 from opencollab.application.exception_notes import add_exception_note
 from opencollab.domain.identity import role_storage_slug, validate_role_identity
+from opencollab.domain.rollback import WorkspaceRevision
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +71,7 @@ class WorktreePool:
         role: str,
         *,
         parent_environment: Environment | None = None,
+        parent_workspace_revision: WorkspaceRevision | None = None,
     ) -> Environment:
         """Create (and remember) an isolated env for a spawned agent of this role."""
         role = validate_role_identity(role)
@@ -96,7 +98,12 @@ class WorktreePool:
             return env
 
         branch = f"opencollab-{role_storage_slug(role)}-{uuid.uuid4().hex[:8]}"
-        env = self._build_worktree(branch, base, scope=seed)
+        env = self._build_worktree(
+            branch,
+            base,
+            scope=seed,
+            base_revision=(parent_workspace_revision.revision if parent_workspace_revision is not None else None),
+        )
         try:
             await env.setup()
             if seed is not None:
@@ -115,8 +122,7 @@ class WorktreePool:
                 logger.warning("partial worktree cleanup failed", exc_info=True)
                 add_exception_note(
                     original,
-                    "partial worktree retained for cleanup retry: "
-                    f"{type(cleanup_exc).__name__}: {cleanup_exc}",
+                    f"partial worktree retained for cleanup retry: {type(cleanup_exc).__name__}: {cleanup_exc}",
                 )
             raise original
         self._envs.append(env)
@@ -128,6 +134,7 @@ class WorktreePool:
         base: Environment | None,
         *,
         scope: _ScopeState | None = None,
+        base_revision: str | None = None,
     ) -> Environment:
         """An isolated view of wherever the run's repository actually is."""
         if base is None:
@@ -136,6 +143,7 @@ class WorktreePool:
                 branch_name=branch,
                 require_git=self._rollback_enabled,
                 _scope=scope,
+                base_revision=base_revision,
             )
         if isinstance(base, DockerEnvironment) and base.container_reference is not None:
             return ContainerWorktreeEnvironment(
@@ -145,6 +153,7 @@ class WorktreePool:
                 branch_name=branch,
                 command_prefix=base.command_prefix,
                 _scope=scope,
+                base_revision=base_revision,
             )
         if getattr(base, "local_filesystem", False):
             return WorktreeEnvironment(
@@ -152,11 +161,9 @@ class WorktreePool:
                 branch_name=branch,
                 require_git=self._rollback_enabled,
                 _scope=scope,
+                base_revision=base_revision,
             )
-        raise TypeError(
-            "worktree isolation is not available for this environment: "
-            f"{type(base).__name__}"
-        )
+        raise TypeError(f"worktree isolation is not available for this environment: {type(base).__name__}")
 
     def track(self, env: Environment) -> None:
         """Track a lazily initialized environment (used for the Lead Scope)."""
@@ -186,10 +193,7 @@ class WorktreePool:
             else:
                 self._envs.remove(env)
         if failures:
-            raise OSError(
-                "environment pool cleanup failed; retry state retained: "
-                + "; ".join(failures)
-            )
+            raise OSError("environment pool cleanup failed; retry state retained: " + "; ".join(failures))
 
     async def release_env(self, env: Environment) -> None:
         """Release one failed spawn's environment without touching siblings."""
@@ -198,9 +202,7 @@ class WorktreePool:
         try:
             await _finish_cleanup(env.cleanup())
         except BaseException:
-            logger.warning(
-                "environment cleanup failed for %s", env.workspace, exc_info=True
-            )
+            logger.warning("environment cleanup failed for %s", env.workspace, exc_info=True)
             raise
         self._envs.remove(env)
 

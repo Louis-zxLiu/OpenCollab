@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import posixpath
+import shlex
 import uuid
 from collections.abc import Callable
 
@@ -17,7 +18,13 @@ from opencollab.adapters.git_worktree_evidence import (
     select_diff_base,
     validate_worktree_branch,
 )
-from opencollab.domain.rollback import CheckpointBoundary, RestoreResult, ScopeCheckpoint
+from opencollab.domain.rollback import (
+    AdoptionResult,
+    CheckpointBoundary,
+    RestoreResult,
+    ScopeCheckpoint,
+    WorkspaceRevision,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -65,10 +72,9 @@ class ContainerWorktreeEnvironment(DockerEnvironment):
         command_prefix: Callable[[str], str] | str | None = None,
         timeout_returncode: int = -1,
         _scope: _ScopeState | None = None,
+        base_revision: str | None = None,
     ) -> None:
-        branch = validate_worktree_branch(
-            branch_name or f"opencollab-wt-{uuid.uuid4().hex[:12]}"
-        )
+        branch = validate_worktree_branch(branch_name or f"opencollab-wt-{uuid.uuid4().hex[:12]}")
         repository_root = _absolute_container_path(repository_root, "repository root")
         worktree_root = _absolute_container_path(worktree_root, "worktree root")
         worktree_dir = posixpath.join(worktree_root, branch)
@@ -88,11 +94,13 @@ class ContainerWorktreeEnvironment(DockerEnvironment):
         self._branch_owned = False
         self._worktree_registered = False
         self._base_commit: str | None = None
+        self._requested_base_revision = base_revision
         self._diff_base: str | None = None
         self._head_commit: str | None = None
         self._own_commits: tuple[str, ...] = ()
         self._own_commit_count: int | None = None
         self._scope_checkpoints: dict[str, ScopeCheckpoint] = {}
+        self._effect_refs: set[str] = set()
         self._checkpoint_sequence = 0
         self.bind_workspace(worktree_dir)
 
@@ -132,9 +140,9 @@ class ContainerWorktreeEnvironment(DockerEnvironment):
             "commit=$(printf '%s\\n' 'OpenCollab checkpoint' | "
             "GIT_AUTHOR_NAME='OpenCollab Checkpoint' GIT_AUTHOR_EMAIL='checkpoint@opencollab.invalid' "
             "GIT_COMMITTER_NAME='OpenCollab Checkpoint' GIT_COMMITTER_EMAIL='checkpoint@opencollab.invalid' "
-            "git commit-tree \"$tree\" -p HEAD); "
+            'git commit-tree "$tree" -p HEAD); '
             f"git update-ref refs/opencollab/checkpoints/{owner_aid}/{checkpoint_id} "
-            "\"$commit\"; printf '%s' \"$commit\""
+            '"$commit"; printf \'%s\' "$commit"'
         )
         result = await self._exec(script, timeout=CONTAINER_GIT_TIMEOUT_SECONDS)
         if result.returncode != 0:
@@ -153,6 +161,74 @@ class ContainerWorktreeEnvironment(DockerEnvironment):
         self._scope_checkpoints[checkpoint_id] = checkpoint
         return checkpoint
 
+    async def capture_workspace_revision(self, reference_id: str, *, owner_aid: int) -> WorkspaceRevision:
+        """Freeze this container worktree as an immutable Effect revision."""
+        self._ensure_active()
+        if not self._worktree_registered:
+            await self.setup()
+        if self._base_commit is None:
+            raise RuntimeError("workspace Effect base revision is unavailable")
+        ref_name = f"refs/opencollab/effects/{owner_aid}/{reference_id}"
+        script = (
+            "set -eu; idx=$(mktemp); trap 'rm -f \"$idx\"' EXIT; "
+            "GIT_INDEX_FILE=$idx git read-tree HEAD; "
+            "GIT_INDEX_FILE=$idx git add -A; tree=$(GIT_INDEX_FILE=$idx git write-tree); "
+            "commit=$(printf '%s\\n' "
+            f"{shlex.quote(f'OpenCollab effect {reference_id}')}"
+            " | GIT_AUTHOR_NAME='OpenCollab Effect' "
+            "GIT_AUTHOR_EMAIL='effect@opencollab.invalid' "
+            "GIT_COMMITTER_NAME='OpenCollab Effect' "
+            "GIT_COMMITTER_EMAIL='effect@opencollab.invalid' "
+            f'git commit-tree "$tree" -p {shlex.quote(self._base_commit)}); '
+            f'git update-ref {shlex.quote(ref_name)} "$commit"; printf \'%s\' "$commit"'
+        )
+        result = await self._exec(script, timeout=CONTAINER_GIT_TIMEOUT_SECONDS)
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr or "container Effect capture failed")
+        self._effect_refs.add(ref_name)
+        effect_tree = await self._git(self._worktree_dir, "rev-parse", f"{result.stdout.strip()}^{{tree}}")
+        base_tree = await self._git(self._worktree_dir, "rev-parse", f"{self._base_commit}^{{tree}}")
+        if effect_tree.returncode != 0 or base_tree.returncode != 0:
+            raise RuntimeError("cannot compare container workspace revision")
+        return WorkspaceRevision(
+            result.stdout.strip(),
+            self._base_commit,
+            effect_tree.stdout.strip() != base_tree.stdout.strip(),
+        )
+
+    async def adopt_workspace_revision(self, revision: WorkspaceRevision) -> AdoptionResult:
+        """Cherry-pick a frozen revision into this clean container worktree."""
+        self._ensure_active()
+        if not self._worktree_registered:
+            await self.setup()
+        if not revision.changed:
+            return AdoptionResult("skipped", revision=revision.revision)
+        valid = await self._git(self._worktree_dir, "cat-file", "-e", f"{revision.revision}^{{commit}}")
+        if valid.returncode != 0:
+            return AdoptionResult("failed", reason="workspace revision is unavailable")
+        parent = await self._git(self._worktree_dir, "rev-parse", f"{revision.revision}^")
+        if parent.returncode != 0 or parent.stdout.strip() != revision.base_revision:
+            return AdoptionResult("failed", reason="workspace revision base mismatch")
+        status = await self._git(self._worktree_dir, "status", "--porcelain", "--untracked-files=all")
+        if status.returncode != 0:
+            return AdoptionResult("failed", reason="cannot inspect container Scope")
+        if status.stdout:
+            return AdoptionResult("conflict", reason="Scope is not clean")
+        picked = await self._git(
+            self._worktree_dir,
+            "-c",
+            "user.name=OpenCollab Effect",
+            "-c",
+            "user.email=effect@opencollab.invalid",
+            "cherry-pick",
+            "-x",
+            revision.revision,
+        )
+        if picked.returncode != 0:
+            await self._git(self._worktree_dir, "cherry-pick", "--abort")
+            return AdoptionResult("failed", reason=(picked.stderr or "cherry-pick failed")[:500])
+        return AdoptionResult("adopted", revision=revision.revision)
+
     async def restore_scope(self, checkpoint: ScopeCheckpoint) -> RestoreResult:
         if self._scope_checkpoints.get(checkpoint.checkpoint_id) != checkpoint:
             return RestoreResult(
@@ -161,10 +237,7 @@ class ContainerWorktreeEnvironment(DockerEnvironment):
                 "failed",
                 reason="checkpoint ownership mismatch",
             )
-        script = (
-            "set -eu; git read-tree --reset -u "
-            f"{checkpoint.filesystem_revision}; git clean -fd"
-        )
+        script = f"set -eu; git read-tree --reset -u {checkpoint.filesystem_revision}; git clean -fd"
         result = await self._exec(script, timeout=CONTAINER_GIT_TIMEOUT_SECONDS)
         if result.returncode != 0:
             return RestoreResult(checkpoint.owner_aid, checkpoint.checkpoint_id, "failed", reason=result.stderr[:500])
@@ -172,12 +245,22 @@ class ContainerWorktreeEnvironment(DockerEnvironment):
         return RestoreResult(checkpoint.owner_aid, checkpoint.checkpoint_id, "restored")
 
     async def discard_scope_checkpoints(self) -> None:
-        for checkpoint in tuple(self._scope_checkpoints.values()):
-            await self._exec(
-                f"git update-ref -d refs/opencollab/checkpoints/{checkpoint.owner_aid}/{checkpoint.checkpoint_id}",
-                timeout=CONTAINER_GIT_TIMEOUT_SECONDS,
-            )
-        self._scope_checkpoints.clear()
+        failures: list[str] = []
+        for checkpoint_id, checkpoint in tuple(self._scope_checkpoints.items()):
+            ref = f"refs/opencollab/checkpoints/{checkpoint.owner_aid}/{checkpoint_id}"
+            result = await self._git(self._repository_root, "update-ref", "-d", ref)
+            if result.returncode == 0:
+                self._scope_checkpoints.pop(checkpoint_id, None)
+            else:
+                failures.append(result.stderr.strip() or ref)
+        for ref in tuple(self._effect_refs):
+            result = await self._git(self._repository_root, "update-ref", "-d", ref)
+            if result.returncode == 0:
+                self._effect_refs.discard(ref)
+            else:
+                failures.append(result.stderr.strip() or ref)
+        if failures:
+            raise RuntimeError("failed to discard container Scope refs: " + "; ".join(failures))
 
     async def _git(self, workdir: str, *args: str) -> ExecResult:
         """Run one Git command in the container, outside the agent's shell.
@@ -207,7 +290,8 @@ class ContainerWorktreeEnvironment(DockerEnvironment):
     async def setup(self, mount_dir: str | None = None) -> str:
         await super().setup(mount_dir)
         self._ensure_active()
-        await self._create_worktree()
+        if not self._worktree_registered:
+            await self._create_worktree()
         return self._worktree_dir
 
     async def _create_worktree(self) -> None:
@@ -226,7 +310,16 @@ class ContainerWorktreeEnvironment(DockerEnvironment):
         base = await self._git(self._repository_root, "rev-parse", "--verify", "HEAD^{commit}")
         if base.returncode != 0 or base.stdout_truncated:
             raise RuntimeError("cannot resolve container worktree base commit")
-        self._base_commit = base.stdout.strip()
+        self._base_commit = self._requested_base_revision or base.stdout.strip()
+        if self._requested_base_revision:
+            available = await self._git(
+                self._repository_root,
+                "cat-file",
+                "-e",
+                f"{self._requested_base_revision}^{{commit}}",
+            )
+            if available.returncode != 0:
+                raise RuntimeError("requested parent workspace revision is unavailable")
         # The claimed ref is an ownership lease, not the worktree's HEAD: a
         # detached worktree keeps its own commits from moving that lease, so a
         # later external advance is observable and cannot be deleted by us.
@@ -238,9 +331,7 @@ class ContainerWorktreeEnvironment(DockerEnvironment):
             ABSENT_REF_OLD_VALUE,
         )
         if claimed.returncode != 0:
-            raise RuntimeError(
-                f"cannot atomically claim container worktree branch: {claimed.stderr.strip()}"
-            )
+            raise RuntimeError(f"cannot atomically claim container worktree branch: {claimed.stderr.strip()}")
         self._branch_owned = True
         added = await self._git(
             self._repository_root,
@@ -261,26 +352,19 @@ class ContainerWorktreeEnvironment(DockerEnvironment):
             raise RuntimeError("container worktree base commit is unavailable")
         self._diff_base = await self._resolve_diff_base()
         await self._resolve_own_commits(self._diff_base)
-        result = await self.exec_cmd(
-            guarded_staged_diff_command(base_revision=self._diff_base)
-        )
+        result = await self.exec_cmd(guarded_staged_diff_command(base_revision=self._diff_base))
         if result.stdout_truncated or result.stderr_truncated:
-            raise RuntimeError(
-                f"container worktree diff exceeded capture limit at {self._worktree_dir}"
-            )
+            raise RuntimeError(f"container worktree diff exceeded capture limit at {self._worktree_dir}")
         if result.returncode != 0:
             detail = result.stderr.strip() or f"git exited with status {result.returncode}"
             raise RuntimeError(
-                f"container worktree diff extraction failed: {detail}; "
-                f"worktree retained at {self._worktree_dir}"
+                f"container worktree diff extraction failed: {detail}; worktree retained at {self._worktree_dir}"
             )
         return result.stdout
 
     async def _resolve_diff_base(self) -> str:
         assert self._base_commit is not None
-        reflog = await self._git(
-            self._worktree_dir, "log", "-g", "--format=%H%x09%gs", "HEAD"
-        )
+        reflog = await self._git(self._worktree_dir, "log", "-g", "--format=%H%x09%gs", "HEAD")
         if reflog.returncode != 0 or reflog.stdout_truncated:
             return self._base_commit
         return select_diff_base(reflog.stdout, fallback=self._base_commit)
@@ -293,9 +377,7 @@ class ContainerWorktreeEnvironment(DockerEnvironment):
         if head.returncode != 0 or head.stdout_truncated:
             return
         self._head_commit = head.stdout.strip() or None
-        listed = await self._git(
-            self._worktree_dir, "rev-list", f"{base_revision}..HEAD"
-        )
+        listed = await self._git(self._worktree_dir, "rev-list", f"{base_revision}..HEAD")
         if listed.returncode != 0 or listed.stdout_truncated:
             return
         self._own_commits, self._own_commit_count = parse_own_commits(listed.stdout)
@@ -309,9 +391,11 @@ class ContainerWorktreeEnvironment(DockerEnvironment):
         turn a finished run into a failed one.
         """
         if self._worktree_registered:
-            removed = await self._git(
-                self._repository_root, "worktree", "remove", "--force", self._worktree_dir
-            )
+            try:
+                await self.discard_scope_checkpoints()
+            except Exception as exc:
+                logger.warning("container Scope refs were retained: %s", exc)
+            removed = await self._git(self._repository_root, "worktree", "remove", "--force", self._worktree_dir)
             if removed.returncode != 0:
                 logger.warning(
                     "container worktree not removed at %s: %s",
@@ -333,9 +417,7 @@ class ContainerWorktreeEnvironment(DockerEnvironment):
             if released.returncode == 0:
                 self._branch_owned = False
             else:
-                logger.warning(
-                    "container worktree branch lease retained: %s", released.stderr.strip()
-                )
+                logger.warning("container worktree branch lease retained: %s", released.stderr.strip())
         await super().cleanup()
 
 

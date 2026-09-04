@@ -70,9 +70,7 @@ class LifecycleMixin:
         session.apply_launch(launch)
         if self._lineage is not None and self._rollback_enabled:
             self._lineage.rebuild_from_messages(session.state.messages)
-            self._lineage.rebuild_from_snapshot(
-                set(session.state.rollback.quarantined_effects)
-            )
+            self._lineage.rebuild_from_snapshot(set(session.state.rollback.quarantined_effects))
         return self.register_lead(session)
 
     async def spawn(
@@ -122,32 +120,33 @@ class LifecycleMixin:
                 parent_driver is not None
                 and not parent_driver.done()
                 and parent_scb is not None
-                and (
-                    parent_driver is asyncio.current_task()
-                    or parent_scb.state.phase is SessionPhase.EXECUTING_TOOLS
-                )
+                and (parent_driver is asyncio.current_task() or parent_scb.state.phase is SessionPhase.EXECUTING_TOOLS)
             ):
                 parent_lease = self._release_turn_lease(parent_aid)
                 if parent_lease is not None:
                     self._track_review_parent_lease_release(parent_aid, 1)
             budget = self._reserve_child_budget(aid)
             if budget <= 0:
-                raise RuntimeError(
-                    "Cannot spawn agent: team token budget is fully allocated."
-                )
+                raise RuntimeError("Cannot spawn agent: team token budget is fully allocated.")
 
             # Build environment
             parent_session = self._sessions.get(parent_aid)
             parent_environment = getattr(parent_session, "env", None)
+            parent_workspace_revision = None
+            if self._rollback_enabled and parent_environment is not None:
+                capture = getattr(parent_environment, "capture_workspace_revision", None)
+                if callable(capture):
+                    parent_workspace_revision = await capture(f"spawn_{aid}", owner_aid=parent_aid)
             try:
                 env = await self._worktree_pool.acquire(
                     role,
                     parent_environment=parent_environment,
+                    parent_workspace_revision=parent_workspace_revision,
                 )
             except TypeError as exc:
                 # Keep third-party test/integration pools source-compatible;
                 # built-in WorktreePool always accepts and uses the seed.
-                if "parent_environment" not in str(exc):
+                if not {"parent_environment", "parent_workspace_revision"}.intersection(str(exc)):
                     raise
                 env = await self._worktree_pool.acquire(role)
             self._startup_envs[aid] = env
@@ -182,9 +181,7 @@ class LifecycleMixin:
                 self._startup_origin.pop(aid, None)
 
             # Emit spawn event
-            await self.emit_scheduler_event(
-                self._events.agent_spawned(aid, parent_aid, role, task)
-            )
+            await self.emit_scheduler_event(self._events.agent_spawned(aid, parent_aid, role, task))
             if self._shutting_down:
                 raise RuntimeError("Cannot spawn agent: scheduler is shutting down.")
 
@@ -254,9 +251,7 @@ class LifecycleMixin:
         except Exception as exc:
             logger.error("failed-spawn environment cleanup failed for aid %s: %s", aid, exc)
 
-    async def _fail_cancelled_origin(
-        self, parent_aid: int, tool_call_id: str, reason: str
-    ) -> None:
+    async def _fail_cancelled_origin(self, parent_aid: int, tool_call_id: str, reason: str) -> None:
         """Resolve a pre-driver cancellation when its pending row already exists."""
         parent = self.table.get(parent_aid)
         if parent is None or tool_call_id not in parent.state.pending_events.rows:
@@ -304,11 +299,8 @@ class LifecycleMixin:
         if callable(setter):
             setter(lambda aid=aid: self._sessions[aid].state.rollback.epoch)
         checkpoint_setter = getattr(runner, "set_checkpoint_callback", None)
-        if (
-            callable(checkpoint_setter)
-            and self._lineage is not None
-            and self._rollback_enabled
-        ):
+        if callable(checkpoint_setter) and self._lineage is not None and self._rollback_enabled:
+
             async def checkpoint(boundary: str, aid: int = aid) -> None:
                 env = getattr(self._sessions[aid], "env", None)
                 if env is None or not callable(getattr(env, "checkpoint_scope", None)):
@@ -319,6 +311,7 @@ class LifecycleMixin:
                     CheckpointBoundary(boundary),
                     self._sessions[aid].state.rollback.causal_frontier,
                 )
+
             checkpoint_setter(checkpoint)
         barrier = self._rollback_barriers.setdefault(aid, asyncio.Event())
         if aid not in self._rollback_pending:
@@ -400,40 +393,38 @@ class LifecycleMixin:
                 and not self._lineage.has_checkpoint(aid)
             ):
                 lead_env = getattr(session, "env", None)
-                if lead_env is not None and callable(getattr(lead_env, "checkpoint_scope", None)):
-                    # The lead worktree is intentionally lazy because scheduler
-                    # construction is synchronous.  Materialize it before the
-                    # first checkpoint/model call so its PWD, file tools, and
-                    # Git identity all refer to the same real worktree.
-                    setup = getattr(lead_env, "setup", None)
-                    if callable(setup):
-                        await setup()
-                    self._lineage.register_environment(aid, lead_env)
-                    await self._lineage.checkpoint(
-                        aid,
-                        CheckpointBoundary("scope_initialization"),
-                        session.state.rollback.causal_frontier,
-                    )
+                required = (
+                    "checkpoint_scope",
+                    "restore_scope",
+                    "capture_workspace_revision",
+                    "adopt_workspace_revision",
+                )
+                if lead_env is None or any(not callable(getattr(lead_env, name, None)) for name in required):
+                    raise RuntimeError("rollback-enabled Lead has no checkpointable revision-capable isolated Scope")
+                # The lead worktree is intentionally lazy because scheduler
+                # construction is synchronous. Materialize it before the first
+                # checkpoint/model call so PWD and file tools share its identity.
+                setup = getattr(lead_env, "setup", None)
+                if callable(setup):
+                    await setup()
+                self._lineage.register_environment(aid, lead_env)
+                await self._lineage.checkpoint(
+                    aid,
+                    CheckpointBoundary("scope_initialization"),
+                    session.state.rollback.causal_frontier,
+                )
             cancel_event = self._turn_cancel_events.get(aid)
             async with self._turn_gate():
-                result = (
-                    await session.run_loop(cancel_event)
-                    if cancel_event is not None
-                    else await session.run_loop()
-                )
+                result = await session.run_loop(cancel_event) if cancel_event is not None else await session.run_loop()
         except asyncio.CancelledError:
             self._release_leases(aid)
             scb.state.cancel()
             reason = "Error: agent cancelled before completing delegated work"
             scb.result = reason
             try:
-                await self.emit_scheduler_event(
-                    self._events.agent_cancelled(aid, scb.agent.name)
-                )
+                await self.emit_scheduler_event(self._events.agent_cancelled(aid, scb.agent.name))
             except Exception as event_exc:
-                logger.error(
-                    "agent_cancelled event failed for aid %s: %s", aid, event_exc
-                )
+                logger.error("agent_cancelled event failed for aid %s: %s", aid, event_exc)
             await self._deliver_to_parent(aid, reason, RowStatus.FAILED, error=reason)
             if not self._shutting_down:
                 await self._drain_message_inbox(aid, allow_current_task=True)
@@ -447,13 +438,9 @@ class LifecycleMixin:
             scb.result = reason
             await self._trace_worktree_evidence(aid, scb, session)
             try:
-                await self.emit_scheduler_event(
-                    self._events.agent_failed(aid, scb.agent.name, terminal_reason)
-                )
+                await self.emit_scheduler_event(self._events.agent_failed(aid, scb.agent.name, terminal_reason))
             except Exception as event_exc:
-                logger.error(
-                    "agent_failed event failed for aid %s: %s", aid, event_exc
-                )
+                logger.error("agent_failed event failed for aid %s: %s", aid, event_exc)
             await self._deliver_to_parent(aid, reason, RowStatus.FAILED, error=reason)
             await self._drain_message_inbox(aid, allow_current_task=True)
             await self._drain_ready_message_inboxes()
@@ -483,9 +470,7 @@ class LifecycleMixin:
         if terminal_failure is not None:
             scb.result = terminal_failure
             await self._trace_worktree_evidence(aid, scb, session)
-            await self._safe_emit_scheduler_event(
-                self._events.agent_failed(aid, scb.agent.name, terminal_failure)
-            )
+            await self._safe_emit_scheduler_event(self._events.agent_failed(aid, scb.agent.name, terminal_failure))
             await self._deliver_to_parent(
                 aid,
                 terminal_failure,
@@ -509,9 +494,7 @@ class LifecycleMixin:
                 scb.state.fail()
                 result = f"Error: worktree diff extraction failed: {exc}"
                 scb.result = result
-                await self._safe_emit_scheduler_event(
-                    self._events.agent_failed(aid, scb.agent.name, str(exc))
-                )
+                await self._safe_emit_scheduler_event(self._events.agent_failed(aid, scb.agent.name, str(exc)))
                 await self._deliver_to_parent(aid, result, RowStatus.FAILED, error=result)
                 await self._drain_message_inbox(aid, allow_current_task=True)
                 if not self._shutting_down:
@@ -545,9 +528,7 @@ class LifecycleMixin:
 
         try:
             await self.emit_scheduler_event(
-                self._events.agent_completed(
-                    aid, scb.parent_aid, scb.agent.name, latency, len(result)
-                )
+                self._events.agent_completed(aid, scb.parent_aid, scb.agent.name, latency, len(result))
             )
         except Exception as exc:
             logger.error("agent_completed event failed for aid %s: %s", aid, exc)
@@ -593,156 +574,6 @@ class LifecycleMixin:
         disposition = "failed" if phase is SessionPhase.ERROR else "stopped"
         reason = scb.state.terminal_reason or result.strip() or phase.value
         return f"Error: agent {disposition}: {reason}"
-
-    async def _deliver_to_parent(
-        self,
-        child_aid: int,
-        result: str,
-        status: RowStatus,
-        *,
-        error: str | None = None,
-    ) -> None:
-        """Route a finished child's result to the pending row that suspended its
-        parent, then re-activate the parent. No-op for fire-and-forget spawns.
-        """
-        origin = self._spawn_origin.get(child_aid)
-        if origin is None:
-            return
-        parent_aid, tool_call_id = origin
-        if self._lineage is not None and self._rollback_enabled:
-            parent_session = self._sessions.get(parent_aid)
-            parent_env = getattr(parent_session, "env", None) if parent_session is not None else None
-            if parent_env is None or not callable(getattr(parent_env, "checkpoint_scope", None)):
-                raise RuntimeError(
-                    f"Agent {parent_aid} has no checkpointable Scope before child delivery"
-                )
-            self._lineage.register_environment(parent_aid, parent_env)
-            await self._lineage.checkpoint(
-                parent_aid,
-                CheckpointBoundary("child_result"),
-                parent_session.state.rollback.causal_frontier,
-            )
-        lineage_effect = self._create_child_result_effect(
-            child_aid,
-            parent_aid,
-            result,
-        )
-        try:
-            await self._wake(
-                parent_aid,
-                tool_call_id,
-                result,
-                status,
-                child_aid=child_aid,
-                error=error,
-                lineage_effect=lineage_effect,
-            )
-        except PendingRowError as exc:
-            retry_tool_call_id = await self._recover_delivery_route(
-                child_aid,
-                parent_aid,
-                exc,
-            )
-            if retry_tool_call_id is not None:
-                try:
-                    await self._wake(
-                        parent_aid,
-                        retry_tool_call_id,
-                        result,
-                        status,
-                        child_aid=child_aid,
-                        error=error,
-                        lineage_effect=lineage_effect,
-                    )
-                    return
-                except PendingRowError as retry_exc:
-                    # The unique row disappeared or changed between discovery
-                    # and fill. Count that as the bounded final route failure.
-                    exc = retry_exc
-                    await self._recover_delivery_route(child_aid, parent_aid, retry_exc)
-            # A misrouted completion must surface loudly, never silently succeed.
-            logger.error("misrouted completion from child %s: %s", child_aid, exc)
-            await self._safe_emit_scheduler_event(
-                self._events.agent_failed(parent_aid, self._role_of(parent_aid), str(exc))
-            )
-
-    async def _recover_delivery_route(
-        self,
-        child_aid: int,
-        parent_aid: int,
-        cause: PendingRowError,
-    ) -> str | None:
-        """Route a unique child row or close the parent batch explicitly.
-
-        A pending row is identified only by its ``ref`` pointing to the child;
-        this never writes the child's result into an unrelated tool row.  The
-        only safe recovery is a single such row.  Any other shape is terminal:
-        atomically fail the parent's open batch so it cannot remain suspended
-        waiting for a child whose completion no longer has a valid route.
-        """
-        parent_scb = self.table.get(parent_aid)
-        parent_session = self._sessions.get(parent_aid)
-        if parent_scb is None or parent_session is None:
-            self._spawn_origin.pop(child_aid, None)
-            return None
-
-        lock = self._locks.setdefault(parent_aid, asyncio.Lock())
-        should_resume = False
-        async with lock:
-            table = parent_scb.state.pending_events
-            child_rows = [
-                tool_call_id
-                for tool_call_id, row in table.rows.items()
-                if row.status is RowStatus.PENDING and row.ref == child_aid
-            ]
-            if len(child_rows) == 1:
-                return child_rows[0]
-
-            reason = f"Error: child completion routing failed: {cause}"
-            # No unique target exists. This is a terminal parent-side routing
-            # failure, not a child result for a different row: fail every open
-            # row atomically so no producer-less PENDING row survives.
-            for tool_call_id, row in tuple(table.rows.items()):
-                if row.status is RowStatus.PENDING:
-                    table.fill(
-                        tool_call_id,
-                        result=reason,
-                        status=RowStatus.FAILED,
-                        error=reason,
-                    )
-            self._spawn_origin.pop(child_aid, None)
-            in_flight = self._tasks.get(parent_aid)
-            should_resume = (
-                not self._shutting_down
-                and parent_scb.state.phase is SessionPhase.AWAITING_EVENTS
-                and table.is_complete()
-                and (in_flight is None or in_flight.done())
-            )
-            if should_resume:
-                self._reserve_turn_lease(parent_aid)
-                self._start_agent_task(parent_aid, parent_session)
-            elif (
-                not self._shutting_down
-                and parent_scb.state.phase is SessionPhase.AWAITING_EVENTS
-                and table.is_complete()
-                and in_flight is not None
-                and not in_flight.done()
-            ):
-                in_flight.add_done_callback(
-                    lambda finished: asyncio.create_task(
-                        self._resume_after_parent_task(
-                            parent_aid,
-                            parent_session,
-                            finished,
-                        )
-                    )
-                )
-
-        if should_resume:
-            await self._safe_emit_scheduler_event(
-                self._events.agent_resumed(parent_aid, self._role_of(parent_aid))
-            )
-        return None
 
     async def _wake(
         self,
@@ -810,8 +641,7 @@ class LifecycleMixin:
             in_flight = self._tasks.get(parent_aid)
             should_resume = (
                 not self._shutting_down
-                and
-                parent_scb.state.phase is SessionPhase.AWAITING_EVENTS
+                and parent_scb.state.phase is SessionPhase.AWAITING_EVENTS
                 and table.is_complete()
                 and (in_flight is None or in_flight.done())
             )
@@ -820,8 +650,7 @@ class LifecycleMixin:
                 self._start_agent_task(parent_aid, parent_session)
             elif (
                 not self._shutting_down
-                and
-                parent_scb.state.phase is SessionPhase.AWAITING_EVENTS
+                and parent_scb.state.phase is SessionPhase.AWAITING_EVENTS
                 and table.is_complete()
                 and in_flight is not None
                 and not in_flight.done()
@@ -837,9 +666,7 @@ class LifecycleMixin:
                 )
 
         if should_resume:
-            await self._safe_emit_scheduler_event(
-                self._events.agent_resumed(parent_aid, self._role_of(parent_aid))
-            )
+            await self._safe_emit_scheduler_event(self._events.agent_resumed(parent_aid, self._role_of(parent_aid)))
 
     async def _resume_after_parent_task(
         self,
@@ -855,13 +682,10 @@ class LifecycleMixin:
         should_resume = False
         async with lock:
             current = self._tasks.get(parent_aid)
-            no_active_replacement = (
-                current is None or current is finished_task or current.done()
-            )
+            no_active_replacement = current is None or current is finished_task or current.done()
             if (
                 not self._shutting_down
-                and
-                no_active_replacement
+                and no_active_replacement
                 and parent_scb.state.phase is SessionPhase.AWAITING_EVENTS
                 and parent_scb.state.pending_events.is_complete()
             ):
@@ -870,8 +694,6 @@ class LifecycleMixin:
                 should_resume = True
         if should_resume:
             try:
-                await self.emit_scheduler_event(
-                    self._events.agent_resumed(parent_aid, self._role_of(parent_aid))
-                )
+                await self.emit_scheduler_event(self._events.agent_resumed(parent_aid, self._role_of(parent_aid)))
             except Exception as exc:
                 logger.error("agent_resumed event failed for aid %s: %s", parent_aid, exc)

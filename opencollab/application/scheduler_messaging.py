@@ -30,6 +30,7 @@ helpers defined on ``Scheduler``.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import re
 import uuid
@@ -124,13 +125,9 @@ class MessagingMixin:
         if to_aid == from_aid:
             return refuse("self_message", "Error: an agent cannot message itself.")
         if self._shutting_down:
-            return refuse(
-                "scheduler_shutting_down", "Error: scheduler is shutting down."
-            )
+            return refuse("scheduler_shutting_down", "Error: scheduler is shutting down.")
         if self._sessions.get(from_aid) is None or self.table.get(from_aid) is None:
-            return refuse(
-                "unknown_sender", f"Error: no sending agent with aid {from_aid}."
-            )
+            return refuse("unknown_sender", f"Error: no sending agent with aid {from_aid}.")
         target = self._sessions.get(to_aid)
         if target is None:
             return refuse("unknown_recipient", f"Error: no agent with aid {to_aid}.")
@@ -145,44 +142,17 @@ class MessagingMixin:
         delivered_events = []
         async with lock:
             if self._shutting_down:
-                return refuse(
-                    "scheduler_shutting_down", "Error: scheduler is shutting down."
-                )
-            if self._lineage is not None and self._rollback_enabled:
-                sender_env = getattr(self._sessions[from_aid], "env", None)
-                if sender_env is None or not callable(getattr(sender_env, "checkpoint_scope", None)):
-                    return refuse(
-                        "checkpoint_unavailable",
-                        "Error: sender Scope cannot be checkpointed before message delivery.",
-                    )
-                self._lineage.register_environment(from_aid, sender_env)
-                await self._lineage.checkpoint(
-                    from_aid,
-                    CheckpointBoundary("teammate_message"),
-                    self._sessions[from_aid].state.rollback.causal_frontier,
-                )
+                return refuse("scheduler_shutting_down", "Error: scheduler is shutting down.")
             message_id = uuid.uuid4().hex
             from_role = self._role_of(from_aid)
             to_role = self._role_of(to_aid)
             effect = None
-            if self._lineage is not None and self._rollback_enabled:
-                sender_state = self._sessions[from_aid].state
-                effect = self._lineage.create_effect(
-                    producer_aid=from_aid,
-                    attempt=sender_state.rollback.attempt,
-                    branch_id=sender_state.rollback.branch,
-                    epoch=sender_state.rollback.epoch,
-                    kind="teammate_message",
-                    parent_effect_ids=tuple(sorted(sender_state.rollback.causal_frontier)),
-                    content=content,
-                )
-                self._lineage.register_consumer(effect.effect_id, to_aid)
             xml = self._format_teammate_message(
                 from_aid,
                 summary,
                 content,
                 message_id=message_id,
-                effect_id=effect.effect_id if effect else None,
+                effect_id=None,
             )
             message_bytes = self._encoded_size(xml)
             observed: dict[str, Any] = {
@@ -192,8 +162,7 @@ class MessagingMixin:
             if message_bytes > MAX_TEAMMATE_MESSAGE_BYTES:
                 return refuse(
                     "message_too_large",
-                    "Error: teammate message exceeds the "
-                    f"{MAX_TEAMMATE_MESSAGE_BYTES}-byte limit.",
+                    f"Error: teammate message exceeds the {MAX_TEAMMATE_MESSAGE_BYTES}-byte limit.",
                     **observed,
                 )
             inbox = self._message_inbox.get(to_aid, [])
@@ -215,6 +184,62 @@ class MessagingMixin:
                     f"{MAX_TEAMMATE_INBOX_BYTES}-byte limit (backpressure).",
                     **observed,
                 )
+            if self._lineage is not None and self._rollback_enabled:
+                recipient_env = getattr(target, "env", None)
+                if recipient_env is None or not callable(getattr(recipient_env, "checkpoint_scope", None)):
+                    return refuse(
+                        "checkpoint_unavailable",
+                        "Error: recipient Scope cannot be checkpointed before message delivery.",
+                        **observed,
+                    )
+                try:
+                    self._lineage.register_environment(to_aid, recipient_env)
+                    await self._lineage.checkpoint(
+                        to_aid,
+                        CheckpointBoundary("teammate_message"),
+                        target.state.rollback.causal_frontier,
+                    )
+                    sender_state = self._sessions[from_aid].state
+                    effect = self._lineage.create_effect(
+                        producer_aid=from_aid,
+                        attempt=sender_state.rollback.attempt,
+                        branch_id=sender_state.rollback.branch,
+                        epoch=sender_state.rollback.epoch,
+                        kind="teammate_message",
+                        parent_effect_ids=tuple(sorted(sender_state.rollback.causal_frontier)),
+                        content=content,
+                    )
+                    effect = await self._capture_effect_workspace(effect, from_aid)
+                    self._lineage.register_consumer(effect.effect_id, to_aid)
+                except Exception as exc:
+                    detail = str(exc).strip() or type(exc).__name__
+                    return refuse(
+                        "workspace_effect_failed",
+                        f"Error: workspace Effect delivery failed: {detail[:500]}",
+                        **observed,
+                    )
+                xml = self._format_teammate_message(
+                    from_aid,
+                    summary,
+                    content,
+                    message_id=message_id,
+                    effect_id=effect.effect_id,
+                )
+                message_bytes = self._encoded_size(xml)
+                observed["message_bytes"] = message_bytes
+                if message_bytes > MAX_TEAMMATE_MESSAGE_BYTES:
+                    return refuse(
+                        "message_too_large",
+                        f"Error: teammate message exceeds the {MAX_TEAMMATE_MESSAGE_BYTES}-byte limit.",
+                        **observed,
+                    )
+                if observed["inbox_bytes"] + message_bytes > MAX_TEAMMATE_INBOX_BYTES:
+                    return refuse(
+                        "inbox_byte_limit",
+                        f"Error: teammate inbox for aid {to_aid} exceeds the "
+                        f"{MAX_TEAMMATE_INBOX_BYTES}-byte limit (backpressure).",
+                        **observed,
+                    )
             target.state.queue_pending_user_message(
                 {
                     "role": "user",
@@ -226,6 +251,7 @@ class MessagingMixin:
                     "to_role": to_role,
                     "summary": summary,
                     "message_id": message_id,
+                    "effect_id": effect.effect_id if effect is not None else None,
                     "delivery_status": "pending",
                 }
             )
@@ -240,6 +266,7 @@ class MessagingMixin:
                 message_id=message_id,
                 from_role=from_role,
                 to_role=to_role,
+                effect_id=effect.effect_id if effect is not None else None,
             )
             inbox.append(message)
             self._message_inbox[to_aid] = inbox
@@ -257,9 +284,7 @@ class MessagingMixin:
         # only after releasing the per-target lock, and isolate sink failures so
         # durable queue mutation and the drive task cannot be rolled back halfway.
         await self._safe_emit_scheduler_event(
-            self._events.agent_message_sent(
-                from_aid, to_aid, self._role_of(to_aid), summary
-            )
+            self._events.agent_message_sent(from_aid, to_aid, self._role_of(to_aid), summary)
         )
         for event in delivered_events:
             await self._safe_emit_scheduler_event(event)
@@ -360,12 +385,8 @@ class MessagingMixin:
                     "commit_refs_found": len(refs),
                     "message_bytes": message_bytes,
                     "message_id": message_id,
-                    "inbox_messages": (
-                        len(inbox) if inbox_messages is None else inbox_messages
-                    ),
-                    "inbox_bytes": (
-                        self._inbox_size(inbox) if inbox_bytes is None else inbox_bytes
-                    ),
+                    "inbox_messages": (len(inbox) if inbox_messages is None else inbox_messages),
+                    "inbox_bytes": (self._inbox_size(inbox) if inbox_bytes is None else inbox_bytes),
                     "max_message_bytes": MAX_TEAMMATE_MESSAGE_BYTES,
                     "max_inbox_messages": MAX_TEAMMATE_INBOX_MESSAGES,
                     "max_inbox_bytes": MAX_TEAMMATE_INBOX_BYTES,
@@ -438,16 +459,14 @@ class MessagingMixin:
                     from_aid=self._restored_aid(item.get("from_aid"), default=-1),
                     to_aid=self._restored_aid(item.get("to_aid"), default=aid),
                     summary=str(item.get("summary") or "restored teammate message"),
-                    content=str(
-                        item.get("message_content")
-                        or self._message_content_from_xml(xml)
-                    ),
+                    content=str(item.get("message_content") or self._message_content_from_xml(xml)),
                     xml=xml,
                     sent_at=str(item.get("timestamp") or ""),
                     message_id=message_id,
                     from_role=str(item.get("from_role") or ""),
                     to_role=str(item.get("to_role") or ""),
                     restored=True,
+                    effect_id=(str(item["effect_id"]) if item.get("effect_id") else self._effect_id_from_xml(xml)),
                 )
             )
         if restored:
@@ -475,6 +494,13 @@ class MessagingMixin:
     def _message_id_from_xml(xml: str) -> str | None:
         try:
             return ET.fromstring(xml).attrib.get("message_id")
+        except ET.ParseError:
+            return None
+
+    @staticmethod
+    def _effect_id_from_xml(xml: str) -> str | None:
+        try:
+            return ET.fromstring(xml).attrib.get("effect_id")
         except ET.ParseError:
             return None
 
@@ -530,11 +556,7 @@ class MessagingMixin:
                 f"{escape(message.content)}\n"
                 "</teammate-message>"
             )
-        return (
-            f'<teammate-messages count="{len(messages)}">\n'
-            + "\n".join(envelopes)
-            + "\n</teammate-messages>"
-        )
+        return f'<teammate-messages count="{len(messages)}">\n' + "\n".join(envelopes) + "\n</teammate-messages>"
 
     @staticmethod
     def _encoded_size(value: str) -> int:
@@ -545,18 +567,12 @@ class MessagingMixin:
         return sum(cls._encoded_size(message.xml) for message in inbox)
 
     @classmethod
-    def _bounded_message_batch(
-        cls, inbox: list[QueuedTeammateMessage]
-    ) -> list[QueuedTeammateMessage]:
+    def _bounded_message_batch(cls, inbox: list[QueuedTeammateMessage]) -> list[QueuedTeammateMessage]:
         """Select the largest FIFO prefix whose rendered prompt is bounded."""
         batch: list[QueuedTeammateMessage] = []
         for message in inbox:
             candidate = [*batch, message]
-            delivery = (
-                candidate[0].xml
-                if len(candidate) == 1
-                else cls._format_teammate_message_batch(candidate)
-            )
+            delivery = candidate[0].xml if len(candidate) == 1 else cls._format_teammate_message_batch(candidate)
             if cls._encoded_size(delivery) > MAX_TEAMMATE_DELIVERY_BYTES:
                 break
             batch = candidate
@@ -565,20 +581,14 @@ class MessagingMixin:
     async def _drain_message_inbox(self, aid: int, *, allow_current_task: bool = False) -> None:
         lock = self._locks.setdefault(aid, asyncio.Lock())
         async with lock:
-            events = await self._drain_message_inbox_locked(
-                aid, allow_current_task=allow_current_task
-            )
+            events = await self._drain_message_inbox_locked(aid, allow_current_task=allow_current_task)
         for event in events:
             await self._safe_emit_scheduler_event(event)
 
     async def _drain_ready_message_inboxes(self) -> None:
         """Retry durable messages when another turn has returned budget headroom."""
-        ready_aids = [
-            aid for aid in list(self._message_inbox) if self._message_inbox.get(aid)
-        ]
-        await asyncio.gather(
-            *(self._drain_message_inbox(aid) for aid in ready_aids)
-        )
+        ready_aids = [aid for aid in list(self._message_inbox) if self._message_inbox.get(aid)]
+        await asyncio.gather(*(self._drain_message_inbox(aid) for aid in ready_aids))
 
     async def _drain_message_inbox_locked(
         self,
@@ -633,11 +643,7 @@ class MessagingMixin:
             return events
         task = self._tasks.get(aid)
         current_task = asyncio.current_task()
-        if (
-            task is not None
-            and not task.done()
-            and not (allow_current_task and task is current_task)
-        ):
+        if task is not None and not task.done() and not (allow_current_task and task is current_task):
             return events
         if scb.state.phase is SessionPhase.AWAITING_EVENTS or not scb.state.pending_events.is_empty():
             return events
@@ -648,12 +654,18 @@ class MessagingMixin:
         if not self._reserve_message_budget(aid):
             return events
 
-        delivery = (
-            messages[0].xml
-            if len(messages) == 1
-            else self._format_teammate_message_batch(messages)
-        )
+        delivery = messages[0].xml if len(messages) == 1 else self._format_teammate_message_batch(messages)
         await self._append_user_turn_txn(aid, session, delivery, prior_lease)
+
+        if self._lineage is not None and self._rollback_enabled:
+            frontier = session.state.rollback.causal_frontier
+            for message in messages:
+                if message.effect_id and self._lineage.get_effect(message.effect_id) is not None:
+                    frontier = self._lineage.consume(aid, message.effect_id)
+            session.state.rollback = dataclasses.replace(
+                session.state.rollback,
+                causal_frontier=frontier,
+            )
 
         # Commit the durable dequeue immediately after the history append. A
         # shutdown may stop the follow-on driver, but it must never leave the
@@ -723,13 +735,10 @@ class MessagingMixin:
         current_from_role = sender.agent.name
         current_to_role = target.agent.name
         if message.from_role:
-            if role_collision_key(message.from_role) != role_collision_key(
-                current_from_role
-            ):
+            if role_collision_key(message.from_role) != role_collision_key(current_from_role):
                 return (
                     "restored_sender_role_changed",
-                    f"restored sender role changed from {message.from_role!r} "
-                    f"to {current_from_role!r}",
+                    f"restored sender role changed from {message.from_role!r} to {current_from_role!r}",
                 )
         elif message.restored and self._topology is not None:
             return (
@@ -737,13 +746,10 @@ class MessagingMixin:
                 "restored message has no durable sender role identity",
             )
         if message.to_role:
-            if role_collision_key(message.to_role) != role_collision_key(
-                current_to_role
-            ):
+            if role_collision_key(message.to_role) != role_collision_key(current_to_role):
                 return (
                     "restored_target_role_changed",
-                    f"restored target role changed from {message.to_role!r} "
-                    f"to {current_to_role!r}",
+                    f"restored target role changed from {message.to_role!r} to {current_to_role!r}",
                 )
         elif message.restored and self._topology is not None:
             return (
@@ -769,10 +775,7 @@ class MessagingMixin:
         for item in pending:
             if not isinstance(item, dict):
                 continue
-            same_message = (
-                bool(message.message_id)
-                and item.get("message_id") == message.message_id
-            ) or (
+            same_message = (bool(message.message_id) and item.get("message_id") == message.message_id) or (
                 not message.message_id
                 and item.get("content") == message.xml
                 and item.get("from_aid") == message.from_aid

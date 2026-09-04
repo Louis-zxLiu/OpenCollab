@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Callable
 
-from opencollab.adapters.tools.adopt_child import AdoptChildChangesTool
+from opencollab.adapters.tools.adopt_effect import AdoptEffectTool
 from opencollab.adapters.tools.apply_patch import ApplyPatchTool
 from opencollab.adapters.tools.base import Tool
 from opencollab.adapters.tools.bash import BashTool
@@ -45,7 +45,7 @@ STATELESS_TOOL_FACTORIES: dict[str, Callable[[], Tool]] = {
     "list_env": ListEnvTool,
 }
 SCHEDULER_TOOL_FACTORIES: dict[str, Callable[[SchedulerPort], Tool]] = {
-    "adopt_child_changes": AdoptChildChangesTool,
+    "adopt_effect": AdoptEffectTool,
     "spawn_agent": SpawnAgentTool,
     "spawn_with_review": SpawnWithReviewTool,
     "message_agent": MessageAgentTool,
@@ -58,13 +58,11 @@ SKILL_TOOL_FACTORIES: dict[str, Callable[[SkillStorePort], Tool]] = {
     "use_skill": UseSkillTool,
 }
 KNOWN_TOOL_NAMES: frozenset[str] = (
-    frozenset(STATELESS_TOOL_FACTORIES)
-    | frozenset(SCHEDULER_TOOL_FACTORIES)
-    | frozenset(SKILL_TOOL_FACTORIES)
+    frozenset(STATELESS_TOOL_FACTORIES) | frozenset(SCHEDULER_TOOL_FACTORIES) | frozenset(SKILL_TOOL_FACTORIES)
 )
-# Tools that let a role act on teammates — used to decide whether to render the
-# topology-aware "Your team" prompt section.
-COORDINATION_TOOL_NAMES: frozenset[str] = frozenset(SCHEDULER_TOOL_FACTORIES)
+# Tools that let a role address or control teammates. ``adopt_effect`` is
+# scheduler-bound for authorization, but changes only the caller's own Scope.
+COORDINATION_TOOL_NAMES: frozenset[str] = frozenset(SCHEDULER_TOOL_FACTORIES) - {"adopt_effect"}
 # Bulky, reconstructible read-only tool outputs whose OLD results may be cleared
 # in place by ``ToolOutputClearShaper``. Intersected with the real registry so a
 # renamed/removed tool drops out automatically (driven from real names, not a
@@ -95,16 +93,11 @@ def validate_tool_limits(
         if not isinstance(kwargs, dict):
             raise ValueError(f"tool_limits for '{tool_name}' must be a mapping")
         if tool_name in SCHEDULER_TOOL_FACTORIES:
-            raise ValueError(
-                f"tool_limits not supported for coordination tools ['{tool_name}']."
-            )
+            raise ValueError(f"tool_limits not supported for coordination tools ['{tool_name}'].")
         allowed = TOOL_LIMIT_FIELDS.get(tool_name, frozenset())
         unsupported = set(kwargs) - allowed
         if unsupported:
-            raise ValueError(
-                f"tool_limits for '{tool_name}' has unsupported keys "
-                f"{sorted(unsupported)}"
-            )
+            raise ValueError(f"tool_limits for '{tool_name}' has unsupported keys {sorted(unsupported)}")
         normalized_kwargs: dict[str, int] = {}
         for key, value in kwargs.items():
             if (
@@ -114,8 +107,7 @@ def validate_tool_limits(
                 or value > MAX_CONFIGURED_TOOL_OUTPUT_CHARS
             ):
                 raise ValueError(
-                    f"tool_limits {tool_name}.{key} must be an integer in "
-                    f"1..{MAX_CONFIGURED_TOOL_OUTPUT_CHARS}"
+                    f"tool_limits {tool_name}.{key} must be an integer in 1..{MAX_CONFIGURED_TOOL_OUTPUT_CHARS}"
                 )
             normalized_kwargs[key] = value
         normalized[tool_name] = normalized_kwargs
@@ -168,9 +160,7 @@ def build_tools_for_role(
     limits = validate_tool_limits(tool_limits or {})
     uncappable = set(limits) & frozenset(SCHEDULER_TOOL_FACTORIES)
     if uncappable:
-        raise ValueError(
-            f"tool_limits not supported for coordination tools {sorted(uncappable)}."
-        )
+        raise ValueError(f"tool_limits not supported for coordination tools {sorted(uncappable)}.")
     tools: list[Tool] = []
     for name in tool_names:
         if name == "ask_user" and not ask_user_available:
@@ -188,21 +178,14 @@ def build_tools_for_role(
             )
         elif name in SCHEDULER_TOOL_FACTORIES:
             if scheduler is None:
-                raise ValueError(
-                    f"Tool '{name}' requires a scheduler but none was provided."
-                )
+                raise ValueError(f"Tool '{name}' requires a scheduler but none was provided.")
             tools.append(SCHEDULER_TOOL_FACTORIES[name](scheduler))
         elif name in SKILL_TOOL_FACTORIES:
             if skill_store is None:
-                raise ValueError(
-                    f"Tool '{name}' requires a skill store but none was provided."
-                )
+                raise ValueError(f"Tool '{name}' requires a skill store but none was provided.")
             tools.append(SKILL_TOOL_FACTORIES[name](skill_store))
         else:
-            raise ValueError(
-                f"Unknown tool '{name}' in team config. "
-                f"Known tools: {sorted(KNOWN_TOOL_NAMES)}"
-            )
+            raise ValueError(f"Unknown tool '{name}' in team config. Known tools: {sorted(KNOWN_TOOL_NAMES)}")
     return tools
 
 
@@ -229,18 +212,14 @@ def _instantiate(
         kwargs.update(
             allow_runner_override=allow_unisolated_shell,
             allow_extra_args=allow_unisolated_shell,
-            require_process_isolation=not (
-                allow_unisolated_shell or allow_unisolated_tests
-            ),
+            require_process_isolation=not (allow_unisolated_shell or allow_unisolated_tests),
         )
     if name == "file_write":
         kwargs["allow_create"] = allow_file_creation
     try:
         return factory(**kwargs)
     except TypeError as e:
-        raise ValueError(
-            f"tool_limits for '{name}' has unsupported keys {sorted(kwargs)}: {e}"
-        ) from e
+        raise ValueError(f"tool_limits for '{name}' has unsupported keys {sorted(kwargs)}: {e}") from e
 
 
 __all__ = [
