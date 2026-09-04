@@ -331,15 +331,19 @@ class SchedulerTeamMixin:
                 if not {"parent_environment", "parent_workspace_revision"}.intersection(str(exc)):
                     raise
                 env = await self._worktree_pool.acquire(role)
-            session = self._session_factory.build_spawn_session(
-                role=role,
-                env=env,
-                budget=budget,
-                aid=aid,
-                scheduler=self,
-                task=None,
-                context="",
-            )
+            spawn_kwargs = {
+                "role": role,
+                "env": env,
+                "budget": budget,
+                "aid": aid,
+                "scheduler": self,
+                "task": None,
+                "context": "",
+            }
+            lead_state = self.table.get(0)
+            if lead_state is not None and lead_state.state.task_context is not None:
+                spawn_kwargs["task_context"] = lead_state.state.task_context
+            session = self._session_factory.build_spawn_session(**spawn_kwargs)
             session.agent.name = role
             self.table.add(
                 SessionControlBlock(

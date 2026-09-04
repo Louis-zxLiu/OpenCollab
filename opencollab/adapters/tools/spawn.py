@@ -14,6 +14,20 @@ from opencollab.application.self_collaboration import validate_review_iterations
 from opencollab.application.tool_execution import DeferredCall, ToolRuntime
 from opencollab.domain.identity import validate_role_identity
 
+_MAX_ASSIGNMENT_BYTES = 4 * 1024
+_MAX_SUPPLEMENTARY_CONTEXT_BYTES = 8 * 1024
+_MAX_SPAWN_TEXT_BYTES = 12 * 1024
+
+
+def _validate_spawn_text(value: Any, name: str, limit: int) -> str | None:
+    if not isinstance(value, str):
+        return f"Not spawned: {name} must be a string."
+    if "\x00" in value:
+        return f"Not spawned: {name} must not contain NUL bytes."
+    if len(value.encode("utf-8")) > limit:
+        return f"Not spawned: {name} exceeds the {limit}-byte limit."
+    return None
+
 
 class SpawnAgentTool(Tool):
     """Tool that an agent uses to spawn a child agent asynchronously.
@@ -25,7 +39,9 @@ class SpawnAgentTool(Tool):
 
     name = "spawn_agent"
     description = (
-        "Spawn a specialist agent to work on a task. You will pause until the "
+        "Spawn a specialist agent to work on a short assignment. Keep task and "
+        "context concise; do not copy the full problem, history, or reasoning. "
+        "You will pause until the "
         "agent finishes, then its result is delivered straight back to you as "
         "this tool call's result — so you can act on it in the same turn. Spawn "
         "several at once to run them in parallel; you resume when all are done. "
@@ -64,8 +80,18 @@ class SpawnAgentTool(Tool):
             role = validate_role_identity(params["role"])
         except ValueError as exc:
             return f"Not spawned: invalid role identity ({exc})."
-        task = params["task"]
+        task = params.get("task")
         context = params.get("context", "")
+        error = _validate_spawn_text(task, "task", _MAX_ASSIGNMENT_BYTES)
+        if error:
+            return error
+        error = _validate_spawn_text(
+            context, "context", _MAX_SUPPLEMENTARY_CONTEXT_BYTES
+        )
+        if error:
+            return error
+        if len(task.encode("utf-8")) + len(context.encode("utf-8")) > _MAX_SPAWN_TEXT_BYTES:
+            return f"Not spawned: task and context exceed the {_MAX_SPAWN_TEXT_BYTES}-byte limit."
         parent_aid = runtime.aid
         # Scheduler.spawn is the authoritative single-flight boundary. Convert
         # its domain-specific conflict into a synchronous tool result so no

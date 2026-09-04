@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
+from opencollab.domain.context import TaskContext
 from opencollab.domain.pending import PendingEventTable
 from opencollab.domain.rollback import RollbackState
 
@@ -183,6 +184,7 @@ class _UserTurnCheckpoint:
 @dataclass
 class SessionState:
     messages: list[dict[str, Any]]
+    task_context: TaskContext | None = field(default=None, kw_only=True)
     used_tokens: int = 0
     # Real size (provider ``input_tokens``) of the current context as of the
     # last LLM call. 0 means "no real measurement yet — fall back to estimate".

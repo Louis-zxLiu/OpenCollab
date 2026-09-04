@@ -34,6 +34,7 @@ from opencollab.application.session_snapshot import (
 )
 from opencollab.application.tool_execution import ToolExecutionUseCase
 from opencollab.domain.agent import Agent
+from opencollab.domain.context import TaskContext
 from opencollab.domain.events import SessionRuntimeEvent as SessionEvent
 from opencollab.domain.pending import PendingRow, RowKind, RowStatus
 from opencollab.domain.rollback import RollbackState
@@ -545,6 +546,19 @@ class Session:
             if restored.phase is SessionPhase.AWAITING_EVENTS
             else None
         )
+        raw_task_context = raw_state.get("task_context")
+        if raw_task_context is not None:
+            if not isinstance(raw_task_context, dict):
+                raise ValueError("invalid task_context in session snapshot")
+            try:
+                restored.task_context = TaskContext(
+                    context_id=raw_task_context["context_id"],
+                    objective=raw_task_context["objective"],
+                    constraints=raw_task_context.get("constraints", ""),
+                    contract=raw_task_context.get("contract", ""),
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError("invalid task_context in session snapshot") from exc
         raw_rollback = raw_state.get("rollback")
         if not isinstance(raw_rollback, dict) and any(
             key in raw_state
@@ -735,6 +749,16 @@ class Session:
                 ),
                 "active_turn_start_message_index": self.state.active_turn_start_message_index,
                 "pending_step_latency": self.state.pending_step_latency,
+                "task_context": (
+                    {
+                        "context_id": self.state.task_context.context_id,
+                        "objective": self.state.task_context.objective,
+                        "constraints": self.state.task_context.constraints,
+                        "contract": self.state.task_context.contract,
+                    }
+                    if self.state.task_context is not None
+                    else None
+                ),
                 "rollback": {
                     "branch": self.state.rollback.branch,
                     "epoch": self.state.rollback.epoch,

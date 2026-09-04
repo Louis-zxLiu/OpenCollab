@@ -6,6 +6,7 @@ import asyncio
 import logging
 
 from opencollab.application.scheduler_types import SchedulerStalledError, SchedulerTurnError
+from opencollab.domain.context import TaskContext
 from opencollab.domain.pending import RowStatus
 from opencollab.domain.session import SessionPhase
 
@@ -17,9 +18,13 @@ class SchedulerRunMixin:
         self,
         user_message: str,
         cancel_event: asyncio.Event | None = None,
+        *,
+        task_context: TaskContext | None = None,
     ) -> str:
         """Compatibility entry point for an external turn addressed to Lead."""
-        return await self.run_turn(0, user_message, cancel_event=cancel_event)
+        return await self.run_turn(
+            0, user_message, cancel_event=cancel_event, task_context=task_context
+        )
 
     async def run_turn(
         self,
@@ -27,6 +32,7 @@ class SchedulerRunMixin:
         user_message: str,
         *,
         cancel_event: asyncio.Event | None = None,
+        task_context: TaskContext | None = None,
     ) -> str:
         """Send an external user turn to ``aid`` and wait for team quiescence.
 
@@ -49,7 +55,9 @@ class SchedulerRunMixin:
                 if cancel_event is not None:
                     self._turn_cancel_events[aid] = cancel_event
                 try:
-                    return await self._run_turn_exclusive(aid, user_message)
+                    return await self._run_turn_exclusive(
+                        aid, user_message, task_context=task_context
+                    )
                 finally:
                     if self._turn_cancel_events.get(aid) is cancel_event:
                         self._turn_cancel_events.pop(aid, None)
@@ -67,12 +75,14 @@ class SchedulerRunMixin:
                 if self._active_run_tasks.get(current_task) == aid:
                     self._active_run_tasks.pop(current_task, None)
 
-    async def _run_turn_exclusive(self, aid: int, user_message: str) -> str:
+    async def _run_turn_exclusive(
+        self,
+        aid: int,
+        user_message: str,
+        *,
+        task_context: TaskContext | None = None,
+    ) -> str:
         """Drive one externally visible agent turn under its per-aid lock."""
-        # A prebuilt team must be seated before the first model call, so the
-        # roster an assigned topology names is the roster that ran. No-op unless
-        # the scheduler was constructed with ``prebuild_team``, and idempotent.
-        await self.ensure_team_prebuilt()
         session = self._sessions.get(aid)
         scb = self.table.get(aid)
         if session is None or scb is None:
@@ -81,6 +91,15 @@ class SchedulerRunMixin:
                     "Scheduler has no lead session. Call create_init_process() first."
                 )
             raise ValueError(f"Cannot run user turn: no agent with aid {aid}.")
+        if session.state.task_context is None:
+            session.state.task_context = task_context or TaskContext.from_user_message(user_message)
+        elif task_context is not None and task_context != session.state.task_context:
+            raise ValueError("task context cannot be replaced during a session")
+
+        # A prebuilt team must be seated before the first model call, so the
+        # roster an assigned topology names is the roster that ran. No-op unless
+        # the scheduler was constructed with ``prebuild_team``, and idempotent.
+        await self.ensure_team_prebuilt()
         if self._shutting_down:
             raise RuntimeError("Cannot run scheduler: scheduler is shutting down.")
 

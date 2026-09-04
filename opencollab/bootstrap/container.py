@@ -69,6 +69,7 @@ from opencollab.bootstrap.tool_registry import (
     build_tools_for_role,
 )
 from opencollab.domain.agent import Agent
+from opencollab.domain.context import TaskContext
 from opencollab.domain.session import SessionState
 
 if TYPE_CHECKING:
@@ -95,6 +96,7 @@ def _build_initial_state(
     agent: Agent,
     seed_user_messages: list[dict[str, Any]] | None = None,
     seed_system_messages: list[dict[str, Any]] | None = None,
+    task_context: TaskContext | None = None,
 ) -> SessionState:
     messages: list[dict[str, Any]] = (
         list(seed_system_messages)
@@ -103,7 +105,7 @@ def _build_initial_state(
     )
     if seed_user_messages:
         messages.extend(seed_user_messages)
-    return SessionState(messages=messages)
+    return SessionState(messages=messages, task_context=task_context)
 
 
 def _resolve_llm(
@@ -309,6 +311,7 @@ def build_session_runtime(
     shaper: ShaperPort | None = None,
     additional_shapers: tuple[ShaperPort, ...] = (),
     team_budget_exhausted: Callable[[], bool] | None = None,
+    task_context: TaskContext | None = None,
 ) -> SessionRuntime:
     """Build a ``SessionRuntime`` with the same construction order
     ``Session.__init__`` used to perform inline.
@@ -338,6 +341,7 @@ def build_session_runtime(
         agent,
         seed_user_messages,
         seed_system_messages,
+        task_context,
     )
     state.aid = aid
 

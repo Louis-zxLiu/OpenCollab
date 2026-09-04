@@ -35,6 +35,7 @@ from opencollab.bootstrap.tool_registry import (
     KNOWN_TOOL_NAMES,
     validate_tool_limits,
 )
+from opencollab.domain.context import TaskContextSection
 from opencollab.domain.hooks import (
     EXECUTABLE_HOOK_ACTION_TYPES,
     HOOK_ACTION_TYPES,
@@ -149,6 +150,9 @@ class RoleConfig(BaseModel):
     # ``temperature`` is resolved.
     thinking: bool | None = None
     thinking_params: dict | None = None
+    task_context_sections: list[str] = Field(
+        default_factory=lambda: [section.value for section in TaskContextSection]
+    )
     tools: list[str] = Field(default_factory=list)
 
     @field_validator("prompt")
@@ -176,6 +180,14 @@ class RoleConfig(BaseModel):
     ) -> dict[Any, Any] | None:
         return _validate_thinking_params(value)
 
+    @field_validator("task_context_sections")
+    @classmethod
+    def _validate_task_context_sections(cls, value: list[str]) -> list[str]:
+        allowed = {section.value for section in TaskContextSection}
+        if len(value) != len(set(value)) or any(section not in allowed for section in value):
+            raise ValueError("task_context_sections must contain unique known sections")
+        return list(value)
+
     @field_validator("temperature", mode="before")
     @classmethod
     def _reject_boolean_temperature(cls, value: Any) -> Any:
@@ -200,6 +212,9 @@ class _RoleFileModel(BaseModel):
     )
     thinking: bool | None = None
     thinking_params: dict | None = None
+    task_context_sections: list[str] = Field(
+        default_factory=lambda: [section.value for section in TaskContextSection]
+    )
     tools: list[str] = Field(default_factory=list)
 
     @field_validator("prompt")
@@ -226,6 +241,14 @@ class _RoleFileModel(BaseModel):
         value: dict[Any, Any] | None,
     ) -> dict[Any, Any] | None:
         return _validate_thinking_params(value)
+
+    @field_validator("task_context_sections")
+    @classmethod
+    def _validate_task_context_sections(cls, value: list[str]) -> list[str]:
+        allowed = {section.value for section in TaskContextSection}
+        if len(value) != len(set(value)) or any(section not in allowed for section in value):
+            raise ValueError("task_context_sections must contain unique known sections")
+        return list(value)
 
     @field_validator("temperature", mode="before")
     @classmethod
@@ -508,6 +531,7 @@ def _build_team_config(data: Any, base_dir: Path) -> TeamConfig:
             temperature=entry.temperature,
             thinking=entry.thinking,
             thinking_params=entry.thinking_params,
+            task_context_sections=list(entry.task_context_sections),
             tools=list(entry.tools),
         )
 

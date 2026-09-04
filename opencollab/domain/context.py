@@ -15,7 +15,80 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import Any, Iterable
+
+
+class TaskContextSection(Enum):
+    """Stable sections of the immutable external task context."""
+
+    OBJECTIVE = "objective"
+    CONSTRAINTS = "constraints"
+    CONTRACT = "contract"
+
+
+_TASK_CONTEXT_LIMITS = {
+    TaskContextSection.OBJECTIVE: 32 * 1024,
+    TaskContextSection.CONSTRAINTS: 16 * 1024,
+    TaskContextSection.CONTRACT: 16 * 1024,
+}
+
+
+@dataclass(frozen=True, slots=True)
+class TaskContext:
+    """Immutable semantic identity of one externally submitted task."""
+
+    context_id: str
+    objective: str
+    constraints: str = ""
+    contract: str = ""
+
+    def __post_init__(self) -> None:
+        values = {
+            TaskContextSection.OBJECTIVE: self.objective,
+            TaskContextSection.CONSTRAINTS: self.constraints,
+            TaskContextSection.CONTRACT: self.contract,
+        }
+        if not isinstance(self.context_id, str) or not self.context_id.strip():
+            raise ValueError("task context_id must not be blank")
+        if "\x00" in self.context_id:
+            raise ValueError("task context_id must not contain NUL")
+        total = 0
+        for section, value in values.items():
+            if not isinstance(value, str):
+                raise TypeError(f"task context {section.value} must be a string")
+            if "\x00" in value:
+                raise ValueError(f"task context {section.value} must not contain NUL")
+            size = len(value.encode("utf-8"))
+            if size > _TASK_CONTEXT_LIMITS[section]:
+                raise ValueError(f"task context {section.value} exceeds its size limit")
+            total += size
+        if not self.objective.strip():
+            raise ValueError("task context objective must not be blank")
+        if total > 64 * 1024:
+            raise ValueError("task context exceeds its total size limit")
+
+    @classmethod
+    def from_user_message(cls, message: str, *, context_id: str | None = None) -> "TaskContext":
+        if not isinstance(message, str):
+            raise TypeError("user message must be a string")
+        import uuid
+
+        return cls(context_id or uuid.uuid4().hex, objective=message)
+
+    def section(self, section: TaskContextSection) -> str:
+        return {
+            TaskContextSection.OBJECTIVE: self.objective,
+            TaskContextSection.CONSTRAINTS: self.constraints,
+            TaskContextSection.CONTRACT: self.contract,
+        }[section]
+
+    def project(self, sections: Iterable[TaskContextSection] | None = None) -> str:
+        selected = tuple(sections) if sections is not None else tuple(TaskContextSection)
+        blocks = []
+        for section in TaskContextSection:
+            if section in selected and self.section(section):
+                blocks.append(f"{section.value.capitalize()}:\n{self.section(section)}")
+        return "\n\n".join(blocks)
 
 
 class ContextLayer(Enum):
@@ -138,6 +211,8 @@ class ContextPlan:
 
 
 __all__ = [
+    "TaskContextSection",
+    "TaskContext",
     "ContextLayer",
     "ContextPosition",
     "LAYER_PRIORITY",

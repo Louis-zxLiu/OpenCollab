@@ -156,15 +156,18 @@ class LifecycleMixin:
             # Build session via factory. The task is seeded as the agent's first
             # user-context message (the TASK-layer ContextSource) inside the
             # factory, so the whole startup context is assembled in one place.
-            session = self._session_factory.build_spawn_session(
-                role=role,
-                env=env,
-                budget=budget,
-                aid=aid,
-                scheduler=self,
-                task=task,
-                context=context,
-            )
+            spawn_kwargs = {
+                "role": role,
+                "env": env,
+                "budget": budget,
+                "aid": aid,
+                "scheduler": self,
+                "task": task,
+                "context": context,
+            }
+            if parent_scb is not None and parent_scb.state.task_context is not None:
+                spawn_kwargs["task_context"] = parent_scb.state.task_context
+            session = self._session_factory.build_spawn_session(**spawn_kwargs)
             session.agent.name = role
 
             # Create SCB

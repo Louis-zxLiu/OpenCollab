@@ -38,6 +38,8 @@ from opencollab.domain.context import (
     ContextPlan,
     ContextPosition,
     ContextSource,
+    TaskContext,
+    TaskContextSection,
 )
 from opencollab.domain.scheduler import DelegationTask
 from opencollab.domain.skill import SkillManifest
@@ -113,7 +115,9 @@ class ContextBuilder:
         role_name: str,
         *,
         task: str | None = None,
+        assignment: str | None = None,
         context: str = "",
+        task_context: TaskContext | None = None,
     ) -> ContextPlan:
         """Emit the ordered context sources for ``role_name``.
 
@@ -169,15 +173,33 @@ class ContextBuilder:
                     content=self._project_context,
                 )
             )
-        if task is not None:
+        assignment = task if assignment is None else assignment
+        if assignment is not None or task_context is not None:
+            if task_context is None and assignment == task:
+                rendered_task = DelegationTask(
+                    role=role_name, task=assignment or "", context=context
+                ).render()
+            else:
+                role_sections = tuple(
+                    TaskContextSection(section)
+                    for section in role.task_context_sections
+                )
+                task_parts: list[str] = []
+                if task_context is not None:
+                    projected = task_context.project(role_sections)
+                    if projected:
+                        task_parts.append(f"Task Context:\n{projected}")
+                if assignment is not None:
+                    task_parts.append(f"Assignment:\n{assignment}")
+                if context:
+                    task_parts.append(f"Supplementary Context:\n{context}")
+                rendered_task = "\n\n".join(task_parts)
             sources.append(
                 ContextSource(
                     name="task",
                     layer=ContextLayer.TASK,
                     position=ContextPosition.USER_CONTEXT,
-                    content=DelegationTask(
-                        role=role_name, task=task, context=context
-                    ).render(),
+                    content=rendered_task,
                 )
             )
         return ContextPlan(sources=tuple(sources))

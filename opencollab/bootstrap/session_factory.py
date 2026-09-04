@@ -48,6 +48,7 @@ from opencollab.bootstrap.team_config import (
     default_team_config,
 )
 from opencollab.domain.agent import Agent
+from opencollab.domain.context import TaskContext
 from opencollab.domain.identity import role_storage_slug, validate_role_identity
 
 
@@ -214,6 +215,7 @@ def build_session(
     shaper: ShaperPort | None = None,
     additional_shapers: tuple[ShaperPort, ...] = (),
     team_budget_exhausted: Callable[[], bool] | None = None,
+    task_context: TaskContext | None = None,
 ) -> Session:
     """Self-wiring ``Session`` factory.
 
@@ -245,6 +247,7 @@ def build_session(
         shaper=shaper,
         additional_shapers=additional_shapers,
         team_budget_exhausted=team_budget_exhausted,
+        task_context=task_context,
     )
     Session.__init__(
         session,
@@ -383,6 +386,7 @@ def build_spawn_session(
     team_cfg: TeamConfig | None = None,
     task: str | None = None,
     context: str = "",
+    task_context: TaskContext | None = None,
 ) -> Session:
     """Build the Agent + Session bundle for a spawned child agent.
 
@@ -404,6 +408,7 @@ def build_spawn_session(
         scheduler=scheduler,
         task=task,
         context=context,
+        task_context=task_context,
     )
 
 
@@ -596,6 +601,7 @@ class DefaultSessionFactory:
         scheduler: SchedulerPort | None = None,
         task: str | None = None,
         context: str = "",
+        task_context: TaskContext | None = None,
     ) -> Session:
         role = validate_role_identity(role)
         # ``None`` means "whatever this run is using", which is the run's single
@@ -609,7 +615,9 @@ class DefaultSessionFactory:
             else None
         )
         context_builder = self._fresh_context_builder()
-        plan = context_builder.build_plan(role, task=task, context=context)
+        plan = context_builder.build_plan(
+            role, task=task, context=context, task_context=task_context
+        )
         agent = context_builder.build_agent(
             role,
             scheduler=scheduler,
@@ -645,6 +653,7 @@ class DefaultSessionFactory:
             seed_system_messages=plan.startup_system_messages(),
             team_budget_exhausted=_team_budget_guard(scheduler),
             additional_shapers=self._build_lineage_shapers(),
+            task_context=task_context,
         )
 
     def create_lead_session(

@@ -9,6 +9,7 @@ from opencollab.domain.skill import SkillManifest
 if TYPE_CHECKING:
     from opencollab.application.scheduler_types import LaunchSpec
     from opencollab.application.tool_execution import DeferredCall, ToolRuntime
+    from opencollab.domain.context import TaskContext
     from opencollab.domain.rollback import (
         AdoptionResult,
         CheckpointBoundary,
@@ -260,6 +261,7 @@ class SessionFactoryPort(Protocol):
         scheduler: SchedulerPort | None = None,
         task: str | None = None,
         context: str = "",
+        task_context: "TaskContext | None" = None,
     ) -> Any: ...
 
     def create_lead_session(
