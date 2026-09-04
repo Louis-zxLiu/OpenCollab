@@ -17,6 +17,7 @@ from opencollab.application._session_run_shared import (
     _TokenBudgetStop,
 )
 from opencollab.application.async_timeout import CallerTimeoutError, abandon_on_timeout
+from opencollab.application.completion import _is_discardable_completion
 from opencollab.application.ports import CompletionResponse
 from opencollab.application.shaping import ShaperPipeline, forced_shape
 from opencollab.application.steering import (
@@ -767,22 +768,13 @@ class _SessionRunCompletionMixin:
             )
 
     def append_assistant_message(self, response: CompletionResponse) -> None:
-        has_content = (
-            isinstance(response.content, str)
-            and bool(response.content.strip())
-        )
-        # A provider-limit response may contain an incomplete tool call. Never
-        # persist that structure: a later turn would send an orphaned call back
-        # to the provider, and the run loop must not execute partial arguments.
-        # Preserve only user-visible partial text; the full raw response remains
-        # available in the trace for diagnosis.
-        if response.finish_reason in {"length", "max_tokens"}:
+        has_content = isinstance(response.content, str) and bool(response.content.strip())
+        # Do not persist incomplete tool calls; keep only visible partial text.
+        if _is_discardable_completion(response):
             if has_content:
                 self.state.append_message({"role": "assistant", "content": response.content})
             return
-        # An empty-stop turn (no content, no tool calls) would append a bare
-        # ``{"role": "assistant"}`` message that some providers reject on the
-        # next request. Skip it — handle_pending_response decides retry-vs-DONE.
+        # Empty turns are handled by the run-loop retry logic.
         if not has_content and not response.tool_calls:
             return
         assistant_msg: dict[str, Any] = {"role": "assistant"}

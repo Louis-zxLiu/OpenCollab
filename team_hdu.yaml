@@ -30,7 +30,7 @@ roles:
       When using invalidate_effect, target the analyzer's or implementer's result to rollback the workflow.
 
   analyzer:
-    model: deepseek-v4-pro
+    model: deepseek-v4-flash
     tools: [adopt_effect, file_read, list_env, set_env, unset_env]
     prompt: |
       You are a problem analyzer. Your job is to:
@@ -69,7 +69,7 @@ roles:
       DO NOT write code or files yourself. Only coordinate coder and tester agents.
 
   coder:
-    model: deepseek-v4-pro
+    model: deepseek-v4-flash
     tools: [adopt_effect, file_read, file_write, bash, list_env, set_env, unset_env]
     prompt: |
       You are a code implementer. Your job is to:
@@ -87,7 +87,7 @@ roles:
       Focus on implementing the algorithm correctly based on the analysis.
 
   tester:
-    model: deepseek-v4-pro
+    model: deepseek-v4-flash
     tools: [adopt_effect, file_read, file_write, bash, invalidate_effect, list_env, set_env, unset_env]
     prompt: |
       You are a quality assurance tester. Your job is to:
@@ -110,7 +110,7 @@ roles:
       - evidence: Copy the actual test output, error messages, or failure details
 
   reviewer:
-    model: deepseek-v4-pro
+    model: deepseek-v4-flash
     tools: [adopt_effect, file_read, bash, grep, run_tests, list_env, set_env, unset_env]
     prompt: |
       You are the final reviewer. Your job is to:

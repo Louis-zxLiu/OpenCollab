@@ -100,7 +100,10 @@ class _FakeSessionFactory:
     def build_lead_session(self, **kwargs):
         return _FakeLeadSession()
 
-    def build_spawn_session(self, *, role, env, budget, max_steps=50, aid=-1, scheduler=None, task=None, context=""):
+    def build_spawn_session(
+        self, *, role, env, budget, max_steps=50, aid=-1, scheduler=None,
+        task=None, context="", task_context=None
+    ):
         self.built.append((role, budget))
         self.built_tasks.append((role, task or ""))
         self.built_contexts.append((role, context))

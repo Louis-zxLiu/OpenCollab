@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from opencollab.domain.agent import DEFAULT_MAX_TOKENS_PER_STEP
+from opencollab.domain.completion import CompletionDisposition
 from opencollab.domain.token_estimation import (  # noqa: F401 - compatibility re-export
     estimate_messages_tokens,
     estimate_tokens,
@@ -54,6 +55,7 @@ class LLMResponse:
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     usage: Usage = field(default_factory=lambda: Usage())
     finish_reason: str | None = None
+    disposition: CompletionDisposition | None = None
     # Provider chain-of-thought (OpenAI ``reasoning_content`` / Anthropic
     # ``thinking`` blocks), kept for trajectory observability. ``None`` when the
     # provider/turn produced no thinking.
@@ -64,6 +66,26 @@ class LLMResponse:
     # The application stores it without interpreting it, and each provider
     # removes data that does not belong on its request path.
     provider_state: dict[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        if self.disposition is None:
+            self.disposition = _disposition_from_finish_reason(
+                self.finish_reason, bool(self.tool_calls)
+            )
+
+
+def _disposition_from_finish_reason(
+    finish_reason: str | None,
+    has_tool_calls: bool,
+) -> CompletionDisposition:
+    """Normalize common provider stop labels at the adapter boundary."""
+    if finish_reason in {"length", "max_tokens", "max_output_tokens"}:
+        return CompletionDisposition.OUTPUT_TRUNCATED
+    if finish_reason in {"model_context_window_exceeded", "context_length_exceeded"}:
+        return CompletionDisposition.CONTEXT_OVERFLOW
+    if has_tool_calls or finish_reason in {"tool_calls", "tool_use"}:
+        return CompletionDisposition.TOOL_CALLS
+    return CompletionDisposition.COMPLETED
 
 
 def to_plain_data(value: Any) -> Any:

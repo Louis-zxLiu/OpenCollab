@@ -62,6 +62,16 @@ _EMPTY_STOP_NUDGE = (
 # Filtered out of ``run_loop``'s answer scan so it is never mistaken for output.
 _EMPTY_STOP_PLACEHOLDER = "[no output produced this turn]"
 
+# A single bounded rescue for a provider that cut a tool call off at its output
+# limit. The partial call is never executed or persisted; this prompt asks for
+# one concise, valid call using the existing TaskContext instead of repeating
+# the full assignment in JSON arguments.
+_COMPLETION_RECOVERY_NUDGE = (
+    "Your previous response was truncated by the provider and was not committed. "
+    "Retry once with a complete, concise response. If using a tool, emit one valid "
+    "complete call and keep its arguments short."
+)
+
 # Closed-loop steering (the reads-without-write nudge) lives in
 # ``application/steering.py``; the tool vocabulary it keys on stays here because
 # wind-down shares it. ``READS_NUDGE_SOFT`` is imported above for the trace seam's

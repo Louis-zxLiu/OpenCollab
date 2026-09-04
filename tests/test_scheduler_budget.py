@@ -61,7 +61,7 @@ class RecordingFactory:
         self.grants: list[int] = []
 
     def build_spawn_session(
-        self, *, role, env, budget, max_steps=50, aid=-1, scheduler=None, task=None, context=""
+        self, *, role, env, budget, max_steps=50, aid=-1, scheduler=None, task=None, context="", task_context=None
     ):
         child = BlockingChild(role, budget, self._gate)
         child.state.aid = aid
@@ -94,7 +94,7 @@ class _RaisingFactory(RecordingFactory):
     second site (after acquire) where a spawn can fail post-reservation."""
 
     def build_spawn_session(
-        self, *, role, env, budget, max_steps=50, aid=-1, scheduler=None, task=None, context=""
+        self, *, role, env, budget, max_steps=50, aid=-1, scheduler=None, task=None, context="", task_context=None
     ):
         raise RuntimeError("session build failed")
 

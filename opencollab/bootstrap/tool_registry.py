@@ -9,6 +9,7 @@ cleared in place by ``ToolOutputClearShaper``).
 
 from __future__ import annotations
 
+import inspect
 from typing import Callable
 
 from opencollab.adapters.tools.adopt_effect import AdoptEffectTool
@@ -26,6 +27,7 @@ from opencollab.adapters.tools.spawn import SpawnAgentTool, SpawnWithReviewTool
 from opencollab.adapters.tools.submit import SubmitTool
 from opencollab.adapters.tools.use_skill import UseSkillTool
 from opencollab.application.ports import SchedulerPort, SkillStorePort
+from opencollab.domain.coordination import CoordinationPolicy
 from opencollab.domain.tools import validate_unique_tool_names
 
 # Tool name -> factory. Stateless tools need nothing; scheduler-bound tools take
@@ -124,6 +126,7 @@ def build_tools_for_role(
     allow_unisolated_tests: bool = False,
     allow_file_creation: bool = True,
     tool_limits: dict[str, dict[str, int]] | None = None,
+    coordination_policy: CoordinationPolicy | None = None,
 ) -> list[Tool]:
     """Resolve tool names to Tool instances.
 
@@ -181,7 +184,13 @@ def build_tools_for_role(
                 if name == "adopt_effect":
                     continue
                 raise ValueError(f"Tool '{name}' requires a scheduler but none was provided.")
-            tools.append(SCHEDULER_TOOL_FACTORIES[name](scheduler))
+            tools.append(
+                _instantiate_scheduler_tool(
+                    SCHEDULER_TOOL_FACTORIES[name],
+                    scheduler,
+                    coordination_policy,
+                )
+            )
         elif name in SKILL_TOOL_FACTORIES:
             if skill_store is None:
                 raise ValueError(f"Tool '{name}' requires a skill store but none was provided.")
@@ -189,6 +198,20 @@ def build_tools_for_role(
         else:
             raise ValueError(f"Unknown tool '{name}' in team config. Known tools: {sorted(KNOWN_TOOL_NAMES)}")
     return tools
+
+
+def _instantiate_scheduler_tool(
+    factory: Callable[..., Tool],
+    scheduler: SchedulerPort,
+    coordination_policy: CoordinationPolicy | None,
+) -> Tool:
+    """Inject optional coordination policy only into tools that declare it."""
+    if coordination_policy is None:
+        return factory(scheduler)
+    parameters = inspect.signature(factory).parameters
+    if "coordination_policy" not in parameters:
+        return factory(scheduler)
+    return factory(scheduler, coordination_policy=coordination_policy)
 
 
 def _instantiate(

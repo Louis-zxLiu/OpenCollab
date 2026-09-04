@@ -9,6 +9,7 @@ from opencollab.domain.skill import SkillManifest
 if TYPE_CHECKING:
     from opencollab.application.scheduler_types import LaunchSpec
     from opencollab.application.tool_execution import DeferredCall, ToolRuntime
+    from opencollab.domain.completion import CompletionDisposition
     from opencollab.domain.context import TaskContext
     from opencollab.domain.rollback import (
         AdoptionResult,
@@ -416,6 +417,11 @@ class CompletionResponse(Protocol):
 
     @property
     def finish_reason(self) -> str | None: ...
+
+    @property
+    def disposition(self) -> "CompletionDisposition | None":
+        """Provider-independent completion outcome normalized by the adapter."""
+        ...
 
     @property
     def reasoning(self) -> str | None:

@@ -9,6 +9,7 @@ import uuid
 from typing import Any, Awaitable, Callable
 
 from opencollab.application._session_run_completion import _SessionRunCompletionMixin
+from opencollab.application._session_run_recovery import handle_completion_disposition
 from opencollab.application._session_run_shared import (
     _EMPTY_STOP_NUDGE,
     _EMPTY_STOP_PLACEHOLDER,
@@ -97,6 +98,7 @@ class SessionRunUseCase(_SessionRunCompletionMixin):
         watchdog_k: int = DEFAULT_WATCHDOG_K,
         low_yield_m: int = DEFAULT_LOW_YIELD_M,
         epoch_provider: Callable[[], int] | None = None,
+        max_recovery_attempts: int = 1,
     ):
         self.agent = agent
         self._initial_agent_tools = tuple(getattr(agent, "tools", ()) or ())
@@ -153,6 +155,14 @@ class SessionRunUseCase(_SessionRunCompletionMixin):
         # Guards the once-per-session retry on an empty-stop turn (see
         # ``handle_pending_response``).
         self._empty_stop_retried = False
+        if (
+            isinstance(max_recovery_attempts, bool)
+            or not isinstance(max_recovery_attempts, int)
+            or max_recovery_attempts < 0
+        ):
+            raise ValueError("max_recovery_attempts must be a non-negative integer")
+        self._max_recovery_attempts = max_recovery_attempts
+        self._recovery_attempts = 0
         # The summary a ``submit`` call in the step now finishing gave, or None
         # when this step did not submit. Read once by
         # ``autosave_pending_step``, which ends the turn at DONE.
@@ -224,6 +234,7 @@ class SessionRunUseCase(_SessionRunCompletionMixin):
         self.reset_runtime_for_user_turn()
         self._pending = None
         self._empty_stop_retried = False
+        self._recovery_attempts = 0
         self._submitted_summary = None
         self._last_steering_level = None
         self._turn_start_message_index = None
@@ -343,6 +354,7 @@ class SessionRunUseCase(_SessionRunCompletionMixin):
             # Deferred work belongs to the same turn; every other entry starts a
             # fresh once-per-turn empty-response retry allowance.
             self._empty_stop_retried = False
+            self._recovery_attempts = 0
             self._submitted_summary = None
 
     def _last_turn_answer(self) -> str:
@@ -741,24 +753,10 @@ class SessionRunUseCase(_SessionRunCompletionMixin):
         if has_content:
             await self.event_publisher.emit(self.event_factory.text_delta(response.content))
 
-        if response.finish_reason in {
-            "length",
-            "max_tokens",
-            "model_context_window_exceeded",
-        }:
-            reason = "output truncated: provider reached its generation limit"
-            self.state.append_message(
-                {
-                    "role": "system",
-                    "content": "[Output truncated by the provider. Partial response preserved; session stopped.]",
-                }
-            )
-            await self.event_publisher.emit(self.event_factory.error(reason))
-            await self.finish_step(pending.latency)
-            self.clear_pending_step()
-            self.state.transition_to(SessionPhase.STOPPED, reason=reason)
+        if await handle_completion_disposition(self, pending):
             return
 
+        # Execute only an actual structured call batch.
         if response.tool_calls:
             self.state.transition_to(SessionPhase.EXECUTING_TOOLS)
             return

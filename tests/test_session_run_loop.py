@@ -815,11 +815,15 @@ def test_llm_trace_omits_reasoning_when_absent():
     "finish_reason", ["length", "max_tokens", "model_context_window_exceeded"]
 )
 @pytest.mark.parametrize("content", [None, "partial answer"])
-def test_length_finish_reason_stops_with_partial_output(content, finish_reason):
-    # A provider length stop is truncated regardless of whether it returned a
-    # partial text fragment. It must never be reported as a clean completion.
+def test_provider_limit_response_is_recovered_once_or_stopped(content, finish_reason):
+    # Output-limit responses receive one generic recovery attempt. Context-window
+    # failures are not output truncation and therefore stop immediately.
     state = SessionState(messages=_convo())
-    llm = FakeLLM([llm_response(content=content, finish_reason=finish_reason)])
+    first = llm_response(content=content, finish_reason=finish_reason)
+    responses = [first]
+    if finish_reason != "model_context_window_exceeded":
+        responses.append(first)
+    llm = FakeLLM(responses)
     runner = build_runner(state=state, llm=llm)
 
     result = run(runner.run_loop())
@@ -827,7 +831,7 @@ def test_length_finish_reason_stops_with_partial_output(content, finish_reason):
     assert result == (content or "")
     assert state.phase is SessionPhase.STOPPED
     assert state.terminal_reason == "output truncated: provider reached its generation limit"
-    assert len(llm.calls) == 1  # no retry attempted
+    assert len(llm.calls) == len(responses)
 
 
 def test_length_finish_reason_never_executes_or_persists_partial_tool_calls():
@@ -839,15 +843,72 @@ def test_length_finish_reason_never_executes_or_persists_partial_tool_calls():
                 content="partial",
                 tool_calls=[tool_call(arguments='{"path": "unterminated')],
                 finish_reason="length",
-            )
+            ),
+            llm_response(content="recovered", total_tokens=4),
         ]
     )
     runner = build_runner(state=state, llm=llm, tool_execution=tool_execution)
 
-    assert run(runner.run_loop()) == "partial"
-    assert state.phase is SessionPhase.STOPPED
+    assert run(runner.run_loop()) == "recovered"
+    assert state.phase is SessionPhase.DONE
     assert tool_execution.calls == []
     assert not any(message.get("tool_calls") for message in state.messages)
+    assert len(llm.calls) == 2
+
+
+def test_length_finish_reason_retries_once_and_executes_only_complete_retry():
+    state = SessionState(messages=_convo())
+    tool_execution = FakeToolExecution()
+    llm = FakeLLM(
+        [
+            llm_response(
+                content=None,
+                tool_calls=[tool_call(arguments='{"path": "unterminated')],
+                finish_reason="max_tokens",
+            ),
+            llm_response(
+                tool_calls=[tool_call(name="file_read", arguments='{"path": "solution.cpp"}')],
+                finish_reason="tool_calls",
+            ),
+            llm_response(content="done"),
+        ]
+    )
+    runner = build_runner(state=state, llm=llm, tool_execution=tool_execution)
+
+    assert run(runner.run_loop()) == "done"
+    assert len(llm.calls) == 3
+    assert len(tool_execution.calls) == 1
+    assert tool_execution.calls[0][0]["function"]["name"] == "file_read"
+    assert not any(message.get("tool_calls") for message in state.messages[:-2])
+
+
+def test_tool_calls_stop_without_structured_calls_does_not_enter_executor():
+    state = SessionState(messages=_convo())
+    tool_execution = FakeToolExecution()
+    llm = FakeLLM([llm_response(content="done", tool_calls=[], finish_reason="tool_calls")])
+    runner = build_runner(state=state, llm=llm, tool_execution=tool_execution)
+
+    assert run(runner.run_loop()) == "done"
+    assert state.phase is SessionPhase.DONE
+    assert tool_execution.calls == []
+
+
+def test_completion_recovery_is_bounded_when_provider_truncates_again():
+    state = SessionState(messages=_convo())
+    tool_execution = FakeToolExecution()
+    truncated = llm_response(
+        content="partial",
+        tool_calls=[tool_call(arguments='{"path": "unterminated')],
+        finish_reason="length",
+    )
+    llm = FakeLLM([truncated, truncated])
+    runner = build_runner(state=state, llm=llm, tool_execution=tool_execution)
+
+    assert run(runner.run_loop()) == "partial"
+    assert state.phase is SessionPhase.STOPPED
+    assert state.terminal_reason == "output truncated: provider reached its generation limit"
+    assert len(llm.calls) == 2
+    assert tool_execution.calls == []
 
 def test_empty_stop_retry_budget_resets_across_turns():
     # The once-per-turn flag must reset on a new turn, or a long-lived session
@@ -975,4 +1036,3 @@ def test_a_finished_session_re_entered_for_its_answer_does_not_sign_off_twice():
     run(runner.run_loop())
 
     assert len([s for s in tracer.steps if s["step_type"] == "session_terminal"]) == 1
-

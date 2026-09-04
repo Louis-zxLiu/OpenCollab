@@ -129,8 +129,12 @@ class OverflowChildFactory:
     def __init__(self):
         self.child = None
 
-    def build_spawn_session(self, *, role, env, budget, max_steps=50, aid=-1, scheduler=None, task=None, context=""):
+    def build_spawn_session(
+        self, *, role, env, budget, max_steps=50, aid=-1, scheduler=None,
+        task=None, context="", task_context=None
+    ):
         self.child = OverflowChildSession(role, aid)
+        self.child.state.task_context = task_context
         return self.child
 
 

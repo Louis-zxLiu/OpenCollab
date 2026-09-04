@@ -10,6 +10,7 @@ from opencollab.bootstrap.tool_registry import (
     SKILL_TOOL_FACTORIES,
     build_tools_for_role,
 )
+from opencollab.domain.coordination import CoordinationPolicy
 from opencollab.domain.skill import SkillManifest
 
 
@@ -65,6 +66,16 @@ def test_build_rejects_duplicate_tool_names_before_resolution(tool_names):
 def test_stateless_tools_resolve_without_any_dependency():
     tools = build_tools_for_role(["bash", "file_read"])
     assert {t.name for t in tools} == {"bash", "file_read"}
+
+
+def test_coordination_policy_is_injected_without_tool_name_special_cases():
+    policy = CoordinationPolicy(assignment_bytes=12, context_bytes=20, total_bytes=32)
+    [tool] = build_tools_for_role(
+        ["spawn_agent"], scheduler=object(), coordination_policy=policy
+    )
+    properties = tool.parameters["properties"]
+    assert properties["task"]["maxLength"] == 12
+    assert properties["context"]["maxLength"] == 20
 
 
 def test_adopt_effect_is_omitted_without_scheduler():

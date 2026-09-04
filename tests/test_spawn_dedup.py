@@ -54,7 +54,7 @@ class ChildFactory:
         self._children = list(children) if isinstance(children, list) else [children]
 
     def build_spawn_session(
-        self, *, role, env, budget, max_steps=50, aid=-1, scheduler=None, task=None, context=""
+        self, *, role, env, budget, max_steps=50, aid=-1, scheduler=None, task=None, context="", task_context=None
     ):
         child = self._children.pop(0)
         child.state.aid = aid
@@ -132,6 +132,33 @@ def test_duplicate_spawn_tool_call_is_refused_while_in_flight():
 
         gate.set()
         await scheduler._tasks[aid]
+
+    run(scenario())
+
+
+def test_spawn_arguments_are_schema_and_runtime_bounded():
+    tool = SpawnAgentTool(object())
+    properties = tool.parameters["properties"]
+    assert properties["task"]["maxLength"] == 1024
+    assert properties["context"]["maxLength"] == 2048
+
+    runtime = ToolRuntime(
+        environment=None,
+        safety_policy=None,
+        permission_policy=None,
+        aid=0,
+        tool_call_id="call-limit",
+    )
+
+    async def scenario():
+        task_result = await tool.execute_with_runtime(
+            {"role": "coder", "task": "x" * 1025}, runtime
+        )
+        context_result = await tool.execute_with_runtime(
+            {"role": "coder", "task": "x", "context": "x" * 2049}, runtime
+        )
+        assert "1024-byte limit" in task_result
+        assert "2048-byte limit" in context_result
 
     run(scenario())
 

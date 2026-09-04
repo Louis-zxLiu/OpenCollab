@@ -12,21 +12,50 @@ from opencollab.application.scheduler_types import (
 )
 from opencollab.application.self_collaboration import validate_review_iterations
 from opencollab.application.tool_execution import DeferredCall, ToolRuntime
+from opencollab.domain.coordination import (
+    DEFAULT_COORDINATION_POLICY,
+    CoordinationPolicy,
+)
 from opencollab.domain.identity import validate_role_identity
 
-_MAX_ASSIGNMENT_BYTES = 4 * 1024
-_MAX_SUPPLEMENTARY_CONTEXT_BYTES = 8 * 1024
-_MAX_SPAWN_TEXT_BYTES = 12 * 1024
+
+def _coordination_parameters(policy: CoordinationPolicy) -> dict[str, Any]:
+    """Build the shared short-payload schema for every coordination tool."""
+    return {
+        "type": "object",
+        "properties": {
+            "task": {
+                "type": "string",
+                "description": "Short assignment only; use the task context for the original task.",
+                "maxLength": policy.assignment_bytes,
+            },
+            "context": {
+                "type": "string",
+                "description": "Concise facts or constraints only; omit full history and reasoning.",
+                "maxLength": policy.context_bytes,
+            },
+        },
+    }
 
 
-def _validate_spawn_text(value: Any, name: str, limit: int) -> str | None:
-    if not isinstance(value, str):
-        return f"Not spawned: {name} must be a string."
-    if "\x00" in value:
-        return f"Not spawned: {name} must not contain NUL bytes."
-    if len(value.encode("utf-8")) > limit:
-        return f"Not spawned: {name} exceeds the {limit}-byte limit."
-    return None
+def _spawn_parameters(policy: CoordinationPolicy) -> dict[str, Any]:
+    parameters = _coordination_parameters(policy)
+    parameters["properties"]["role"] = {
+        "type": "string",
+        "description": "The specialist role named by the team topology.",
+    }
+    parameters["required"] = ["role", "task"]
+    return parameters
+
+
+def _review_parameters(policy: CoordinationPolicy) -> dict[str, Any]:
+    parameters = _coordination_parameters(policy)
+    parameters["properties"]["max_iterations"] = {
+        "type": "integer",
+        "description": "Max review iterations (default 3).",
+    }
+    parameters["required"] = ["task"]
+    return parameters
 
 
 class SpawnAgentTool(Tool):
@@ -48,28 +77,18 @@ class SpawnAgentTool(Tool):
         "The roles you may spawn are listed in your team context; a team with an "
         "open topology also accepts a custom role name."
     )
-    parameters = {
-        "type": "object",
-        "properties": {
-            "role": {
-                "type": "string",
-                "description": "The specialist role (e.g., 'coder', 'analyst', 'reviewer').",
-            },
-            "task": {
-                "type": "string",
-                "description": "Detailed task description for the agent.",
-            },
-            "context": {
-                "type": "string",
-                "description": "Findings / file excerpts / constraints you already "
-                "have. Pass it so the specialist needn't re-discover what you know.",
-            },
-        },
-        "required": ["role", "task"],
-    }
+    # Keep the default schema available to callers that inspect the class
+    # directly; instances replace it when a composition root supplies policy.
+    parameters = _spawn_parameters(DEFAULT_COORDINATION_POLICY)
 
-    def __init__(self, scheduler: SchedulerPort):
+    def __init__(
+        self,
+        scheduler: SchedulerPort,
+        coordination_policy: CoordinationPolicy | None = None,
+    ):
         self._scheduler = scheduler
+        self._coordination_policy = coordination_policy or DEFAULT_COORDINATION_POLICY
+        self.parameters = _spawn_parameters(self._coordination_policy)
 
     async def execute_with_runtime(
         self,
@@ -82,16 +101,9 @@ class SpawnAgentTool(Tool):
             return f"Not spawned: invalid role identity ({exc})."
         task = params.get("task")
         context = params.get("context", "")
-        error = _validate_spawn_text(task, "task", _MAX_ASSIGNMENT_BYTES)
+        error = self._coordination_policy.validate(task, context)
         if error:
-            return error
-        error = _validate_spawn_text(
-            context, "context", _MAX_SUPPLEMENTARY_CONTEXT_BYTES
-        )
-        if error:
-            return error
-        if len(task.encode("utf-8")) + len(context.encode("utf-8")) > _MAX_SPAWN_TEXT_BYTES:
-            return f"Not spawned: task and context exceed the {_MAX_SPAWN_TEXT_BYTES}-byte limit."
+            return f"Not spawned: {error}."
         parent_aid = runtime.aid
         # Scheduler.spawn is the authoritative single-flight boundary. Convert
         # its domain-specific conflict into a synchronous tool result so no
@@ -132,35 +144,27 @@ class SpawnWithReviewTool(Tool):
         "then a Reviewer checks the work. If the review fails, the Coder retries with "
         "feedback. Max 3 iterations. Blocks until complete."
     )
-    parameters = {
-        "type": "object",
-        "properties": {
-            "task": {
-                "type": "string",
-                "description": "The coding task to implement and review.",
-            },
-            "context": {
-                "type": "string",
-                "description": "Optional context (file contents, requirements, etc.).",
-            },
-            "max_iterations": {
-                "type": "integer",
-                "description": "Max review iterations (default 3).",
-            },
-        },
-        "required": ["task"],
-    }
+    parameters = _review_parameters(DEFAULT_COORDINATION_POLICY)
 
-    def __init__(self, scheduler: SchedulerPort):
+    def __init__(
+        self,
+        scheduler: SchedulerPort,
+        coordination_policy: CoordinationPolicy | None = None,
+    ):
         self._scheduler = scheduler
+        self._coordination_policy = coordination_policy or DEFAULT_COORDINATION_POLICY
+        self.parameters = _review_parameters(self._coordination_policy)
 
     async def execute_with_runtime(
         self,
         params: dict[str, Any],
         runtime: ToolRuntime,
     ) -> str:
-        task = params["task"]
+        task = params.get("task")
         context = params.get("context", "")
+        error = self._coordination_policy.validate(task, context)
+        if error:
+            return f"Not started: {error}."
         max_iter = params.get("max_iterations", 3)
         try:
             max_iter = validate_review_iterations(max_iter)

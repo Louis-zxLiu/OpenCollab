@@ -41,6 +41,7 @@ from opencollab.domain.context import (
     TaskContext,
     TaskContextSection,
 )
+from opencollab.domain.coordination import CoordinationPolicy
 from opencollab.domain.scheduler import DelegationTask
 from opencollab.domain.skill import SkillManifest
 
@@ -99,6 +100,7 @@ class ContextBuilder:
         *,
         skill_store: SkillStorePort | None = None,
         project_context: str | None = None,
+        coordination_policy: CoordinationPolicy | None = None,
     ):
         self._team = team_cfg
         self._cfg = cfg
@@ -106,6 +108,7 @@ class ContextBuilder:
         # plan time and the dispatcher tool is bound to this store. Defaults to
         # an empty store so call sites that do not wire skills behave as before.
         self._skill_store: SkillStorePort = skill_store or NullSkillStore()
+        self._coordination_policy = coordination_policy
         # Startup content for the PROJECT layer (e.g. a repo map built by the
         # composition root). Empty string means "none".
         self._project_context = project_context or None
@@ -233,6 +236,7 @@ class ContextBuilder:
             allow_unisolated_shell=allow_unisolated_shell,
             allow_unisolated_tests=allow_unisolated_tests,
             tool_limits=self._team.tool_limits,
+            coordination_policy=self._coordination_policy,
         )
         cfg = self._cfg
         model = role.model or cfg.model
