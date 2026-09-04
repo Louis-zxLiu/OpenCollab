@@ -16,7 +16,9 @@ puts the worktree, and what it concludes from what Git answers.
 
 from __future__ import annotations
 
+import os
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -97,6 +99,24 @@ def _env(repo, tmp_path, branch: str) -> ContainerWorktreeEnvironment:
         worktree_root=str(tmp_path / "worktrees"),
         branch_name=branch,
     )
+
+
+async def test_verified_write_accepts_bsd_wc_padding(local_docker, monkeypatch, tmp_path):
+    """A BSD-style padded ``wc -c`` count still verifies the write."""
+    repo = _repo(tmp_path / "testbed")
+    env = _env(repo, tmp_path, "container-bsd-wc")
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    fake_wc = fake_bin / "wc"
+    fake_wc.write_text("#!/bin/sh\nprintf '      5\\n'\n", encoding="utf-8")
+    fake_wc.chmod(0o755)
+    try:
+        await env.setup()
+        monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
+        await env.write_file("padded.txt", "hello")
+        assert Path(env.workspace, "padded.txt").read_text(encoding="utf-8") == "hello"
+    finally:
+        await env.cleanup()
 
 
 async def test_an_agents_own_commits_stay_in_its_own_diff(local_docker, tmp_path):
