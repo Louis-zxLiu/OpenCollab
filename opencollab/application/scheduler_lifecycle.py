@@ -202,10 +202,7 @@ class LifecycleMixin:
             # or tool boundary. SessionRunUseCase already discarded the stale
             # response; leave the Agent non-terminal so the coordinator can
             # dispatch the corrected attempt.
-            self._release_leases(aid)
-            scb.state.set_phase(SessionPhase.IDLE)
-            if not self._shutting_down and aid not in self._rollback_pending:
-                self._start_agent_task(aid, session)
+            self._recover_stale_epoch_driver(aid, session)
             return
         except asyncio.CancelledError:
             # Driver task was never scheduled, so nothing will release these.
@@ -272,6 +269,22 @@ class LifecycleMixin:
                 tool_call_id,
                 parent_aid,
             )
+
+    def _recover_stale_epoch_driver(self, aid: int, session: Any) -> None:
+        """Discard a rollback-invalidated driver and schedule the restored turn."""
+        self._release_leases(aid)
+        state = getattr(self.table.get(aid), "state", getattr(session, "state", None))
+        if state is not None:
+            state.clear_active_turn()
+            state.set_phase(SessionPhase.IDLE)
+        if self._shutting_down or aid in self._rollback_pending or aid not in self._sessions:
+            return
+        current = self._tasks.get(aid)
+        current_task = asyncio.current_task()
+        if current is not None and not current.done() and current is not current_task:
+            return
+        self._reserve_turn_lease(aid)
+        self._start_agent_task(aid, session)
 
     def _release_leases(self, aid: int) -> None:
         """Release a terminal child's single-flight and budget leases.
@@ -433,6 +446,12 @@ class LifecycleMixin:
                 await self._drain_message_inbox(aid, allow_current_task=True)
                 await self._drain_ready_message_inboxes()
             raise
+        except StaleEpochError:
+            # Rollback already restored durable state and advanced the epoch.
+            # This driver still belongs to the pre-rollback turn, so it must
+            # quietly yield to a fresh driver instead of terminalizing the Agent.
+            self._recover_stale_epoch_driver(aid, session)
+            return
         except Exception as exc:
             self._release_leases(aid)
             terminal_reason = scb.state.terminal_reason or f"{type(exc).__name__}: {exc}"

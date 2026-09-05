@@ -18,7 +18,7 @@ from opencollab.adapters.worktree_pool import WorktreePool
 from opencollab.application.autosave import AutoSaveSubscriber
 from opencollab.application.event_bus import EventBus
 from opencollab.application.scheduler import Scheduler
-from opencollab.application.session_run import GenerationTimeoutError
+from opencollab.application.session_run import GenerationTimeoutError, StaleEpochError
 from opencollab.bootstrap.session_factory import build_session
 from opencollab.domain.agent import Agent
 from opencollab.domain.events import SchedulerEvent, SessionRuntimeEvent
@@ -153,6 +153,53 @@ def test_cleanup_closes_session_resources_once():
     run(scheduler.cleanup())
 
     assert lead.close_calls == 1
+
+
+def test_stale_epoch_driver_restarts_restored_agent_without_failure():
+    class StaleThenDone(_FakeLeadSession):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        async def run_loop(self) -> str:
+            self.calls += 1
+            if self.calls == 1:
+                self.state.set_phase(SessionPhase.IDLE)
+                raise StaleEpochError("stale Agent epoch 0; current epoch is 1")
+            self.state.append_message({"role": "assistant", "content": "recovered"})
+            self.state.set_phase(SessionPhase.DONE)
+            return "recovered"
+
+    captured: list[Any] = []
+
+    async def sink(event):
+        captured.append(event)
+
+    async def scenario():
+        scheduler = Scheduler(
+            session_factory=_FakeSessionFactory({}),
+            worktree_pool=WorktreePool(".", use_worktrees=False),
+            event_sink=EventBus(sink),
+        )
+        lead = StaleThenDone()
+        scheduler.register_lead(lead)
+        first = scheduler._start_agent_task(0, lead)
+        await asyncio.wait_for(first, timeout=1.0)
+        replacement = scheduler._tasks.get(0)
+        assert replacement is not None
+        assert replacement is not first
+        await asyncio.wait_for(replacement, timeout=1.0)
+        await asyncio.sleep(0)
+        return scheduler, lead
+
+    scheduler, lead = run(scenario())
+
+    assert lead.calls == 2
+    assert lead.state.phase is SessionPhase.DONE
+    assert scheduler.table.get(0).result == "recovered"
+    event_types = [event.type for event in _scheduler_events(captured)]
+    assert "agent_failed" not in event_types
+    assert event_types.count("agent_completed") == 1
 
 def test_cleanup_drains_queued_autosaves_before_final_snapshot(tmp_path):
     first_started = threading.Event()
