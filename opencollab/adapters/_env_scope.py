@@ -130,6 +130,7 @@ class _HostGitCheckpoints:
                 head = await self._git("rev-parse", "HEAD", env=env)
                 await self._git("read-tree", "HEAD", env=env)
                 await self._git("add", "-A", env=env)
+                await self._unstage_control_plane(env)
                 await self._stage_ignored_outputs(env)
                 tree = await self._git("write-tree", env=env)
                 commit = await self._git(
@@ -211,6 +212,7 @@ class _HostGitCheckpoints:
             try:
                 await self._git("read-tree", "HEAD", env=env)
                 await self._git("add", "-A", env=env)
+                await self._unstage_control_plane(env)
                 await self._stage_ignored_outputs(env)
                 tree = await self._git("write-tree", env=env)
                 base_tree = await self._git("rev-parse", f"{base_revision}^{{tree}}", env=env)
@@ -245,6 +247,9 @@ class _HostGitCheckpoints:
         ]
         if paths:
             await self._git("add", "-f", "--", *paths, env=env)
+
+    async def _unstage_control_plane(self, env: dict[str, str]) -> None:
+        await self._git("reset", "-q", "HEAD", "--", ".opencollab", env=env)
 
     async def _clean_non_baseline_ignored_outputs(self) -> None:
         ignored = await self._git("ls-files", "--others", "--ignored", "--exclude-standard", "-z")

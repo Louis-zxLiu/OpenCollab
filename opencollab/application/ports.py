@@ -111,6 +111,11 @@ class RevisionCapableEnvironmentPort(CheckpointableEnvironmentPort, Protocol):
         revision: "WorkspaceRevision",
     ) -> "AdoptionResult": ...
 
+    async def publish_workspace_revision(
+        self,
+        revision: "WorkspaceRevision",
+    ) -> "AdoptionResult": ...
+
 
 @runtime_checkable
 class DiffCapablePort(Protocol):
@@ -396,6 +401,10 @@ class SchedulerPort(Protocol):
 
     async def adopt_effect(self, consumer_aid: int, effect_id: str) -> str:
         """Adopt an accessible Effect's immutable workspace revision."""
+        ...
+
+    async def publish_effect(self, consumer_aid: int, effect_id: str) -> str:
+        """Publish an accessible Effect's immutable workspace revision to the source workspace."""
         ...
 
 

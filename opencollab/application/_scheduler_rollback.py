@@ -299,6 +299,75 @@ class SchedulerRollbackMixin:
         )
         return f"Adopted Effect {effect_id} into this Agent Scope."
 
+    async def publish_effect(self, consumer_aid: int, effect_id: str) -> str:
+        """Publish one visible Effect revision to the source workspace."""
+        if self._lineage is None or not self._rollback_enabled:
+            return "Error: workspace Effect publishing requires rollback-enabled Team mode."
+        effect = self._lineage.get_effect(effect_id)
+        if effect is None:
+            return "Error: unknown effect_id."
+        if effect.status == "quarantined":
+            return "Error: quarantined Effects cannot be published."
+        if not self._lineage.consumer_can_access(effect_id, consumer_aid):
+            return "Error: this Agent has not received the requested Effect."
+        revision = self._lineage.workspace_revision(effect_id)
+        if revision is None:
+            return f"Effect {effect_id} has no workspace changes to publish."
+        lead = self._sessions.get(0)
+        environment = getattr(lead, "env", None) if lead is not None else None
+        publish = getattr(environment, "publish_workspace_revision", None)
+        if not callable(publish):
+            return "Error: source workspace cannot publish workspace revisions."
+        outcome = await publish(revision)
+        if outcome.status not in {"adopted", "skipped"}:
+            reason = outcome.reason or outcome.status
+            self._trace_rollback(
+                "workspace_effect_publish_failed",
+                {
+                    "effect_id": effect_id,
+                    "producer_aid": effect.producer_aid,
+                    "consumer_aid": consumer_aid,
+                    "workspace": getattr(environment, "source_workspace", None)
+                    or getattr(environment, "workspace", None),
+                    "reason": reason,
+                },
+            )
+            return f"Error: Effect publish {outcome.status}: {reason}"
+        acknowledged = await self._acknowledge_workspace_effect(effect)
+        if acknowledged is not None:
+            return acknowledged
+        self._trace_rollback(
+            "workspace_effect_published",
+            {
+                "effect_id": effect_id,
+                "producer_aid": effect.producer_aid,
+                "consumer_aid": consumer_aid,
+                "revision": revision.revision,
+            },
+        )
+        return f"Published Effect {effect_id} to the source workspace."
+
+    async def _acknowledge_workspace_effect(self, effect: Any) -> str | None:
+        producer = self._sessions.get(effect.producer_aid)
+        producer_env = getattr(producer, "env", None) if producer is not None else None
+        acknowledge = getattr(producer_env, "acknowledge_workspace_effect", None)
+        if not callable(acknowledge):
+            return None
+        try:
+            await acknowledge(effect.effect_id)
+        except Exception as exc:
+            self._trace_rollback(
+                "workspace_effect_acknowledge_failed",
+                {
+                    "effect_id": effect.effect_id,
+                    "producer_aid": effect.producer_aid,
+                    "workspace": getattr(producer_env, "workspace", None),
+                    "error": str(exc),
+                },
+            )
+            return f"Error: workspace Effect acknowledgement failed: {exc}"
+        return None
+
     async def _mark_effect_delivered(self, producer_aid: int, effect_id: str) -> None:
         session = self._sessions.get(producer_aid)
         environment = getattr(session, "env", None) if session is not None else None

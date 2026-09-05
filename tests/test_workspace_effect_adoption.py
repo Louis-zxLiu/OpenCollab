@@ -13,6 +13,7 @@ from opencollab.bootstrap.tool_registry import KNOWN_TOOL_NAMES
 from opencollab.domain.pending import RowStatus
 from opencollab.domain.rollback import (
     AdoptionResult,
+    BaselineEntry,
     CheckpointBoundary,
     EffectRef,
     LineageEnvelope,
@@ -108,6 +109,82 @@ async def test_workspace_effect_freezes_complete_scope_without_moving_head_or_in
         await parent.cleanup()
 
 
+async def test_publish_workspace_revision_exports_arbitrary_ignored_output_to_source(
+    tmp_path,
+) -> None:
+    source = _repo(tmp_path / "repo")
+    (source / ".gitignore").write_text("ignored-*\n.opencollab/\n", encoding="utf-8")
+    _git(source, "add", ".gitignore")
+    _git(source, "commit", "-qm", "ignore local outputs")
+    (source / "ignored-baseline").write_text("baseline\n", encoding="utf-8")
+
+    lead = WorktreeEnvironment(str(source), branch_name="publish-lead", require_git=True)
+    child = None
+    try:
+        await lead.setup()
+        baseline = await lead.capture_workspace_baseline()
+        spawn_revision = await lead.capture_workspace_revision("spawn", owner_aid=0)
+        child = WorktreeEnvironment(
+            str(source),
+            branch_name="publish-child",
+            require_git=True,
+            base_revision=spawn_revision.revision,
+            baseline=baseline,
+        )
+        await child.setup()
+        await child.write_file("ignored-final-answer", "final\n")
+        control = await child.exec_cmd("mkdir -p .opencollab && printf secret > .opencollab/private.txt")
+        assert control.returncode == 0
+
+        revision = await child.capture_workspace_revision("child-result", owner_aid=2)
+        outcome = await lead.publish_workspace_revision(revision)
+
+        assert outcome.status == "adopted"
+        assert (source / "ignored-final-answer").read_text(encoding="utf-8") == "final\n"
+        assert (source / "ignored-baseline").read_text(encoding="utf-8") == "baseline\n"
+        assert not (source / ".opencollab" / "private.txt").exists()
+    finally:
+        if child is not None:
+            await child.cleanup()
+        await lead.cleanup()
+
+
+async def test_publish_workspace_revision_fails_closed_when_baseline_changed(tmp_path) -> None:
+    source = _repo(tmp_path / "repo")
+    (source / ".gitignore").write_text("ignored-*\n", encoding="utf-8")
+    _git(source, "add", ".gitignore")
+    _git(source, "commit", "-qm", "ignore local outputs")
+    (source / "ignored-baseline").write_text("baseline\n", encoding="utf-8")
+
+    lead = WorktreeEnvironment(str(source), branch_name="publish-baseline-lead", require_git=True)
+    child = None
+    try:
+        await lead.setup()
+        baseline = await lead.capture_workspace_baseline()
+        spawn_revision = await lead.capture_workspace_revision("spawn", owner_aid=0)
+        child = WorktreeEnvironment(
+            str(source),
+            branch_name="publish-baseline-child",
+            require_git=True,
+            base_revision=spawn_revision.revision,
+            baseline=baseline,
+        )
+        await child.setup()
+        await child.write_file("ignored-final-answer", "final\n")
+        revision = await child.capture_workspace_revision("child-result", owner_aid=2)
+        (source / "ignored-baseline").write_text("changed\n", encoding="utf-8")
+
+        outcome = await lead.publish_workspace_revision(revision)
+
+        assert outcome.status == "failed"
+        assert outcome.reason == "baseline mutation: ignored-baseline"
+        assert not (source / "ignored-final-answer").exists()
+    finally:
+        if child is not None:
+            await child.cleanup()
+        await lead.cleanup()
+
+
 async def test_no_change_effect_and_conflict_preserve_consumer_scope(tmp_path) -> None:
     source = _repo(tmp_path / "repo")
     producer = WorktreeEnvironment(str(source), branch_name="no-change-producer", require_git=True)
@@ -167,12 +244,36 @@ class _AdoptionEnvironment:
         return AdoptionResult("adopted", revision=revision.revision)
 
 
+class _PublishEnvironment:
+    workspace = "/source"
+    source_workspace = "/source"
+
+    def __init__(self) -> None:
+        self.published: list[WorkspaceRevision] = []
+
+    async def publish_workspace_revision(self, revision: WorkspaceRevision) -> AdoptionResult:
+        self.published.append(revision)
+        return AdoptionResult("adopted", revision=revision.revision)
+
+
 class _AdoptionHarness(SchedulerRollbackMixin):
     def __init__(self) -> None:
         self._lineage = RollbackService()
         self._rollback_enabled = True
         self.environment = _AdoptionEnvironment()
         self._sessions = {42: SimpleNamespace(env=self.environment)}
+        self.traces = []
+
+    def _trace_rollback(self, step_type, payload) -> None:
+        self.traces.append((step_type, payload))
+
+
+class _PublishHarness(SchedulerRollbackMixin):
+    def __init__(self) -> None:
+        self._lineage = RollbackService()
+        self._rollback_enabled = True
+        self.publisher = _PublishEnvironment()
+        self._sessions = {0: SimpleNamespace(env=self.publisher), 42: SimpleNamespace(env=SimpleNamespace())}
         self.traces = []
 
     def _trace_rollback(self, step_type, payload) -> None:
@@ -196,6 +297,25 @@ async def test_only_effect_consumer_can_adopt_and_quarantine_blocks_adoption() -
     scheduler._lineage.quarantine(effect.effect_id, "invalid")
     quarantined = await scheduler.adopt_effect(42, effect.effect_id)
     assert quarantined == "Error: quarantined Effects cannot be adopted."
+
+
+async def test_only_effect_consumer_can_publish_and_quarantine_blocks_publish() -> None:
+    scheduler = _PublishHarness()
+    effect = scheduler._lineage.create_effect(8, 0, "branch", 0, "child_result", (), "done")
+    revision = WorkspaceRevision("revision", "base", files=(BaselineEntry("answer.any", "file", 0o644, 4, "hash"),))
+    scheduler._lineage.attach_workspace_revision(effect.effect_id, revision)
+
+    denied = await scheduler.publish_effect(42, effect.effect_id)
+    assert denied == "Error: this Agent has not received the requested Effect."
+
+    scheduler._lineage.register_consumer(effect.effect_id, 42)
+    accepted = await scheduler.publish_effect(42, effect.effect_id)
+    assert accepted.startswith("Published Effect")
+    assert scheduler.publisher.published == [revision]
+
+    scheduler._lineage.quarantine(effect.effect_id, "invalid")
+    quarantined = await scheduler.publish_effect(42, effect.effect_id)
+    assert quarantined == "Error: quarantined Effects cannot be published."
 
 
 class _DeliveryLineage:
@@ -239,4 +359,5 @@ async def test_effect_capture_failure_wakes_parent_with_bounded_failure() -> Non
 
 def test_transitional_child_adoption_tool_is_removed() -> None:
     assert "adopt_effect" in KNOWN_TOOL_NAMES
+    assert "publish_effect" in KNOWN_TOOL_NAMES
     assert "adopt_child_changes" not in KNOWN_TOOL_NAMES

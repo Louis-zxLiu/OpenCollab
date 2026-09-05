@@ -88,9 +88,11 @@ TESTER_TOOL_NAMES: tuple[str, ...] = (
 # Fallback bundle for a role an ``allow_all`` team file spawns without declaring
 # it. Derived from the registry so it stays the single source of truth — add a
 # tool there and the fallback picks it up, no hand-maintained list to drift. It
-# is work tools only: no coordination (it must not fan out further) and no skill
-# dispatch.
-BASE_TOOL_NAMES: tuple[str, ...] = tuple(sorted(KNOWN_TOOL_NAMES - COORDINATION_TOOL_NAMES - {"use_skill"}))
+# is work tools only: no coordination (it must not fan out further), no source
+# publishing, and no skill dispatch.
+BASE_TOOL_NAMES: tuple[str, ...] = tuple(
+    sorted(KNOWN_TOOL_NAMES - COORDINATION_TOOL_NAMES - {"publish_effect", "use_skill"})
+)
 
 # The three bundles above are hand-written subsets, so a rename in the registry
 # would silently leave a role short a tool. Fail at import instead.

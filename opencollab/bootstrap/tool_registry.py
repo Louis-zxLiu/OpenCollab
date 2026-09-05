@@ -22,6 +22,7 @@ from opencollab.adapters.tools.git_diff import GitDiffTool
 from opencollab.adapters.tools.human import AskUserTool
 from opencollab.adapters.tools.invalidate_effect import InvalidateEffectTool
 from opencollab.adapters.tools.message import MessageAgentTool, TeamStatusTool
+from opencollab.adapters.tools.publish_effect import PublishEffectTool
 from opencollab.adapters.tools.run_tests import RunTestsTool
 from opencollab.adapters.tools.spawn import SpawnAgentTool, SpawnWithReviewTool
 from opencollab.adapters.tools.submit import SubmitTool
@@ -53,6 +54,7 @@ SCHEDULER_TOOL_FACTORIES: dict[str, Callable[[SchedulerPort], Tool]] = {
     "message_agent": MessageAgentTool,
     "team_status": TeamStatusTool,
     "invalidate_effect": InvalidateEffectTool,
+    "publish_effect": PublishEffectTool,
 }
 # Skill-bound tools take a ``SkillStorePort`` so the dispatcher can fetch a
 # skill's body by name. One generic dispatcher serves all skills.
@@ -62,9 +64,13 @@ SKILL_TOOL_FACTORIES: dict[str, Callable[[SkillStorePort], Tool]] = {
 KNOWN_TOOL_NAMES: frozenset[str] = (
     frozenset(STATELESS_TOOL_FACTORIES) | frozenset(SCHEDULER_TOOL_FACTORIES) | frozenset(SKILL_TOOL_FACTORIES)
 )
-# Tools that let a role address or control teammates. ``adopt_effect`` is
-# scheduler-bound for authorization, but changes only the caller's own Scope.
-COORDINATION_TOOL_NAMES: frozenset[str] = frozenset(SCHEDULER_TOOL_FACTORIES) - {"adopt_effect"}
+# Tools that let a role address or control teammates. ``adopt_effect`` and
+# ``publish_effect`` are scheduler-bound for authorization, but they apply an
+# already visible Effect rather than contacting another Agent.
+COORDINATION_TOOL_NAMES: frozenset[str] = frozenset(SCHEDULER_TOOL_FACTORIES) - {
+    "adopt_effect",
+    "publish_effect",
+}
 # Bulky, reconstructible read-only tool outputs whose OLD results may be cleared
 # in place by ``ToolOutputClearShaper``. Intersected with the real registry so a
 # renamed/removed tool drops out automatically (driven from real names, not a

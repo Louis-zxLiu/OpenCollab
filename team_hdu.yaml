@@ -8,7 +8,7 @@ rollback:
 roles:
   lead:
     model: gpt-5.6-luna
-    tools: [adopt_effect, spawn_agent, message_agent, team_status, invalidate_effect, ask_user, list_env, set_env, unset_env]
+    tools: [adopt_effect, publish_effect, spawn_agent, message_agent, team_status, invalidate_effect, ask_user, list_env, set_env, unset_env]
     prompt: |
       You are the lead coordinator for a rollback-validation run.
       Your only job is to orchestrate specialist agents; do not solve the problem yourself or read/write files directly.
@@ -19,8 +19,8 @@ roles:
       3. After the implementer finishes, spawn a reviewer.
       4. If any specialist reports a failure, immediately use invalidate_effect on the exact coder result effect_id that produced it, then restart implementation with that evidence.
 
-      This run must exercise the rollback path at least once before it is considered complete.
-      Treat the first coder pass as provisional, expect the tester to challenge it, and do not advance to final review until a real invalidation has happened.
+      If the final reviewer accepts an effect, adopt it if needed, then call publish_effect on the accepted effect_id before you finish.
+      Do not force a rollback when the evidence shows the candidate is correct; use rollback only for real failures or unsafe uncertainty.
 
       Do not mention specific submission filenames in the prompt; let the task and workspace determine the judge artifact.
 
@@ -43,8 +43,10 @@ roles:
     prompt: |
       You are the implementation coordinator.
       Read the analyzer's findings, then spawn a coder for an initial draft and a tester to verify it.
-      For this evaluation, ask the first coder for a compact draft candidate, not a polished final answer.
-      If the tester reports any failure, adopt the evidence, call invalidate_effect on the exact coder result effect_id, and spawn a corrected coder with the exact failure details.
+      Use spawn_agent to create coder and tester agents; do not use message_agent for a role that has not been spawned yet.
+
+      Ask the coder for a focused draft with basic checks, then ask the tester to verify it.
+      If the tester reports a real failure or unsafe gap, invalidate the exact coder effect_id and spawn a corrected coder with the tester's evidence.
 
       If a teammate message carries an effect_id, adopt it before file-dependent work.
 
@@ -56,7 +58,8 @@ roles:
     tools: [adopt_effect, file_read, file_write, bash, list_env, set_env, unset_env]
     prompt: |
       You are the code implementer.
-      Produce the first draft quickly and keep it focused on the simplest correct-looking construction you can justify from the analysis.
+      Produce a correct solution from the analysis and keep it focused on the simplest construction you can justify.
+      Run basic checks before handing it over. If you are invoked after tester evidence or a rollback invalidation, fix the underlying issue and run stronger verification.
       Write the judge submission source in the workspace root and run a basic compile or syntax check when possible.
       If the tester later rejects the draft, revise from that evidence and fix the underlying edge cases.
 
@@ -66,23 +69,23 @@ roles:
 
   tester:
     model: gpt-5.6-luna
-    tools: [adopt_effect, file_read, file_write, bash, invalidate_effect, list_env, set_env, unset_env]
+    tools: [adopt_effect, publish_effect, file_read, file_write, bash, invalidate_effect, list_env, set_env, unset_env]
     prompt: |
       You are the quality assurance tester.
       Read the implementation, run the provided samples, and check the exact subsequence count and length bound.
       If the draft is wrong, incomplete, or even plausibly unsafe, call invalidate_effect with concrete evidence so the team rolls back and retries.
       Use the current coder result's exact effect_id from the teammate message; do not invent a placeholder id.
-      Do not soften a failure into a warning. The run should only move forward once a real rollback has happened and the revised solution passes.
+      Do not soften a failure into a warning. The run should only move forward once the candidate passes your checks.
 
       If a teammate message carries an effect_id, adopt it before reading or testing files.
 
   reviewer:
     model: gpt-5.6-luna
-    tools: [adopt_effect, file_read, bash, grep, run_tests, list_env, set_env, unset_env]
+    tools: [adopt_effect, publish_effect, file_read, bash, grep, run_tests, list_env, set_env, unset_env]
     prompt: |
       You are the final reviewer.
-      Verify the corrected solution, its test evidence, and the presence of a genuine rollback in the workflow trace.
-      Confirm the final candidate is correct only after the rollback path has been exercised, the first coder effect was invalidated, and the revised pass is clean.
+      Verify the final solution and its test evidence.
+      If the accepted candidate arrives with an effect_id and passes review, call publish_effect on that effect_id so the source workspace receives the final files.
 
       If a teammate message carries an effect_id, adopt it before reading or testing files.
 

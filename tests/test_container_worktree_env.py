@@ -99,6 +99,48 @@ def _env(repo, tmp_path, branch: str) -> ContainerWorktreeEnvironment:
     )
 
 
+async def test_publish_workspace_revision_exports_ignored_output_to_container_source(
+    local_docker,
+    tmp_path,
+):
+    repo = _repo(tmp_path / "testbed")
+    (repo / ".gitignore").write_text("ignored-*\n.opencollab/\n", encoding="utf-8")
+    _git(repo, "add", ".gitignore")
+    _git(repo, "commit", "-qm", "ignore local outputs")
+    (repo / "ignored-baseline").write_text("baseline\n", encoding="utf-8")
+
+    lead = _env(repo, tmp_path, "container-publish-lead")
+    child = None
+    try:
+        await lead.setup()
+        baseline = await lead.capture_workspace_baseline()
+        spawn_revision = await lead.capture_workspace_revision("spawn", owner_aid=0)
+        child = ContainerWorktreeEnvironment(
+            container_id=CONTAINER_ID,
+            repository_root=str(repo),
+            worktree_root=str(tmp_path / "worktrees"),
+            branch_name="container-publish-child",
+            base_revision=spawn_revision.revision,
+            baseline=baseline,
+        )
+        await child.setup()
+        await child.write_file("ignored-final-answer", "final\n")
+        control = await child.exec_cmd("mkdir -p .opencollab && printf secret > .opencollab/private.txt")
+        assert control.returncode == 0
+
+        revision = await child.capture_workspace_revision("child-result", owner_aid=2)
+        outcome = await lead.publish_workspace_revision(revision)
+
+        assert outcome.status == "adopted"
+        assert (repo / "ignored-final-answer").read_text(encoding="utf-8") == "final\n"
+        assert (repo / "ignored-baseline").read_text(encoding="utf-8") == "baseline\n"
+        assert not (repo / ".opencollab" / "private.txt").exists()
+    finally:
+        if child is not None:
+            await child.cleanup()
+        await lead.cleanup()
+
+
 async def test_an_agents_own_commits_stay_in_its_own_diff(local_docker, tmp_path):
     repo = _repo(tmp_path / "testbed")
     env = _env(repo, tmp_path, "container-coder")

@@ -144,6 +144,7 @@ class ContainerWorktreeEnvironment(DockerEnvironment):
             "set -eu; idx=$(mktemp); trap 'rm -f \"$idx\"' EXIT; "
             "GIT_INDEX_FILE=$idx git read-tree HEAD; "
             "GIT_INDEX_FILE=$idx git add -A; "
+            "GIT_INDEX_FILE=$idx git reset -q HEAD -- .opencollab 2>/dev/null || true; "
             "GIT_INDEX_FILE=$idx git ls-files --others --ignored --exclude-standard -z | "
             "while IFS= read -r -d '' p; do case \"$p\" in .opencollab|.opencollab/*) ;; "
             "*) GIT_INDEX_FILE=$idx git add -f -- \"$p\" ;; esac; done; "
@@ -189,6 +190,7 @@ class ContainerWorktreeEnvironment(DockerEnvironment):
             "set -eu; idx=$(mktemp); trap 'rm -f \"$idx\"' EXIT; "
             "GIT_INDEX_FILE=$idx git read-tree HEAD; "
             "GIT_INDEX_FILE=$idx git add -A; "
+            "GIT_INDEX_FILE=$idx git reset -q HEAD -- .opencollab 2>/dev/null || true; "
             "GIT_INDEX_FILE=$idx git ls-files --others --ignored --exclude-standard -z | "
             f"while IFS= read -r -d '' p; do case \"$p\" in {ignored_skip}) ;; "
             "*) GIT_INDEX_FILE=$idx git add -f -- \"$p\" ;; esac; done; "
@@ -335,6 +337,91 @@ class ContainerWorktreeEnvironment(DockerEnvironment):
             await self._git(self._worktree_dir, "cherry-pick", "--abort")
             return AdoptionResult("failed", reason=(picked.stderr or "cherry-pick failed")[:500])
         return AdoptionResult("adopted", revision=revision.revision)
+
+    async def publish_workspace_revision(self, revision: WorkspaceRevision) -> AdoptionResult:
+        """Apply one immutable Effect revision to the container repository root."""
+        self._ensure_active()
+        if not self._worktree_registered:
+            await self.setup()
+        if not revision.changed:
+            return AdoptionResult("skipped", revision=revision.revision)
+        baseline_error = await self._validate_repository_baseline()
+        if baseline_error is not None:
+            return AdoptionResult("failed", reason=baseline_error)
+        valid = await self._git(self._repository_root, "cat-file", "-e", f"{revision.revision}^{{commit}}")
+        if valid.returncode != 0:
+            return AdoptionResult("failed", reason="workspace revision is unavailable")
+        parent = await self._git(self._repository_root, "rev-parse", f"{revision.revision}^")
+        if parent.returncode != 0 or parent.stdout.strip() != revision.base_revision:
+            return AdoptionResult("failed", reason="workspace revision base mismatch")
+        head_tree = await self._git(self._repository_root, "rev-parse", "HEAD^{tree}")
+        base_tree = await self._git(self._repository_root, "rev-parse", f"{revision.base_revision}^{{tree}}")
+        if (
+            head_tree.returncode != 0
+            or base_tree.returncode != 0
+            or head_tree.stdout.strip() != base_tree.stdout.strip()
+        ):
+            return AdoptionResult("conflict", reason="source workspace is not at the revision base")
+        changed = await self._git(
+            self._repository_root,
+            "diff-tree",
+            "--no-commit-id",
+            "--name-only",
+            "-r",
+            "-z",
+            revision.revision,
+        )
+        if changed.returncode != 0:
+            return AdoptionResult("failed", reason=changed.stderr.strip() or "cannot inspect workspace revision")
+        baseline_paths = self._baseline.by_path()
+        for path in (item for item in changed.stdout.split("\0") if item):
+            if is_control_plane(path) or path in baseline_paths:
+                return AdoptionResult("failed", reason=f"workspace revision touches protected path {path}")
+        status = await self._git(self._repository_root, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+        if status.returncode != 0:
+            return AdoptionResult("failed", reason=status.stderr.strip() or "cannot inspect source workspace")
+        dirty = [path for path in _status_paths(status.stdout) if not is_control_plane(path)]
+        if dirty:
+            return AdoptionResult("conflict", reason=f"source workspace is not clean: {dirty[0]}")
+        added = await self._git(
+            self._repository_root,
+            "diff-tree",
+            "--no-commit-id",
+            "--name-only",
+            "-r",
+            "-z",
+            "--diff-filter=A",
+            revision.revision,
+        )
+        for path in (item for item in added.stdout.split("\0") if item):
+            tracked = await self._git(self._repository_root, "ls-files", "--error-unmatch", "--", path)
+            exists = await self._exec(
+                f"test -e {shlex.quote(posixpath.join(self._repository_root, path))} "
+                f"-o -L {shlex.quote(posixpath.join(self._repository_root, path))}",
+                timeout=CONTAINER_GIT_TIMEOUT_SECONDS,
+            )
+            if exists.returncode == 0 and tracked.returncode != 0:
+                return AdoptionResult("conflict", reason=f"source workspace already has untracked {path}")
+        picked = await self._git(self._repository_root, "cherry-pick", "--no-commit", revision.revision)
+        if picked.returncode != 0:
+            await self._git(self._repository_root, "cherry-pick", "--abort")
+            return AdoptionResult("failed", reason=(picked.stderr or "cherry-pick failed")[:500])
+        return AdoptionResult("adopted", revision=revision.revision)
+
+    async def _validate_repository_baseline(self) -> str | None:
+        for entry in self._baseline.entries:
+            path = posixpath.join(self._repository_root, entry.path)
+            stat = await self._exec(
+                f"stat -c '%a %s' -- {shlex.quote(path)}",
+                timeout=CONTAINER_GIT_TIMEOUT_SECONDS,
+            )
+            digest = await self._exec(f"sha256sum -- {shlex.quote(path)}", timeout=CONTAINER_GIT_TIMEOUT_SECONDS)
+            if stat.returncode != 0 or digest.returncode != 0:
+                return f"baseline mutation: missing {entry.path}"
+            mode, size = stat.stdout.strip().split()
+            if int(mode, 8) != entry.mode or int(size) != entry.size or digest.stdout.split()[0] != entry.content_hash:
+                return f"baseline mutation: {entry.path}"
+        return None
 
     async def restore_scope(self, checkpoint: ScopeCheckpoint) -> RestoreResult:
         if self._scope_checkpoints.get(checkpoint.checkpoint_id) != checkpoint:
@@ -565,6 +652,21 @@ def _absolute_container_path(path: str, label: str) -> str:
     if normalized == "/":
         raise ValueError(f"container {label} must not be the container root")
     return normalized
+
+
+def _status_paths(output: str) -> list[str]:
+    paths: list[str] = []
+    records = [record for record in output.split("\0") if record]
+    index = 0
+    while index < len(records):
+        record = records[index]
+        paths.append(record[3:] if len(record) >= 4 and record[2] == " " else record)
+        if len(record) >= 2 and (record[0] in {"R", "C"} or record[1] in {"R", "C"}):
+            index += 1
+            if index < len(records):
+                paths.append(records[index])
+        index += 1
+    return paths
 
 
 __all__ = ["CONTAINER_GIT_TIMEOUT_SECONDS", "ContainerWorktreeEnvironment"]
