@@ -145,7 +145,22 @@ environment variable values.
 - A missing or contaminated checkpoint produces a skipped/failed restore result
   and must be handled by the caller as a non-success outcome.
 
-## 8. Reproducibility
+## 8. Publication and Identity
+
+The code and tests described in this report were verified at implementation
+commit `741e21a0982791c9bc2026d238704c88df7e7c85`.
+
+The Fork's protected `main` branch rejected the requested non-fast-forward
+update. No force bypass was attempted. The verified commit was published to
+the GitHub branch `feat/explicit-effect-rollback-v1`; the existing history was
+also preserved by the backup tag
+`backup/pre-thin-rollback-v1-20260905-234251`.
+
+The final local checkout, the published feature branch, and the remote Linux
+checkout were compared by commit ID and Git tree ID. The remote workspace used
+for testing was not treated as a source of unverified results.
+
+## 9. Reproducibility
 
 The following commands are the evidence-producing commands used for the final
 verification:
