@@ -466,6 +466,12 @@ class ToolExecutionRuntimeMixin:
         if not tool:
             return None, f"Error: unknown tool '{tool_name}'."
 
+        gate = getattr(self, "_coordination_error", None)
+        if callable(gate):
+            coordination_error = gate(tool_name)
+            if coordination_error:
+                return None, coordination_error
+
         observation_args = sanitize_observation_args(args)
         await self._emit_observation(
             lambda: self.event_factory.tool_start(

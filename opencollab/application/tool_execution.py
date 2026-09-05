@@ -37,6 +37,7 @@ from opencollab.application.tool_execution_runtime import (
 from opencollab.application.tool_execution_runtime import (
     ToolRuntime as ToolRuntime,
 )
+from opencollab.domain.coordination_protocol import VerificationEvidence
 from opencollab.domain.session import SessionState
 from opencollab.domain.tools import MAX_CALL_HASH_WINDOW, LoopDetection, ToolProcessingResult
 
@@ -356,6 +357,47 @@ class ToolExecutionUseCase(ToolExecutionRuntimeMixin):
             name="environment_abort_timeout",
         )
         self._pending_cleanup_tasks: set[asyncio.Task[Any]] = set()
+        self._coordination_gate: Callable[[int, str], str | None] | None = None
+        self._evidence_recorder: Callable[[VerificationEvidence], None] | None = None
+
+    def set_coordination_gate(
+        self, gate: Callable[[int, str], str | None] | None
+    ) -> None:
+        """Bind the application protocol's no-side-effect execution gate."""
+        self._coordination_gate = gate
+
+    def _coordination_error(self, tool_name: str) -> str | None:
+        if self._coordination_gate is None:
+            return None
+        return self._coordination_gate(self.state.aid, tool_name)
+
+    def set_evidence_recorder(
+        self, recorder: Callable[[VerificationEvidence], None] | None
+    ) -> None:
+        self._evidence_recorder = recorder
+
+    def _record_executable_evidence(
+        self, tool_name: str, args: dict[str, Any], tool_id: str, output: str
+    ) -> None:
+        if self._evidence_recorder is None or tool_name != "run_tests":
+            return
+        if output.startswith(_TOOL_ERROR_PREFIXES):
+            return
+        frontier = sorted(self.state.rollback.causal_frontier)
+        if not frontier:
+            return
+        command = str(args.get("target") or args.get("runner") or "run_tests")
+        evidence = VerificationEvidence(
+            evidence_id=f"v_{tool_id}",
+            effect_id=frontier[-1],
+            tool_call_id=tool_id,
+            tool_name=tool_name,
+            command=command,
+            exit_code=0,
+            verified="Verdict: GREEN" in output or "GREEN" in output,
+            result_hash=hashlib.sha256(output.encode("utf-8", errors="replace")).hexdigest(),
+        )
+        self._evidence_recorder(evidence)
 
     @property
     def pending_cleanup_tasks(self) -> tuple[asyncio.Task[Any], ...]:
@@ -465,6 +507,22 @@ class ToolExecutionUseCase(ToolExecutionRuntimeMixin):
                 })
                 continue
 
+            coordination_error = self._coordination_error(tool_name)
+            if coordination_error:
+                self._trace_short_circuit(
+                    "tool_error",
+                    tool_name,
+                    {"error": "effect_adoption_required"},
+                )
+                result.messages_to_append.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_id,
+                        "content": coordination_error,
+                    }
+                )
+                continue
+
             schema = getattr(tool, "parameters", None)
             if isinstance(schema, dict):
                 schema_errors = validate(args, schema)
@@ -495,6 +553,7 @@ class ToolExecutionUseCase(ToolExecutionRuntimeMixin):
             )
 
             tool_output, tool_latency = await self.execute_tool(tool, args, tool_id=tool_id)
+            self._record_executable_evidence(tool_name, args, tool_id, tool_output)
             # The full result is persisted; a per-tool-result budget shaper caps
             # what the model sees at call time (see application.shaping).
 
@@ -642,6 +701,10 @@ class ToolExecutionUseCase(ToolExecutionRuntimeMixin):
                     f"Error: unknown tool '{tool_name}'. Available: "
                     f"{[t.name for t in self.agent.tools]}"
                 )
+                continue
+            coordination_error = self._coordination_error(tool_name)
+            if coordination_error:
+                errors[index] = coordination_error
                 continue
             schema = getattr(tool, "parameters", None)
             if isinstance(schema, dict):

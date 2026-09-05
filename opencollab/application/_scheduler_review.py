@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
 
 from opencollab.application.self_collaboration import run_spawn_with_review
 
@@ -54,12 +55,21 @@ class SchedulerReviewMixin:
         task: str,
         context: str = "",
         max_iterations: int = 3,
+        *,
+        source_effect_ids: Sequence[str] = (),
     ) -> str:
         """Self-Collaboration: Coder -> Reviewer loop (see ``self_collaboration``)."""
         tracker = {"outstanding": 0}
         token = self._review_parent_lease_tracker.set((parent_aid, tracker))
         try:
-            return await run_spawn_with_review(self, parent_aid, task, context, max_iterations)
+            return await run_spawn_with_review(
+                self,
+                parent_aid,
+                task,
+                context,
+                max_iterations,
+                source_effect_ids=source_effect_ids,
+            )
         finally:
             self._review_parent_lease_tracker.reset(token)
             if tracker["outstanding"] > 0 and not self._shutting_down and self.table.get(parent_aid) is not None:

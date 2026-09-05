@@ -38,6 +38,7 @@ from opencollab.application.ports import (
     TracePort,
 )
 from opencollab.application.tool_execution import ToolExecutionUseCase
+from opencollab.domain.coordination_protocol import VerificationEvidence
 from opencollab.domain.events import SessionRuntimeEvent
 from opencollab.domain.session import SessionPhase, SessionState
 
@@ -210,6 +211,21 @@ class SessionRunUseCase(_SessionRunCompletionMixin):
     def set_epoch_provider(self, provider: Callable[[], int] | None) -> None:
         """Bind the scheduler's per-Agent epoch fence after construction."""
         self._epoch_provider = provider
+
+    def set_coordination_gate(
+        self, gate: Callable[[int, str], str | None] | None
+    ) -> None:
+        """Bind the Scheduler's effect-adoption execution gate."""
+        setter = getattr(self.tool_execution, "set_coordination_gate", None)
+        if callable(setter):
+            setter(gate)
+
+    def set_evidence_recorder(
+        self, recorder: Callable[[VerificationEvidence], None] | None
+    ) -> None:
+        setter = getattr(self.tool_execution, "set_evidence_recorder", None)
+        if callable(setter):
+            setter(recorder)
 
     def set_checkpoint_callback(
         self, callback: Callable[[str], Awaitable[None]] | None

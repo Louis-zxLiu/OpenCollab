@@ -155,6 +155,8 @@ class RoleConfig(BaseModel):
     task_context_sections: list[str] = Field(
         default_factory=lambda: [section.value for section in TaskContextSection]
     )
+    can_await_coordination: bool = True
+    requires_executable_verification: bool = False
     tools: list[str] = Field(default_factory=list)
 
     @field_validator("prompt")
@@ -217,6 +219,8 @@ class _RoleFileModel(BaseModel):
     task_context_sections: list[str] = Field(
         default_factory=lambda: [section.value for section in TaskContextSection]
     )
+    can_await_coordination: bool = True
+    requires_executable_verification: bool = False
     tools: list[str] = Field(default_factory=list)
 
     @field_validator("prompt")
@@ -534,6 +538,8 @@ def _build_team_config(data: Any, base_dir: Path) -> TeamConfig:
             thinking=entry.thinking,
             thinking_params=entry.thinking_params,
             task_context_sections=list(entry.task_context_sections),
+            can_await_coordination=entry.can_await_coordination,
+            requires_executable_verification=entry.requires_executable_verification,
             tools=list(entry.tools),
         )
 

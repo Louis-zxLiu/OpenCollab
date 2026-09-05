@@ -317,7 +317,11 @@ class _SessionRunCompletionMixin:
             self._record_submission(result)
             self._pending_tool_allowlist = None
             self._pending_tool_gate_label = None
-            self.state.transition_to(SessionPhase.AUTOSAVING)
+            self.state.transition_to(
+                SessionPhase.AWAITING_EVENTS
+                if self.state.wait_condition is not None
+                else SessionPhase.AUTOSAVING
+            )
             return
 
         table = self.state.pending_events
@@ -363,7 +367,11 @@ class _SessionRunCompletionMixin:
             for message in table.ordered_results():
                 self.state.append_message(message)
             table.clear()
-            self.state.transition_to(SessionPhase.AUTOSAVING)
+            self.state.transition_to(
+                SessionPhase.AWAITING_EVENTS
+                if self.state.wait_condition is not None
+                else SessionPhase.AUTOSAVING
+            )
             return
 
         elapsed = pending.latency

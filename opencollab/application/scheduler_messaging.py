@@ -30,7 +30,6 @@ helpers defined on ``Scheduler``.
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 import logging
 import re
 import uuid
@@ -47,6 +46,7 @@ from opencollab.application._scheduler_constants import (
     MESSAGE_TRACE_SUMMARY_CHARS,
 )
 from opencollab.application.scheduler_types import QueuedTeammateMessage
+from opencollab.domain.coordination_protocol import WaitKind
 from opencollab.domain.identity import role_collision_key
 from opencollab.domain.rollback import CheckpointBoundary
 from opencollab.domain.session import SessionPhase
@@ -87,7 +87,15 @@ def _commit_refs(*parts: str) -> list[str]:
 class MessagingMixin:
     """Queue, format, and drain teammate messages between agents."""
 
-    async def send_message(self, from_aid: int, to_aid: int, summary: str, content: str) -> str:
+    async def send_message(
+        self,
+        from_aid: int,
+        to_aid: int,
+        summary: str,
+        content: str,
+        *,
+        source_effect_ids: tuple[str, ...] | list[str] = (),
+    ) -> str:
         """Queue a teammate message for async delivery and return immediately.
 
         The recipient sees the message as a normal user turn with an XML
@@ -128,9 +136,20 @@ class MessagingMixin:
             return refuse("scheduler_shutting_down", "Error: scheduler is shutting down.")
         if self._sessions.get(from_aid) is None or self.table.get(from_aid) is None:
             return refuse("unknown_sender", f"Error: no sending agent with aid {from_aid}.")
+        self._ensure_coordination_agent(from_aid)
+        self._ensure_coordination_agent(to_aid)
+        if not self._coordination_protocol.is_addressable(from_aid):
+            return refuse("superseded_sender", f"Error: sender aid {from_aid} is no longer addressable.")
+        source_error = self._coordination_protocol.validate_source_effects(
+            from_aid, source_effect_ids
+        )
+        if source_error:
+            return refuse("unadopted_source_effect", f"Error: {source_error}")
         target = self._sessions.get(to_aid)
         if target is None:
             return refuse("unknown_recipient", f"Error: no agent with aid {to_aid}.")
+        if not self._coordination_protocol.is_addressable(to_aid):
+            return refuse("superseded_recipient", f"Error: recipient aid {to_aid} is no longer addressable.")
         if self._topology_forbids(self._role_of(from_aid), self._role_of(to_aid)):
             return refuse(
                 "topology_forbidden",
@@ -645,7 +664,13 @@ class MessagingMixin:
         current_task = asyncio.current_task()
         if task is not None and not task.done() and not (allow_current_task and task is current_task):
             return events
-        if scb.state.phase is SessionPhase.AWAITING_EVENTS or not scb.state.pending_events.is_empty():
+        # An explicit coordination wait is intentionally wakeable by a
+        # teammate message.  Deferred tool rows still require their normal
+        # contiguous result block before another turn can start.
+        if (
+            scb.state.phase is SessionPhase.AWAITING_EVENTS
+            and scb.state.wait_condition is None
+        ) or not scb.state.pending_events.is_empty():
             return events
         messages = self._bounded_message_batch(inbox)
         if not messages or self._shutting_down:
@@ -656,16 +681,6 @@ class MessagingMixin:
 
         delivery = messages[0].xml if len(messages) == 1 else self._format_teammate_message_batch(messages)
         await self._append_user_turn_txn(aid, session, delivery, prior_lease)
-
-        if self._lineage is not None and self._rollback_enabled:
-            frontier = session.state.rollback.causal_frontier
-            for message in messages:
-                if message.effect_id and self._lineage.get_effect(message.effect_id) is not None:
-                    frontier = self._lineage.consume(aid, message.effect_id)
-            session.state.rollback = dataclasses.replace(
-                session.state.rollback,
-                causal_frontier=frontier,
-            )
 
         # Commit the durable dequeue immediately after the history append. A
         # shutdown may stop the follow-on driver, but it must never leave the
@@ -678,11 +693,16 @@ class MessagingMixin:
                 session.state.discard_pending_user_message(message.xml)
             if message.effect_id:
                 try:
+                    self._coordination_protocol.register_visible_effect(aid, message.effect_id)
+                    self._coordination_protocol.clear_wait_if_matches(
+                        aid, WaitKind.EFFECT, message.effect_id
+                    )
                     marker = getattr(self, "_mark_effect_delivered", None)
                     if callable(marker):
                         await marker(message.from_aid, message.effect_id)
                 except Exception as exc:
                     logger.warning("workspace Effect delivery acknowledgement failed: %s", exc)
+            self._coordination_protocol.clear_wait_if_matches(aid, WaitKind.MESSAGE)
         self._autosave_session(aid)
 
         if self._shutting_down:

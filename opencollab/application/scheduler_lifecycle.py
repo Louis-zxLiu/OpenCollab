@@ -7,10 +7,11 @@ import contextlib
 import dataclasses
 import logging
 import time
-from typing import Any
+from typing import Any, Sequence
 
 from opencollab.application.scheduler_types import LaunchSpec
 from opencollab.application.session_run import StaleEpochError
+from opencollab.domain.coordination_protocol import CoordinationWait, WaitKind
 from opencollab.domain.identity import validate_role_identity
 from opencollab.domain.pending import PendingRowError, RowStatus
 from opencollab.domain.rollback import CheckpointBoundary, LineageEnvelope
@@ -41,6 +42,13 @@ class LifecycleMixin:
         )
         self.table.add(scb)
         self._sessions[aid] = session
+        self._coordination_protocol.register_agent(
+            aid,
+            session.state,
+            session.agent.name,
+            None,
+            can_await_coordination=getattr(session.agent, "can_await_coordination", True),
+        )
         self._lead_session = session
         self._restore_message_inbox(aid, session.state)
         # Book agent 0's own share of the pool so the first child is granted
@@ -48,6 +56,61 @@ class LifecycleMixin:
         self._seed_entry_lease()
         self._write_manifest()
         return aid
+
+    async def await_coordination(
+        self,
+        aid: int,
+        wait_for: str = "any",
+        effect_ids: tuple[str, ...] | list[str] = (),
+        reason: str = "",
+    ) -> str:
+        """Record a non-terminal wait; the scheduler wakes the Agent on events."""
+        self._coordination_protocol.require_addressable(aid)
+        if not self._coordination_protocol.can_await_coordination(aid):
+            return "Error: this Agent is not configured for coordination waits."
+        condition = CoordinationWait(
+            wait_for=WaitKind(wait_for),
+            effect_ids=frozenset(effect_ids),
+            reason=reason,
+        )
+        self._coordination_protocol.set_wait(aid, condition)
+        return f"Waiting for coordination event ({condition.wait_for.value})."
+
+    async def report_verification(
+        self,
+        aid: int,
+        effect_id: str,
+        evidence_ids: list[str] | tuple[str, ...],
+        status: str,
+        summary: str,
+    ) -> str:
+        """Accept a PASS only when executable evidence matches the adopted effect."""
+        self._coordination_protocol.require_addressable(aid)
+        session = self._sessions.get(aid)
+        if status not in {"pass", "fail"}:
+            return "Error: status must be pass or fail."
+        if not isinstance(summary, str) or not summary.strip():
+            return "Error: summary must be non-empty."
+        valid = self._coordination_protocol.validate_verification(
+            aid, effect_id, evidence_ids
+        )
+        if status == "pass":
+            if session is None or not getattr(session.agent, "requires_executable_verification", False):
+                return "Error: only Agents requiring executable verification may report PASS."
+            if not valid:
+                return "Error: PASS requires positive executable evidence for the adopted effect."
+        result = f"Verification {status.upper()} for effect {effect_id}: {summary.strip()}"
+        if self._tracer is not None:
+            self._tracer.log_step(
+                step_type="verification_reported",
+                payload={
+                    "aid": aid,
+                    "effect_id": effect_id,
+                    "status": status,
+                    "evidence_ids": list(evidence_ids),
+                },
+            )
+        return result
 
     def create_init_process(self, launch: LaunchSpec) -> int:
         """Create and register agent 0 — the init process (aid=0).
@@ -80,6 +143,7 @@ class LifecycleMixin:
         task: str,
         context: str = "",
         tool_call_id: str | None = None,
+        source_effect_ids: Sequence[str] = (),
     ) -> int:
         """Non-blocking spawn. Creates SCB, builds session, starts task. Returns aid.
 
@@ -101,6 +165,16 @@ class LifecycleMixin:
             raise RuntimeError("Cannot spawn agent: scheduler is shutting down.")
         if self.table.get(parent_aid) is None or parent_aid not in self._sessions:
             raise ValueError(f"Cannot spawn agent: no parent with aid {parent_aid}.")
+        # Preserve the historical public API where callers may inject a
+        # SessionControlBlock directly before spawning.  The protocol remains
+        # the source of truth; registration is simply made lazy at this
+        # boundary for that legacy construction path.
+        self._ensure_coordination_agent(parent_aid)
+        source_error = self._coordination_protocol.validate_source_effects(
+            parent_aid, source_effect_ids
+        )
+        if source_error:
+            raise ValueError(source_error)
         role = validate_role_identity(role)
         self._refuse_spawn_when_prebuilt(parent_aid, role, task, context)
         self._check_topology(parent_aid, role, verb="spawn")
@@ -179,6 +253,13 @@ class LifecycleMixin:
             )
             self.table.add(scb)
             self._sessions[aid] = session
+            self._coordination_protocol.register_agent(
+                aid,
+                session.state,
+                session.agent.name,
+                parent_aid,
+                can_await_coordination=getattr(session.agent, "can_await_coordination", True),
+            )
             if tool_call_id is not None:
                 self._spawn_origin[aid] = (parent_aid, tool_call_id)
                 self._startup_origin.pop(aid, None)
@@ -235,6 +316,7 @@ class LifecycleMixin:
         self._release_leases(aid)
         self.table.entries.pop(aid, None)
         self._sessions.pop(aid, None)
+        self._coordination_protocol.unregister_agent(aid)
         self._spawn_origin.pop(aid, None)
         self._startup_tasks.pop(aid, None)
         self._startup_envs.pop(aid, None)
@@ -311,6 +393,16 @@ class LifecycleMixin:
     def _bind_rollback_runtime(self, aid: int, session: Any) -> None:
         """Connect a Session runner to the scheduler's monotonic epoch fence."""
         runner = getattr(session, "runner", None)
+        gate_setter = getattr(runner, "set_coordination_gate", None)
+        if callable(gate_setter):
+            gate_setter(self._coordination_gate)
+        evidence_setter = getattr(runner, "set_evidence_recorder", None)
+        if callable(evidence_setter):
+            evidence_setter(
+                lambda evidence, aid=aid: self._coordination_protocol.record_verification(
+                    aid, evidence
+                )
+            )
         setter = getattr(runner, "set_epoch_provider", None)
         if callable(setter):
             setter(lambda aid=aid: self._sessions[aid].state.rollback.epoch)
@@ -441,6 +533,8 @@ class LifecycleMixin:
                 result = await session.run_loop(cancel_event) if cancel_event is not None else await session.run_loop()
         except asyncio.CancelledError:
             self._release_leases(aid)
+            if not self._coordination_protocol.is_addressable(aid):
+                return
             scb.state.cancel()
             reason = "Error: agent cancelled before completing delegated work"
             scb.result = reason
@@ -461,6 +555,9 @@ class LifecycleMixin:
             return
         except Exception as exc:
             self._release_leases(aid)
+            if not self._coordination_protocol.is_addressable(aid):
+                logger.debug("superseded agent %s ended with %s", aid, exc)
+                return
             terminal_reason = scb.state.terminal_reason or f"{type(exc).__name__}: {exc}"
             scb.state.fail(terminal_reason)
             reason = f"Error: {terminal_reason}"
@@ -481,6 +578,11 @@ class LifecycleMixin:
         # overwrite that state or publish a successful completion.
         if self._shutting_down:
             self._finalize_cleanup_failure(aid)
+            return
+        if not self._coordination_protocol.is_addressable(aid):
+            # Superseded output is retained only in the audit trail; it cannot
+            # complete a pending row or publish a workspace effect.
+            self._release_leases(aid)
             return
 
         scb.result = result
@@ -604,6 +706,34 @@ class LifecycleMixin:
         reason = scb.state.terminal_reason or result.strip() or phase.value
         return f"Error: agent {disposition}: {reason}"
 
+    async def _wake_coordination_wait(
+        self,
+        aid: int,
+        event_kind: WaitKind,
+        effect_id: str | None = None,
+    ) -> bool:
+        """Wake a session suspended only on an explicit coordination wait."""
+        session = self._sessions.get(aid)
+        scb = self.table.get(aid)
+        if session is None or scb is None or self._shutting_down:
+            return False
+        if not self._coordination_protocol.clear_wait_if_matches(aid, event_kind, effect_id):
+            return False
+        if scb.state.phase is not SessionPhase.AWAITING_EVENTS:
+            return False
+        if not scb.state.pending_events.is_empty():
+            return True
+        current = self._tasks.get(aid)
+        if current is not None and not current.done():
+            return True
+        scb.state.set_phase(SessionPhase.IDLE)
+        self._reserve_turn_lease(aid)
+        self._start_agent_task(aid, session)
+        await self._safe_emit_scheduler_event(
+            self._events.agent_resumed(aid, self._role_of(aid))
+        )
+        return True
+
     async def _wake(
         self,
         parent_aid: int,
@@ -650,12 +780,8 @@ class LifecycleMixin:
                         row,
                         lineage=LineageEnvelope(lineage_effect, consumer_aid=parent_aid),
                     )
-                    parent_scb.state.rollback = dataclasses.replace(
-                        parent_scb.state.rollback,
-                        causal_frontier=self._lineage.consume(
-                            parent_aid,
-                            lineage_effect.effect_id,
-                        ),
+                    self._coordination_protocol.register_visible_effect(
+                        parent_aid, lineage_effect.effect_id
                     )
             table.fill(
                 tool_call_id,
@@ -667,6 +793,9 @@ class LifecycleMixin:
                 self._spawn_origin.pop(child_aid, None)
                 if not cleanup_forced:
                     self._delivery_committed.add(child_aid)
+                self._coordination_protocol.clear_wait_if_matches(
+                    parent_aid, WaitKind.CHILD
+                )
             in_flight = self._tasks.get(parent_aid)
             should_resume = (
                 not self._shutting_down

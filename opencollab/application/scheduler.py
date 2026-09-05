@@ -28,6 +28,7 @@ from opencollab.application._scheduler_rollback import SchedulerRollbackMixin
 from opencollab.application._scheduler_run import SchedulerRunMixin
 from opencollab.application._scheduler_team import SchedulerTeamMixin
 from opencollab.application.autosave import AutoSaveSubscriber
+from opencollab.application.coordination_protocol import CoordinationProtocol
 from opencollab.application.events import (
     SchedulerEventFactory,
     default_scheduler_event_factory,
@@ -129,6 +130,7 @@ class Scheduler(
         self._max_budget_tokens = max_budget_tokens
         self._permission_policy = permission_policy
         self._topology = topology
+        self._coordination_protocol = CoordinationProtocol(topology)
         # Static-topology mode. Off by default, and every behavioural difference
         # is gated on it: the team is materialized from the config before the
         # first turn (``ensure_team_prebuilt``), ``spawn`` then refuses, and the
@@ -241,6 +243,46 @@ class Scheduler(
         self._review_parent_lease_tracker: contextvars.ContextVar[
             tuple[int, dict[str, int]] | None
         ] = contextvars.ContextVar("review_parent_lease_tracker", default=None)
+
+    @property
+    def coordination_protocol(self) -> CoordinationProtocol:
+        return self._coordination_protocol
+
+    def _ensure_coordination_agent(self, aid: int) -> None:
+        """Lazily register legacy/injected SCBs with the protocol.
+
+        Bootstrap and ``spawn`` register eagerly.  A few integrations create
+        SCBs directly (the historical Scheduler API allowed that), so keeping
+        this narrow bridge preserves that API without duplicating protocol
+        decisions outside the application service.
+        """
+        if self._coordination_protocol.has_agent(aid):
+            return
+        scb = self.table.get(aid)
+        if scb is None:
+            return
+        self._coordination_protocol.register_agent(
+            aid,
+            scb.state,
+            scb.agent.name,
+            scb.parent_aid,
+            can_await_coordination=getattr(scb.agent, "can_await_coordination", True),
+        )
+
+    def _coordination_gate(self, aid: int, tool_name: str) -> str | None:
+        self._ensure_coordination_agent(aid)
+        try:
+            allowed = self._coordination_protocol.can_execute(aid, tool_name)
+        except (ValueError, RuntimeError) as exc:
+            return f"Error: {exc}"
+        if allowed:
+            return None
+        state = self.table.get(aid).state if self.table.get(aid) is not None else None
+        pending = sorted(getattr(state, "required_effect_ids", ()))
+        return (
+            "Error: adopt visible effects before normal work. "
+            f"Pending effect_ids: {pending}"
+        )
 
     def register_lifecycle_resource(
         self,

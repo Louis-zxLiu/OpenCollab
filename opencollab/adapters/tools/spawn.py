@@ -34,6 +34,12 @@ def _coordination_parameters(policy: CoordinationPolicy) -> dict[str, Any]:
                 "description": "Concise facts or constraints only; omit full history and reasoning.",
                 "maxLength": policy.context_bytes,
             },
+            "source_effect_ids": {
+                "type": "array",
+                "items": {"type": "string", "minLength": 1},
+                "maxItems": 64,
+                "description": "Optional adopted effect IDs that this assignment builds on.",
+            },
         },
     }
 
@@ -101,6 +107,11 @@ class SpawnAgentTool(Tool):
             return f"Not spawned: invalid role identity ({exc})."
         task = params.get("task")
         context = params.get("context", "")
+        source_effect_ids = params.get("source_effect_ids", [])
+        if not isinstance(source_effect_ids, list) or any(
+            not isinstance(value, str) or not value for value in source_effect_ids
+        ):
+            return "Not spawned: source_effect_ids must be a list of non-empty strings."
         error = self._coordination_policy.validate(task, context)
         if error:
             return f"Not spawned: {error}."
@@ -109,8 +120,11 @@ class SpawnAgentTool(Tool):
         # its domain-specific conflict into a synchronous tool result so no
         # pending row is registered for the rejected duplicate.
         try:
+            spawn_kwargs = {"tool_call_id": runtime.tool_call_id}
+            if source_effect_ids:
+                spawn_kwargs["source_effect_ids"] = source_effect_ids
             aid = await self._scheduler.spawn(
-                parent_aid, role, task, context, tool_call_id=runtime.tool_call_id
+                parent_aid, role, task, context, **spawn_kwargs
             )
         except DuplicateSpawnError as exc:
             return (
@@ -162,6 +176,11 @@ class SpawnWithReviewTool(Tool):
     ) -> str:
         task = params.get("task")
         context = params.get("context", "")
+        source_effect_ids = params.get("source_effect_ids", [])
+        if not isinstance(source_effect_ids, list) or any(
+            not isinstance(value, str) or not value for value in source_effect_ids
+        ):
+            return "Not started: source_effect_ids must be a list of non-empty strings."
         error = self._coordination_policy.validate(task, context)
         if error:
             return f"Not started: {error}."
@@ -171,8 +190,11 @@ class SpawnWithReviewTool(Tool):
         except ValueError as exc:
             return f"Not started: {exc}."
         parent_aid = runtime.aid
+        review_kwargs = {}
+        if source_effect_ids:
+            review_kwargs["source_effect_ids"] = source_effect_ids
         return await self._scheduler.spawn_with_review(
-            parent_aid, task, context, max_iter
+            parent_aid, task, context, max_iter, **review_kwargs
         )
 
 

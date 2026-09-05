@@ -283,6 +283,8 @@ class ContextBuilder:
             llm_first_event_timeout=cfg.llm_first_event_timeout,
             llm_stream_idle_timeout=cfg.llm_stream_idle_timeout,
             provider_error_time_budget=cfg.provider_error_time_budget,
+            can_await_coordination=role.can_await_coordination,
+            requires_executable_verification=role.requires_executable_verification,
         )
 
     def _team_section(self, role_name: str, role: RoleConfig) -> str:

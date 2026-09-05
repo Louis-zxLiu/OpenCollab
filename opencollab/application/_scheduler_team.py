@@ -192,6 +192,8 @@ class SchedulerTeamMixin:
         snapshot: list[dict[str, Any]] = []
         for aid in sorted(self.table.entries):
             scb = self.table.entries[aid]
+            if not self._coordination_protocol.is_addressable(aid):
+                continue
             task = self._tasks.get(aid)
             snapshot.append(
                 {
@@ -354,6 +356,13 @@ class SchedulerTeamMixin:
                 )
             )
             self._sessions[aid] = session
+            self._coordination_protocol.register_agent(
+                aid,
+                session.state,
+                session.agent.name,
+                0,
+                can_await_coordination=getattr(session.agent, "can_await_coordination", True),
+            )
             await self.emit_scheduler_event(self._events.agent_spawned(aid, 0, role, ""))
             await self._checkpoint_after_spawn(aid, f"prebuilt {role}")
         except BaseException:

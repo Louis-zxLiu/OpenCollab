@@ -35,6 +35,12 @@ from opencollab.application.session_snapshot import (
 from opencollab.application.tool_execution import ToolExecutionUseCase
 from opencollab.domain.agent import Agent
 from opencollab.domain.context import TaskContext
+from opencollab.domain.coordination_protocol import (
+    AgentLifecycleStatus,
+    CoordinationWait,
+    VerificationEvidence,
+    WaitKind,
+)
 from opencollab.domain.events import SessionRuntimeEvent as SessionEvent
 from opencollab.domain.pending import PendingRow, RowKind, RowStatus
 from opencollab.domain.rollback import RollbackState
@@ -590,6 +596,65 @@ class Session:
                     str(value) for value in raw_rollback.get("quarantined_effects", ())
                 ),
             )
+        required_effects = raw_state.get("required_effect_ids", ())
+        if required_effects is not None:
+            if not isinstance(required_effects, (list, tuple)) or any(
+                not isinstance(value, str) or not value for value in required_effects
+            ):
+                raise ValueError("invalid required_effect_ids in session snapshot")
+            restored.required_effect_ids = set(required_effects)
+        raw_wait = raw_state.get("wait_condition")
+        if isinstance(raw_wait, dict):
+            try:
+                raw_effect_ids = raw_wait.get("effect_ids", ())
+                if not isinstance(raw_effect_ids, (list, tuple)) or any(
+                    not isinstance(value, str) or not value for value in raw_effect_ids
+                ):
+                    raise ValueError("effect_ids must be a list of non-empty strings")
+                restored.wait_condition = CoordinationWait(
+                    wait_for=WaitKind(raw_wait.get("wait_for", WaitKind.ANY.value)),
+                    effect_ids=frozenset(raw_effect_ids),
+                    reason=raw_wait.get("reason", ""),
+                )
+            except (TypeError, ValueError) as exc:
+                raise ValueError("invalid wait_condition in session snapshot") from exc
+        elif raw_wait is not None:
+            raise ValueError("invalid wait_condition in session snapshot")
+        raw_status = raw_state.get("lifecycle_status")
+        if raw_status is not None:
+            try:
+                restored.lifecycle_status = AgentLifecycleStatus(str(raw_status))
+            except ValueError as exc:
+                raise ValueError("invalid lifecycle_status in session snapshot") from exc
+        # The field was introduced after the original snapshot format.  A
+        # missing field is the legacy "no evidence" state; only an explicitly
+        # present value is validated as the new list representation.
+        raw_evidence = raw_state.get("verification_evidence")
+        if raw_evidence is not None and not isinstance(raw_evidence, list):
+            raise ValueError("invalid verification_evidence in session snapshot")
+        if isinstance(raw_evidence, list):
+            for item in raw_evidence:
+                if not isinstance(item, dict):
+                    raise ValueError("invalid verification_evidence in session snapshot")
+                try:
+                    evidence = VerificationEvidence(
+                        evidence_id=str(item["evidence_id"]),
+                        effect_id=str(item["effect_id"]),
+                        tool_call_id=str(item["tool_call_id"]),
+                        tool_name=str(item["tool_name"]),
+                        command=str(item["command"]),
+                        exit_code=int(item["exit_code"]),
+                        verified=bool(item["verified"]),
+                        workspace_revision=(
+                            str(item["workspace_revision"])
+                            if item.get("workspace_revision") is not None
+                            else None
+                        ),
+                        result_hash=str(item.get("result_hash", "")),
+                    )
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise ValueError("invalid verification_evidence in session snapshot") from exc
+                restored.verification_evidence[evidence.evidence_id] = evidence
         restored.terminal_reason = (
             str(raw_state["terminal_reason"])
             if restored.phase.is_terminal()
@@ -759,6 +824,31 @@ class Session:
                     if self.state.task_context is not None
                     else None
                 ),
+                "required_effect_ids": sorted(self.state.required_effect_ids),
+                "wait_condition": (
+                    {
+                        "wait_for": self.state.wait_condition.wait_for.value,
+                        "effect_ids": sorted(self.state.wait_condition.effect_ids),
+                        "reason": self.state.wait_condition.reason,
+                    }
+                    if self.state.wait_condition is not None
+                    else None
+                ),
+                "lifecycle_status": self.state.lifecycle_status.value,
+                "verification_evidence": [
+                    {
+                        "evidence_id": evidence.evidence_id,
+                        "effect_id": evidence.effect_id,
+                        "tool_call_id": evidence.tool_call_id,
+                        "tool_name": evidence.tool_name,
+                        "command": evidence.command,
+                        "exit_code": evidence.exit_code,
+                        "verified": evidence.verified,
+                        "workspace_revision": evidence.workspace_revision,
+                        "result_hash": evidence.result_hash,
+                    }
+                    for evidence in self.state.verification_evidence.values()
+                ],
                 "rollback": {
                     "branch": self.state.rollback.branch,
                     "epoch": self.state.rollback.epoch,

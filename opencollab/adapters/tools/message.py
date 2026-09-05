@@ -70,6 +70,12 @@ class MessageAgentTool(Tool):
                 "type": "string",
                 "description": "Full message content to send to that agent.",
             },
+            "source_effect_ids": {
+                "type": "array",
+                "items": {"type": "string", "minLength": 1},
+                "maxItems": 64,
+                "description": "Optional adopted effect IDs this message builds on.",
+            },
         },
         "required": ["summary", "content"],
     }
@@ -128,8 +134,16 @@ class MessageAgentTool(Tool):
             return target
         summary = params["summary"]
         content = params["content"]
+        source_effect_ids = params.get("source_effect_ids", [])
+        if not isinstance(source_effect_ids, list) or any(
+            not isinstance(value, str) or not value for value in source_effect_ids
+        ):
+            return "Error: source_effect_ids must be a list of non-empty strings."
+        message_kwargs = {}
+        if source_effect_ids:
+            message_kwargs["source_effect_ids"] = source_effect_ids
         ack = await self._scheduler.send_message(
-            runtime.aid, target, summary, content
+            runtime.aid, target, summary, content, **message_kwargs
         )
         if ack.startswith("Error"):
             return ack

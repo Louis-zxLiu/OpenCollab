@@ -10,6 +10,7 @@ takes the scheduler as a parameter rather than being a method.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from typing import Protocol
 
 from opencollab.application.events import SchedulerEventFactory
@@ -46,6 +47,8 @@ class ReviewLoopScheduler(Protocol):
         role: str,
         task: str,
         context: str = "",
+        *,
+        source_effect_ids: Sequence[str] = (),
     ) -> int:
         ...
 
@@ -105,6 +108,8 @@ async def run_spawn_with_review(
     task: str,
     context: str = "",
     max_iterations: int = 3,
+    *,
+    source_effect_ids: Sequence[str] = (),
 ) -> str:
     """Run a sequential coder -> reviewer loop and return the final result.
 
@@ -134,6 +139,7 @@ async def run_spawn_with_review(
                 "coder",
                 current_task,
                 context,
+                source_effect_ids=source_effect_ids,
             )
         except Exception as exc:
             await _emit_review_event(

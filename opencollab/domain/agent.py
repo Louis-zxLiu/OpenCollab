@@ -65,6 +65,8 @@ class Agent:
     llm_max_retries: int = 3
     provider_error_time_budget: float = 0.0
     reasoning_effort_policy: str = "configured"
+    can_await_coordination: bool = True
+    requires_executable_verification: bool = False
 
     def __post_init__(self) -> None:
         self.name = validate_role_identity(self.name)

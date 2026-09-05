@@ -8,6 +8,14 @@ from enum import Enum
 from typing import Any
 
 from opencollab.domain.context import TaskContext
+from opencollab.domain.coordination_protocol import (
+    AgentLifecycleStatus,
+    CoordinationWait,
+    VerificationEvidence,
+    adopt_visible_effect,
+    can_execute_normal_work,
+    register_visible_effect,
+)
 from opencollab.domain.pending import PendingEventTable
 from opencollab.domain.rollback import RollbackState
 
@@ -250,6 +258,19 @@ class SessionState:
     pending_step_latency: float | None = None
 
     rollback: RollbackState = field(default_factory=RollbackState)
+    # Effects delivered by another Agent remain pending until the model calls
+    # adopt_effect.  This is deliberately separate from the causal frontier:
+    # visibility is not consumption.
+    required_effect_ids: set[str] = field(default_factory=set, kw_only=True)
+    wait_condition: CoordinationWait | None = field(default=None, kw_only=True)
+    lifecycle_status: AgentLifecycleStatus = field(
+        default=AgentLifecycleStatus.ACTIVE,
+        kw_only=True,
+    )
+    verification_evidence: dict[str, VerificationEvidence] = field(
+        default_factory=dict,
+        kw_only=True,
+    )
 
     @property
     def lineage_branch_id(self) -> str:
@@ -293,6 +314,26 @@ class SessionState:
 
     def __post_init__(self) -> None:
         self._align_timestamps()
+
+    def register_visible_effect(self, effect_id: str) -> None:
+        self.required_effect_ids = set(
+            register_visible_effect(self.required_effect_ids, effect_id)
+        )
+
+    def adopt_visible_effect(self, effect_id: str) -> None:
+        self.required_effect_ids = set(
+            adopt_visible_effect(self.required_effect_ids, effect_id)
+        )
+
+    def can_execute_normal_work(self) -> bool:
+        return can_execute_normal_work(self.required_effect_ids)
+
+    def mark_superseded(self) -> None:
+        if self.lifecycle_status is not AgentLifecycleStatus.TERMINAL:
+            self.lifecycle_status = AgentLifecycleStatus.SUPERSEDED
+
+    def is_addressable(self) -> bool:
+        return self.lifecycle_status is AgentLifecycleStatus.ACTIVE
 
     def _align_timestamps(self) -> None:
         if len(self.message_timestamps) < len(self.messages):
@@ -457,7 +498,7 @@ class SessionState:
         fresh turn or re-run. No-op when the phase is not terminal. Clears the
         terminal_reason so it never leaks into the next turn.
         """
-        if self.phase.is_terminal():
+        if self.phase.is_terminal() and self.lifecycle_status is AgentLifecycleStatus.ACTIVE:
             self.transition_to(SessionPhase.IDLE)
             self.terminal_reason = None
 

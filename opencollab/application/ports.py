@@ -349,6 +349,7 @@ class SchedulerPort(Protocol):
         task: str,
         context: str = "",
         tool_call_id: str | None = None,
+        source_effect_ids: Sequence[str] = (),
     ) -> int:
         """Non-blocking spawn. Returns aid immediately.
 
@@ -387,11 +388,21 @@ class SchedulerPort(Protocol):
         task: str,
         context: str = "",
         max_iterations: int = 3,
+        *,
+        source_effect_ids: Sequence[str] = (),
     ) -> str:
         """Blocking review loop. Returns final result."""
         ...
 
-    async def send_message(self, from_aid: int, to_aid: int, summary: str, content: str) -> str:
+    async def send_message(
+        self,
+        from_aid: int,
+        to_aid: int,
+        summary: str,
+        content: str,
+        *,
+        source_effect_ids: Sequence[str] = (),
+    ) -> str:
         """Queue a teammate message for async delivery and return an acknowledgement."""
         ...
 
@@ -405,6 +416,27 @@ class SchedulerPort(Protocol):
 
     async def publish_effect(self, consumer_aid: int, effect_id: str) -> str:
         """Publish an accessible Effect's immutable workspace revision to the source workspace."""
+        ...
+
+    async def await_coordination(
+        self,
+        aid: int,
+        wait_for: str = "any",
+        effect_ids: Sequence[str] = (),
+        reason: str = "",
+    ) -> str:
+        """Suspend an Agent until a matching coordination event arrives."""
+        ...
+
+    async def report_verification(
+        self,
+        aid: int,
+        effect_id: str,
+        evidence_ids: Sequence[str],
+        status: str,
+        summary: str,
+    ) -> str:
+        """Record a typed executable verification verdict."""
         ...
 
 

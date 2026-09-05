@@ -14,6 +14,7 @@ from typing import Callable
 
 from opencollab.adapters.tools.adopt_effect import AdoptEffectTool
 from opencollab.adapters.tools.apply_patch import ApplyPatchTool
+from opencollab.adapters.tools.await_coordination import AwaitCoordinationTool
 from opencollab.adapters.tools.base import Tool
 from opencollab.adapters.tools.bash import BashTool
 from opencollab.adapters.tools.env_scope import ListEnvTool, SetEnvTool, UnsetEnvTool
@@ -23,6 +24,7 @@ from opencollab.adapters.tools.human import AskUserTool
 from opencollab.adapters.tools.invalidate_effect import InvalidateEffectTool
 from opencollab.adapters.tools.message import MessageAgentTool, TeamStatusTool
 from opencollab.adapters.tools.publish_effect import PublishEffectTool
+from opencollab.adapters.tools.report_verification import ReportVerificationTool
 from opencollab.adapters.tools.run_tests import RunTestsTool
 from opencollab.adapters.tools.spawn import SpawnAgentTool, SpawnWithReviewTool
 from opencollab.adapters.tools.submit import SubmitTool
@@ -49,12 +51,14 @@ STATELESS_TOOL_FACTORIES: dict[str, Callable[[], Tool]] = {
 }
 SCHEDULER_TOOL_FACTORIES: dict[str, Callable[[SchedulerPort], Tool]] = {
     "adopt_effect": AdoptEffectTool,
+    "await_coordination": AwaitCoordinationTool,
     "spawn_agent": SpawnAgentTool,
     "spawn_with_review": SpawnWithReviewTool,
     "message_agent": MessageAgentTool,
     "team_status": TeamStatusTool,
     "invalidate_effect": InvalidateEffectTool,
     "publish_effect": PublishEffectTool,
+    "report_verification": ReportVerificationTool,
 }
 # Skill-bound tools take a ``SkillStorePort`` so the dispatcher can fetch a
 # skill's body by name. One generic dispatcher serves all skills.
@@ -187,7 +191,7 @@ def build_tools_for_role(
             )
         elif name in SCHEDULER_TOOL_FACTORIES:
             if scheduler is None:
-                if name == "adopt_effect":
+                if name in {"adopt_effect", "await_coordination", "report_verification"}:
                     continue
                 raise ValueError(f"Tool '{name}' requires a scheduler but none was provided.")
             tools.append(

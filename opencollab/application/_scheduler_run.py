@@ -91,6 +91,7 @@ class SchedulerRunMixin:
                     "Scheduler has no lead session. Call create_init_process() first."
                 )
             raise ValueError(f"Cannot run user turn: no agent with aid {aid}.")
+        self._ensure_coordination_agent(aid)
         if session.state.task_context is None:
             session.state.task_context = task_context or TaskContext.from_user_message(user_message)
         elif task_context is not None and task_context != session.state.task_context:

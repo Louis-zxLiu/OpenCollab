@@ -7,6 +7,7 @@ import dataclasses
 import logging
 from typing import Any
 
+from opencollab.domain.coordination_protocol import WaitKind
 from opencollab.domain.pending import PendingRowError, RowStatus
 from opencollab.domain.rollback import CheckpointBoundary
 from opencollab.domain.session import SessionPhase
@@ -82,6 +83,9 @@ class SchedulerRollbackMixin:
         """Deliver a child Effect, failing closed without suspending its parent."""
         origin = self._spawn_origin.get(child_aid)
         if origin is None:
+            child_scb = self.table.get(child_aid)
+            if child_scb is not None and child_scb.parent_aid is not None:
+                await self._wake_coordination_wait(child_scb.parent_aid, WaitKind.CHILD)
             return
         parent_aid, tool_call_id = origin
         lineage_effect = None
@@ -223,6 +227,12 @@ class SchedulerRollbackMixin:
 
     async def adopt_effect(self, consumer_aid: int, effect_id: str) -> str:
         """Adopt one visible Effect revision into the caller's isolated Scope."""
+        protocol = getattr(self, "_coordination_protocol", None)
+        if protocol is not None:
+            try:
+                protocol.require_addressable(consumer_aid)
+            except ValueError as exc:
+                return f"Error: {exc}"
         if self._lineage is None or not self._rollback_enabled:
             return "Error: workspace Effect adoption requires rollback-enabled Team mode."
         effect = self._lineage.get_effect(effect_id)
@@ -251,6 +261,7 @@ class SchedulerRollbackMixin:
                         },
                     )
                     return f"Error: workspace Effect acknowledgement failed: {exc}"
+            self._adopt_causal_effect(consumer_aid, effect_id)
             return f"Effect {effect_id} has no workspace changes to adopt."
         session = self._sessions.get(consumer_aid)
         environment = getattr(session, "env", None) if session is not None else None
@@ -288,6 +299,7 @@ class SchedulerRollbackMixin:
                     },
                 )
                 return f"Error: workspace Effect acknowledgement failed: {exc}"
+        self._adopt_causal_effect(consumer_aid, effect_id)
         self._trace_rollback(
             "workspace_effect_adopted",
             {
@@ -298,6 +310,19 @@ class SchedulerRollbackMixin:
             },
         )
         return f"Adopted Effect {effect_id} into this Agent Scope."
+
+    def _adopt_causal_effect(self, consumer_aid: int, effect_id: str) -> None:
+        session = self._sessions.get(consumer_aid)
+        state = getattr(session, "state", None) if session is not None else None
+        if state is not None:
+            state.adopt_visible_effect(effect_id)
+        if self._lineage is not None:
+            frontier = self._lineage.consume(consumer_aid, effect_id)
+            if state is not None:
+                state.rollback = dataclasses.replace(
+                    state.rollback,
+                    causal_frontier=frontier,
+                )
 
     async def publish_effect(self, consumer_aid: int, effect_id: str) -> str:
         """Publish one visible Effect revision to the source workspace."""
@@ -415,8 +440,24 @@ class SchedulerRollbackMixin:
             "effects_quarantined",
             {"effect_id": effect_id, "reporter_aid": reporter_aid, "count": len(affected)},
         )
-        affected_agents = self._lineage.compute_affected_agents(affected)
+        affected_consumers = self._lineage.compute_affected_agents(affected)
+        producer_agents = {
+            effect.producer_aid
+            for current in affected
+            if (effect := self._lineage.get_effect(current)) is not None
+        }
+        affected_agents = affected_consumers | producer_agents
+        target_aid = self._coordination_protocol.nearest_active_coordinator(
+            affected_consumers
+        )
+        if target_aid is None and self._coordination_protocol.is_addressable(reporter_aid):
+            target_aid = reporter_aid
+        for aid in sorted(affected_agents):
+            if aid != target_aid:
+                await self._supersede_agent(aid, effect_id)
         for aid in affected_agents:
+            if aid != target_aid:
+                continue
             self._rollback_pending.add(aid)
             self._rollback_barriers.setdefault(aid, asyncio.Event()).clear()
         for aid in affected_agents:
@@ -429,6 +470,41 @@ class SchedulerRollbackMixin:
                 continue
             await self._rollback_agent(aid, affected)
         return affected
+
+    async def _supersede_agent(self, aid: int, root_effect_id: str) -> None:
+        """Fence an invalidated producer so its old aid cannot compete."""
+        session = self._sessions.get(aid)
+        if session is None:
+            return
+        self._coordination_protocol.supersede(aid)
+        self._rollback_pending.discard(aid)
+        session.state.wait_condition = None
+        session.state.pending_events.clear()
+        session.state.clear_active_turn()
+        if not session.state.phase.is_terminal():
+            session.state.cancel(
+                f"agent aid {aid} superseded by rollback of effect {root_effect_id}"
+            )
+        self._message_inbox.pop(aid, None)
+        self._release_leases(aid)
+        task = self._tasks.get(aid)
+        current = asyncio.current_task()
+        if task is not None and not task.done() and task is not current:
+            task.cancel()
+        startup = self._startup_tasks.get(aid)
+        if startup is not None and not startup.done() and startup is not current:
+            startup.cancel()
+        origin = self._spawn_origin.pop(aid, None) or self._startup_origin.pop(aid, None)
+        if origin is not None:
+            await self._fail_cancelled_origin(
+                origin[0],
+                origin[1],
+                f"agent aid {aid} was superseded by rollback of effect {root_effect_id}",
+            )
+        self._trace_rollback(
+            "agent_superseded",
+            {"aid": aid, "root_effect_id": root_effect_id},
+        )
 
     def _agent_is_executing_tools(self, aid: int) -> bool:
         session = self._sessions.get(aid)
