@@ -13,6 +13,7 @@ from opencollab.adapters._env_base import Environment, ExecResult, TextFileRange
 from opencollab.adapters._env_local import LocalEnvironment
 from opencollab.adapters._env_process import run_process
 from opencollab.adapters._env_scope import _HostGitCheckpoints, _ScopeState
+from opencollab.adapters._workspace_baseline import baseline_from_paths, seed_baseline, validate_baseline
 from opencollab.adapters.git_patch import guarded_staged_diff_command
 from opencollab.adapters.git_worktree_evidence import (
     ABSENT_REF_OLD_VALUE,
@@ -27,6 +28,7 @@ from opencollab.domain.rollback import (
     CheckpointBoundary,
     RestoreResult,
     ScopeCheckpoint,
+    WorkspaceBaseline,
     WorkspaceRevision,
 )
 
@@ -66,6 +68,7 @@ class WorktreeEnvironment(Environment):
         require_git: bool = False,
         _scope: _ScopeState | None = None,
         base_revision: str | None = None,
+        baseline: WorkspaceBaseline | None = None,
     ) -> None:
         super().__init__(_scope=_scope)
         self._source = os.path.realpath(os.path.abspath(source_workspace))
@@ -89,7 +92,10 @@ class WorktreeEnvironment(Environment):
         self._source_subdir = ""
         self._repository_root: str | None = None
         self._git_diff_delivery_pending = False
+        self._workspace_effects: dict[str, str] = {}
         self._scope_checkpoints: _HostGitCheckpoints | None = None
+        self._baseline = baseline or WorkspaceBaseline()
+        self._baseline_supplied = baseline is not None
         # The revision the last ``get_diff`` measured against. Read by the
         # scheduler's ``worktree_changes`` record so a row states its own
         # baseline; ``None`` until a diff has been taken, and on the non-Git
@@ -173,7 +179,7 @@ class WorktreeEnvironment(Environment):
         self.host_workspace = exposed_workspace
         self.bind_workspace(exposed_workspace)
         self._local_env = LocalEnvironment(exposed_workspace, _scope=self._scope)
-        self._scope_checkpoints = _HostGitCheckpoints(self._scope, exposed_workspace)
+        self._scope_checkpoints = _HostGitCheckpoints(self._scope, exposed_workspace, self._baseline)
         return exposed_workspace
 
     async def _setup_git_worktree(self) -> None:
@@ -187,6 +193,14 @@ class WorktreeEnvironment(Environment):
             raise RuntimeError("cannot verify that the source workspace is clean")
         if status.stdout:
             raise RuntimeError(f"source workspace has uncommitted changes: {_dirty_path_preview(status.stdout)}")
+        ignored = await self._git("ls-files", "--others", "--ignored", "--exclude-standard", "-z")
+        if ignored.returncode != 0 or ignored.stdout_truncated or ignored.stderr_truncated:
+            raise RuntimeError("cannot capture workspace baseline")
+        if not self._baseline_supplied:
+            self._baseline = baseline_from_paths(
+                self._source,
+                [path for path in ignored.stdout.split("\0") if path],
+            )
         branch_probe = await self._git(
             "show-ref",
             "--verify",
@@ -238,6 +252,12 @@ class WorktreeEnvironment(Environment):
             raise RuntimeError(f"git worktree add failed: {added.stderr.strip()}")
         self._worktree_registered = True
         await self._initialize_available_submodules()
+        assert self._worktree_dir is not None
+        seed_baseline(
+            self._source,
+            os.path.join(self._worktree_dir, self._source_subdir),
+            self._baseline,
+        )
 
     async def _git_in(self, workspace: str, *args: str) -> ExecResult:
         result = await run_process(
@@ -536,7 +556,13 @@ class WorktreeEnvironment(Environment):
         self._diff_base = base_revision
         await self._resolve_own_commits(base_revision)
         self._git_diff_delivery_pending = True
-        result = await self._local_env.exec_cmd(guarded_staged_diff_command(base_revision=base_revision))
+        validate_baseline(self.workspace, self._baseline)
+        result = await self._local_env.exec_cmd(
+            guarded_staged_diff_command(
+                base_revision=base_revision,
+                baseline_paths=tuple(self._baseline.by_path()),
+            )
+        )
         if result.stdout_truncated or result.stderr_truncated:
             raise RuntimeError(f"worktree diff exceeded capture limit; worktree retained at {self.workspace}")
         if result.returncode != 0:
@@ -608,11 +634,47 @@ class WorktreeEnvironment(Environment):
             raise RuntimeError("workspace Effects require an isolated Git worktree")
         if self._base_commit is None:
             raise RuntimeError("workspace Effect base revision is unavailable")
+        validate_baseline(self.workspace, self._baseline)
         return await self._scope_checkpoints.capture_revision(
             reference_id,
             owner_aid=owner_aid,
             base_revision=self._base_commit,
         )
+
+    async def capture_workspace_baseline(self) -> WorkspaceBaseline:
+        self._ensure_active()
+        if self._local_env is None:
+            await self.setup()
+        return self._baseline
+
+    async def seed_workspace_baseline(self, baseline: WorkspaceBaseline) -> None:
+        self._ensure_active()
+        if self._local_env is None:
+            await self.setup()
+        seed_baseline(self._source, self.workspace, baseline)
+        self._baseline = baseline
+        if self._scope_checkpoints is not None:
+            self._scope_checkpoints._baseline = baseline
+
+    async def collect_workspace_effect(self, effect_id: str, *, owner_aid: int) -> WorkspaceRevision:
+        self._workspace_effects[effect_id] = "collected"
+        revision = await self.capture_workspace_revision(effect_id, owner_aid=owner_aid)
+        if not revision.changed:
+            self._workspace_effects[effect_id] = "acknowledged"
+        return revision
+
+    async def mark_workspace_effect_delivered(self, effect_id: str) -> None:
+        state = self._workspace_effects.get(effect_id)
+        if state is None:
+            raise RuntimeError(f"unknown workspace Effect {effect_id}")
+        if state == "collected":
+            self._workspace_effects[effect_id] = "delivered"
+
+    async def acknowledge_workspace_effect(self, effect_id: str) -> None:
+        state = self._workspace_effects.get(effect_id)
+        if state is None:
+            raise RuntimeError(f"unknown workspace Effect {effect_id}")
+        self._workspace_effects[effect_id] = "acknowledged"
 
     async def current_workspace_revision(self) -> str:
         self._ensure_active()
@@ -762,7 +824,10 @@ class WorktreeEnvironment(Environment):
     async def cleanup(self) -> None:
         async with self._lifecycle_lock:
             await self._ensure_directory_copy_changes_exported()
-            if self._git_mode and self._git_diff_delivery_pending:
+            if self._git_mode and (
+                self._git_diff_delivery_pending
+                or any(state in {"collected", "delivered"} for state in self._workspace_effects.values())
+            ):
                 raise RuntimeError(
                     f"refusing to clean undelivered Git worktree changes; worktree retained at {self.workspace}"
                 )
@@ -775,7 +840,10 @@ class WorktreeEnvironment(Environment):
     async def abort(self) -> None:
         async with self._lifecycle_lock:
             await self._ensure_directory_copy_changes_exported()
-            if self._git_mode and self._git_diff_delivery_pending:
+            if self._git_mode and (
+                self._git_diff_delivery_pending
+                or any(state in {"collected", "delivered"} for state in self._workspace_effects.values())
+            ):
                 raise RuntimeError(
                     f"refusing to clean undelivered Git worktree changes; worktree retained at {self.workspace}"
                 )

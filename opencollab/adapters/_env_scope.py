@@ -11,12 +11,14 @@ from collections.abc import Mapping
 from types import MappingProxyType
 
 from opencollab.adapters._env_process import PROCESS_OUTPUT_CAPTURE_BYTES, run_process
+from opencollab.adapters._workspace_baseline import changed_entries, validate_baseline
 from opencollab.domain.rollback import (
     AdoptionResult,
     CheckpointBoundary,
     EnvironmentSnapshot,
     RestoreResult,
     ScopeCheckpoint,
+    WorkspaceBaseline,
     WorkspaceRevision,
 )
 
@@ -81,9 +83,10 @@ class _ScopeState:
 class _HostGitCheckpoints:
     """Create protected Git objects without moving an Agent's HEAD or index."""
 
-    def __init__(self, scope: _ScopeState, workspace: str) -> None:
+    def __init__(self, scope: _ScopeState, workspace: str, baseline: WorkspaceBaseline | None = None) -> None:
         self._scope = scope
         self._workspace = workspace
+        self._baseline = baseline or WorkspaceBaseline()
         self._sequence = 0
         self._checkpoints: dict[str, ScopeCheckpoint] = {}
         self._refs: dict[str, str] = {}
@@ -110,6 +113,7 @@ class _HostGitCheckpoints:
         causal_frontier: frozenset[str],
     ) -> ScopeCheckpoint:
         async with self._scope.command_lock:
+            validate_baseline(self._workspace, self._baseline)
             checkpoint_id = f"cp_{uuid.uuid4().hex}"
             fd, index_path = tempfile.mkstemp(prefix="opencollab-index-")
             os.close(fd)
@@ -126,6 +130,7 @@ class _HostGitCheckpoints:
                 head = await self._git("rev-parse", "HEAD", env=env)
                 await self._git("read-tree", "HEAD", env=env)
                 await self._git("add", "-A", env=env)
+                await self._stage_ignored_outputs(env)
                 tree = await self._git("write-tree", env=env)
                 commit = await self._git(
                     "commit-tree", tree, "-p", head, "-m", f"OpenCollab checkpoint {checkpoint_id}", env=env
@@ -163,9 +168,10 @@ class _HostGitCheckpoints:
             )
         async with self._scope.command_lock:
             try:
+                validate_baseline(self._workspace, self._baseline)
                 changed = await self._git("status", "--porcelain", "-z")
                 await self._git("read-tree", "--reset", "-u", checkpoint.filesystem_revision)
-                await self._git("clean", "-fd")
+                await self._clean_non_baseline_ignored_outputs()
             except (OSError, RuntimeError) as exc:
                 return RestoreResult(
                     checkpoint.owner_aid,
@@ -190,6 +196,7 @@ class _HostGitCheckpoints:
     ) -> WorkspaceRevision:
         """Freeze tracked and untracked Scope files without changing its index."""
         async with self._scope.command_lock:
+            validate_baseline(self._workspace, self._baseline)
             fd, index_path = tempfile.mkstemp(prefix="opencollab-effect-index-")
             os.close(fd)
             os.unlink(index_path)
@@ -204,6 +211,7 @@ class _HostGitCheckpoints:
             try:
                 await self._git("read-tree", "HEAD", env=env)
                 await self._git("add", "-A", env=env)
+                await self._stage_ignored_outputs(env)
                 tree = await self._git("write-tree", env=env)
                 base_tree = await self._git("rev-parse", f"{base_revision}^{{tree}}", env=env)
                 commit = await self._git(
@@ -223,7 +231,31 @@ class _HostGitCheckpoints:
                 except FileNotFoundError:
                     pass
             self._refs[f"effect_{owner_aid}_{reference_id}"] = ref
-            return WorkspaceRevision(commit, base_revision, tree != base_tree)
+            names = await self._git("diff-tree", "--no-commit-id", "--name-only", "-r", commit, env=env)
+            files = changed_entries(self._workspace, names.splitlines(), self._baseline)
+            return WorkspaceRevision(commit, base_revision, tree != base_tree, files=files)
+
+    async def _stage_ignored_outputs(self, env: dict[str, str]) -> None:
+        ignored = await self._git("ls-files", "--others", "--ignored", "--exclude-standard", "-z", env=env)
+        baseline_paths = self._baseline.by_path()
+        paths = [
+            path
+            for path in ignored.split("\0")
+            if path and path not in baseline_paths and not path == ".opencollab" and not path.startswith(".opencollab/")
+        ]
+        if paths:
+            await self._git("add", "-f", "--", *paths, env=env)
+
+    async def _clean_non_baseline_ignored_outputs(self) -> None:
+        ignored = await self._git("ls-files", "--others", "--ignored", "--exclude-standard", "-z")
+        baseline_paths = self._baseline.by_path()
+        paths = [
+            path
+            for path in ignored.split("\0")
+            if path and path not in baseline_paths and path != ".opencollab" and not path.startswith(".opencollab/")
+        ]
+        if paths:
+            await self._git("clean", "-fd", "--", *paths)
 
     async def adopt_revision(self, revision: WorkspaceRevision) -> AdoptionResult:
         """Apply an immutable revision only to a clean coordinating Scope."""

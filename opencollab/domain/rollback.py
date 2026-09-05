@@ -6,16 +6,69 @@ import hashlib
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal, Mapping
 
-EffectKind = Literal["child_result", "teammate_message", "tool_result"]
-EffectStatus = Literal["untrusted", "verified", "quarantined"]
-BoundaryKind = Literal[
+_EffectKind = Literal["child_result", "teammate_message", "tool_result"]
+_EffectStatus = Literal["untrusted", "verified", "quarantined"]
+_BoundaryKind = Literal[
     "scope_initialization",
     "child_result",
     "teammate_message",
     "tool_call",
 ]
-RestoreStatus = Literal["restored", "skipped", "pending", "failed"]
+_RestoreStatus = Literal["restored", "skipped", "pending", "failed"]
 _AdoptionStatus = Literal["adopted", "skipped", "conflict", "failed"]
+_WorkspaceEntryKind = Literal["file", "symlink"]
+_WorkspaceEffectState = Literal["unseen", "collected", "delivered", "acknowledged"]
+
+
+@dataclass(frozen=True, slots=True)
+class BaselineEntry:
+    """One immutable file identity in a workspace baseline or Effect."""
+
+    path: str
+    kind: _WorkspaceEntryKind
+    mode: int
+    size: int
+    content_hash: str
+    control_plane: bool = False
+
+    def __post_init__(self) -> None:
+        normalized = self.path.replace("\\", "/")
+        parts = normalized.split("/")
+        if (
+            not normalized
+            or normalized.startswith("/")
+            or "\0" in normalized
+            or any(part in {"", ".", ".."} for part in parts)
+        ):
+            raise ValueError("workspace entry path must be a safe relative path")
+        if self.kind not in {"file", "symlink"}:
+            raise ValueError("workspace entry kind is invalid")
+        if self.mode < 0 or self.size < 0:
+            raise ValueError("workspace entry mode and size must be non-negative")
+        if not self.content_hash:
+            raise ValueError("workspace entry content hash is required")
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceBaseline:
+    """Ignored workspace inputs captured before an Agent run starts."""
+
+    entries: tuple[BaselineEntry, ...] = ()
+
+    def __post_init__(self) -> None:
+        paths = [entry.path for entry in self.entries]
+        if paths != sorted(paths) or len(paths) != len(set(paths)):
+            raise ValueError("workspace baseline entries must have unique sorted paths")
+
+    def by_path(self) -> dict[str, BaselineEntry]:
+        return {entry.path: entry for entry in self.entries}
+
+    def digest(self) -> str:
+        payload = "\0".join(
+            f"{entry.path}\0{entry.kind}\0{entry.mode}\0{entry.size}\0{entry.content_hash}"
+            for entry in self.entries
+        )
+        return hashlib.sha256(payload.encode()).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,6 +78,7 @@ class WorkspaceRevision:
     revision: str
     base_revision: str
     changed: bool = True
+    files: tuple[BaselineEntry, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.revision or not self.base_revision:
@@ -46,14 +100,15 @@ class EffectRef:
 
     effect_id: str
     producer_aid: int
-    kind: EffectKind
+    kind: _EffectKind
     epoch: int
     attempt: int
     parent_effect_ids: tuple[str, ...] = ()
     content_hash: str = ""
-    status: EffectStatus = "untrusted"
+    status: _EffectStatus = "untrusted"
     workspace_revision: str | None = None
     base_workspace_revision: str | None = None
+    workspace_files: tuple[BaselineEntry, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.effect_id:
@@ -123,7 +178,7 @@ class EnvironmentSnapshot:
 class CheckpointBoundary:
     """The consumption or execution boundary protected by a checkpoint."""
 
-    kind: BoundaryKind
+    kind: _BoundaryKind
     effect_id: str | None = None
 
 
@@ -137,7 +192,7 @@ class ScopeCheckpoint:
     filesystem_revision: str
     environment: EnvironmentSnapshot
     causal_frontier: frozenset[str]
-    boundary_kind: BoundaryKind
+    boundary_kind: _BoundaryKind
     boundary_effect_id: str | None = None
 
     def __post_init__(self) -> None:
@@ -153,7 +208,7 @@ class RestoreResult:
 
     agent_id: int
     checkpoint_id: str | None
-    status: RestoreStatus
+    status: _RestoreStatus
     files_changed: int = 0
     reason: str | None = None
 
@@ -225,6 +280,17 @@ def lineage_envelope_to_dict(envelope: LineageEnvelope) -> dict[str, Any]:
             "status": effect.status,
             "workspace_revision": effect.workspace_revision,
             "base_workspace_revision": effect.base_workspace_revision,
+            "workspace_files": [
+                {
+                    "path": entry.path,
+                    "kind": entry.kind,
+                    "mode": entry.mode,
+                    "size": entry.size,
+                    "content_hash": entry.content_hash,
+                    "control_plane": entry.control_plane,
+                }
+                for entry in effect.workspace_files
+            ],
         },
         "consumer_aid": envelope.consumer_aid,
         "source_message_id": envelope.source_message_id,
@@ -253,6 +319,18 @@ def lineage_envelope_from_dict(value: object) -> LineageEnvelope | None:
                     str(effect["base_workspace_revision"])
                     if effect.get("base_workspace_revision") is not None
                     else None
+                ),
+                workspace_files=tuple(
+                    BaselineEntry(
+                        path=str(item["path"]),
+                        kind=item["kind"],
+                        mode=int(item["mode"]),
+                        size=int(item["size"]),
+                        content_hash=str(item["content_hash"]),
+                        control_plane=bool(item.get("control_plane", False)),
+                    )
+                    for item in effect.get("workspace_files", ())
+                    if isinstance(item, dict)
                 ),
             ),
             consumer_aid=(int(value["consumer_aid"]) if value.get("consumer_aid") is not None else None),

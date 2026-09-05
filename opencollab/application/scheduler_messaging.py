@@ -676,6 +676,13 @@ class MessagingMixin:
                 session.state.discard_pending_user_message_id(message.message_id)
             else:
                 session.state.discard_pending_user_message(message.xml)
+            if message.effect_id:
+                try:
+                    marker = getattr(self, "_mark_effect_delivered", None)
+                    if callable(marker):
+                        await marker(message.from_aid, message.effect_id)
+                except Exception as exc:
+                    logger.warning("workspace Effect delivery acknowledgement failed: %s", exc)
         self._autosave_session(aid)
 
         if self._shutting_down:

@@ -17,6 +17,7 @@ if TYPE_CHECKING:
         EnvironmentSnapshot,
         RestoreResult,
         ScopeCheckpoint,
+        WorkspaceBaseline,
         WorkspaceRevision,
     )
 
@@ -45,6 +46,8 @@ class EnvironmentPort(Protocol):
     def unset_environment_variable(self, name: str) -> None: ...
 
     def environment_view(self) -> Mapping[str, str]: ...
+
+    def replace_environment(self, snapshot: "EnvironmentSnapshot") -> None: ...
 
     async def read_file(self, path: str) -> str: ...
 
@@ -88,12 +91,20 @@ class CheckpointableEnvironmentPort(EnvironmentPort, Protocol):
 class RevisionCapableEnvironmentPort(CheckpointableEnvironmentPort, Protocol):
     """Isolated Git Scope that can exchange immutable filesystem effects."""
 
-    async def capture_workspace_revision(
+    async def capture_workspace_baseline(self) -> "WorkspaceBaseline": ...
+
+    async def seed_workspace_baseline(self, baseline: "WorkspaceBaseline") -> None: ...
+
+    async def collect_workspace_effect(
         self,
-        reference_id: str,
+        effect_id: str,
         *,
         owner_aid: int,
     ) -> "WorkspaceRevision": ...
+
+    async def mark_workspace_effect_delivered(self, effect_id: str) -> None: ...
+
+    async def acknowledge_workspace_effect(self, effect_id: str) -> None: ...
 
     async def adopt_workspace_revision(
         self,

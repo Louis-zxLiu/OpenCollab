@@ -10,7 +10,6 @@ from typing import Any, Mapping
 from opencollab.application.ports import CheckpointableEnvironmentPort, TracePort
 from opencollab.domain.rollback import (
     CheckpointBoundary,
-    EffectKind,
     EffectRef,
     RestoreResult,
     ScopeCheckpoint,
@@ -44,7 +43,7 @@ class RollbackService:
         attempt: int,
         branch_id: str,
         epoch: int,
-        kind: EffectKind,
+        kind: str,
         parent_effect_ids: tuple[str, ...],
         content: str,
     ) -> EffectRef:
@@ -82,6 +81,7 @@ class RollbackService:
             effect,
             workspace_revision=revision.revision,
             base_workspace_revision=revision.base_revision,
+            workspace_files=revision.files,
         )
         self._effects[effect_id] = updated
         return updated
@@ -93,6 +93,7 @@ class RollbackService:
         return WorkspaceRevision(
             revision=effect.workspace_revision,
             base_revision=effect.base_workspace_revision,
+            files=effect.workspace_files,
         )
 
     def consume(self, consumer_aid: int, effect_id: str) -> frozenset[str]:

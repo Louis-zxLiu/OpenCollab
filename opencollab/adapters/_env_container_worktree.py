@@ -11,6 +11,7 @@ from collections.abc import Callable
 from opencollab.adapters._env_base import ExecResult
 from opencollab.adapters._env_docker import DockerEnvironment
 from opencollab.adapters._env_scope import _ScopeState
+from opencollab.adapters._workspace_baseline import is_control_plane
 from opencollab.adapters.git_patch import guarded_staged_diff_command
 from opencollab.adapters.git_worktree_evidence import (
     ABSENT_REF_OLD_VALUE,
@@ -20,9 +21,11 @@ from opencollab.adapters.git_worktree_evidence import (
 )
 from opencollab.domain.rollback import (
     AdoptionResult,
+    BaselineEntry,
     CheckpointBoundary,
     RestoreResult,
     ScopeCheckpoint,
+    WorkspaceBaseline,
     WorkspaceRevision,
 )
 
@@ -73,6 +76,7 @@ class ContainerWorktreeEnvironment(DockerEnvironment):
         timeout_returncode: int = -1,
         _scope: _ScopeState | None = None,
         base_revision: str | None = None,
+        baseline: WorkspaceBaseline | None = None,
     ) -> None:
         branch = validate_worktree_branch(branch_name or f"opencollab-wt-{uuid.uuid4().hex[:12]}")
         repository_root = _absolute_container_path(repository_root, "repository root")
@@ -95,6 +99,7 @@ class ContainerWorktreeEnvironment(DockerEnvironment):
         self._worktree_registered = False
         self._base_commit: str | None = None
         self._requested_base_revision = base_revision
+        self._baseline = baseline or WorkspaceBaseline()
         self._diff_base: str | None = None
         self._head_commit: str | None = None
         self._own_commits: tuple[str, ...] = ()
@@ -102,6 +107,7 @@ class ContainerWorktreeEnvironment(DockerEnvironment):
         self._scope_checkpoints: dict[str, ScopeCheckpoint] = {}
         self._effect_refs: set[str] = set()
         self._checkpoint_sequence = 0
+        self._workspace_effects: dict[str, str] = {}
         self.bind_workspace(worktree_dir)
 
     @property
@@ -132,11 +138,16 @@ class ContainerWorktreeEnvironment(DockerEnvironment):
         causal_frontier: frozenset[str],
     ) -> ScopeCheckpoint:
         await self.setup()
+        await self._validate_baseline()
         checkpoint_id = f"cp_{uuid.uuid4().hex}"
         script = (
             "set -eu; idx=$(mktemp); trap 'rm -f \"$idx\"' EXIT; "
             "GIT_INDEX_FILE=$idx git read-tree HEAD; "
-            "GIT_INDEX_FILE=$idx git add -A; tree=$(GIT_INDEX_FILE=$idx git write-tree); "
+            "GIT_INDEX_FILE=$idx git add -A; "
+            "GIT_INDEX_FILE=$idx git ls-files --others --ignored --exclude-standard -z | "
+            "while IFS= read -r -d '' p; do case \"$p\" in .opencollab|.opencollab/*) ;; "
+            "*) GIT_INDEX_FILE=$idx git add -f -- \"$p\" ;; esac; done; "
+            "tree=$(GIT_INDEX_FILE=$idx git write-tree); "
             "commit=$(printf '%s\\n' 'OpenCollab checkpoint' | "
             "GIT_AUTHOR_NAME='OpenCollab Checkpoint' GIT_AUTHOR_EMAIL='checkpoint@opencollab.invalid' "
             "GIT_COMMITTER_NAME='OpenCollab Checkpoint' GIT_COMMITTER_EMAIL='checkpoint@opencollab.invalid' "
@@ -168,11 +179,20 @@ class ContainerWorktreeEnvironment(DockerEnvironment):
             await self.setup()
         if self._base_commit is None:
             raise RuntimeError("workspace Effect base revision is unavailable")
+        await self._validate_baseline()
         ref_name = f"refs/opencollab/effects/{owner_aid}/{reference_id}"
+        baseline_paths = [shlex.quote(path) for path in self._baseline.by_path()]
+        ignored_skip = ".opencollab|.opencollab/*"
+        if baseline_paths:
+            ignored_skip = "|".join((ignored_skip, *baseline_paths))
         script = (
             "set -eu; idx=$(mktemp); trap 'rm -f \"$idx\"' EXIT; "
             "GIT_INDEX_FILE=$idx git read-tree HEAD; "
-            "GIT_INDEX_FILE=$idx git add -A; tree=$(GIT_INDEX_FILE=$idx git write-tree); "
+            "GIT_INDEX_FILE=$idx git add -A; "
+            "GIT_INDEX_FILE=$idx git ls-files --others --ignored --exclude-standard -z | "
+            f"while IFS= read -r -d '' p; do case \"$p\" in {ignored_skip}) ;; "
+            "*) GIT_INDEX_FILE=$idx git add -f -- \"$p\" ;; esac; done; "
+            "tree=$(GIT_INDEX_FILE=$idx git write-tree); "
             "commit=$(printf '%s\\n' "
             f"{shlex.quote(f'OpenCollab effect {reference_id}')}"
             " | GIT_AUTHOR_NAME='OpenCollab Effect' "
@@ -194,7 +214,94 @@ class ContainerWorktreeEnvironment(DockerEnvironment):
             result.stdout.strip(),
             self._base_commit,
             effect_tree.stdout.strip() != base_tree.stdout.strip(),
+            files=await self._effect_files(result.stdout.strip()),
         )
+
+    async def _effect_files(self, revision: str) -> tuple[BaselineEntry, ...]:
+        result = await self._git(self._worktree_dir, "diff-tree", "--no-commit-id", "--name-only", "-r", "-z", revision)
+        if result.returncode != 0:
+            raise RuntimeError("cannot enumerate container workspace Effect")
+        entries: list[BaselineEntry] = []
+        for path in (item for item in result.stdout.split("\0") if item and not is_control_plane(item)):
+            stat = await self._exec(f"stat -c '%a %s' -- {shlex.quote(path)}", timeout=CONTAINER_GIT_TIMEOUT_SECONDS)
+            digest = await self._exec(f"sha256sum -- {shlex.quote(path)}", timeout=CONTAINER_GIT_TIMEOUT_SECONDS)
+            if stat.returncode != 0 or digest.returncode != 0:
+                continue
+            mode, size = stat.stdout.strip().split()
+            entries.append(BaselineEntry(path, "file", int(mode, 8), int(size), digest.stdout.split()[0]))
+        return tuple(sorted(entries, key=lambda item: item.path))
+
+    async def capture_workspace_baseline(self) -> WorkspaceBaseline:
+        """Capture ignored inputs from this container worktree."""
+        await self.setup()
+        result = await self._exec(
+            "git ls-files --others --ignored --exclude-standard -z",
+            timeout=CONTAINER_GIT_TIMEOUT_SECONDS,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr or "cannot capture container workspace baseline")
+        entries: list[BaselineEntry] = []
+        for path in (item for item in result.stdout.split("\0") if item and not is_control_plane(item)):
+            stat = await self._exec(
+                f"stat -c '%a %s' -- {shlex.quote(path)}",
+                timeout=CONTAINER_GIT_TIMEOUT_SECONDS,
+            )
+            digest = await self._exec(
+                f"sha256sum -- {shlex.quote(path)}",
+                timeout=CONTAINER_GIT_TIMEOUT_SECONDS,
+            )
+            if stat.returncode != 0 or digest.returncode != 0:
+                continue
+            mode, size = stat.stdout.strip().split()
+            entries.append(BaselineEntry(path, "file", int(mode, 8), int(size), digest.stdout.split()[0]))
+        self._baseline = WorkspaceBaseline(tuple(sorted(entries, key=lambda item: item.path)))
+        return self._baseline
+
+    async def _validate_baseline(self) -> None:
+        for entry in self._baseline.entries:
+            stat = await self._exec(
+                f"stat -c '%a %s' -- {shlex.quote(entry.path)}",
+                timeout=CONTAINER_GIT_TIMEOUT_SECONDS,
+            )
+            digest = await self._exec(f"sha256sum -- {shlex.quote(entry.path)}", timeout=CONTAINER_GIT_TIMEOUT_SECONDS)
+            if stat.returncode != 0 or digest.returncode != 0:
+                raise RuntimeError(f"baseline mutation: missing {entry.path}")
+            mode, size = stat.stdout.strip().split()
+            if int(mode, 8) != entry.mode or int(size) != entry.size or digest.stdout.split()[0] != entry.content_hash:
+                raise RuntimeError(f"baseline mutation: {entry.path}")
+
+    async def seed_workspace_baseline(self, baseline: WorkspaceBaseline) -> None:
+        await self.setup()
+        for entry in baseline.entries:
+            source = posixpath.join(self._repository_root, entry.path)
+            target = posixpath.join(self._worktree_dir, entry.path)
+            result = await self._exec(
+                f"mkdir -p -- {shlex.quote(posixpath.dirname(target))} && "
+                f"cp -a -- {shlex.quote(source)} {shlex.quote(target)}",
+                timeout=CONTAINER_GIT_TIMEOUT_SECONDS,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(result.stderr or f"cannot seed baseline path {entry.path}")
+        self._baseline = baseline
+
+    async def collect_workspace_effect(self, effect_id: str, *, owner_aid: int) -> WorkspaceRevision:
+        self._workspace_effects[effect_id] = "collected"
+        revision = await self.capture_workspace_revision(effect_id, owner_aid=owner_aid)
+        if not revision.changed:
+            self._workspace_effects[effect_id] = "acknowledged"
+        return revision
+
+    async def mark_workspace_effect_delivered(self, effect_id: str) -> None:
+        state = self._workspace_effects.get(effect_id)
+        if state is None:
+            raise RuntimeError(f"unknown workspace Effect {effect_id}")
+        if state == "collected":
+            self._workspace_effects[effect_id] = "delivered"
+
+    async def acknowledge_workspace_effect(self, effect_id: str) -> None:
+        if effect_id not in self._workspace_effects:
+            raise RuntimeError(f"unknown workspace Effect {effect_id}")
+        self._workspace_effects[effect_id] = "acknowledged"
 
     async def adopt_workspace_revision(self, revision: WorkspaceRevision) -> AdoptionResult:
         """Cherry-pick a frozen revision into this clean container worktree."""
@@ -237,10 +344,28 @@ class ContainerWorktreeEnvironment(DockerEnvironment):
                 "failed",
                 reason="checkpoint ownership mismatch",
             )
-        script = f"set -eu; git read-tree --reset -u {checkpoint.filesystem_revision}; git clean -fd"
-        result = await self._exec(script, timeout=CONTAINER_GIT_TIMEOUT_SECONDS)
-        if result.returncode != 0:
-            return RestoreResult(checkpoint.owner_aid, checkpoint.checkpoint_id, "failed", reason=result.stderr[:500])
+        await self._validate_baseline()
+        reset = await self._git(self._worktree_dir, "read-tree", "--reset", "-u", checkpoint.filesystem_revision)
+        if reset.returncode != 0:
+            return RestoreResult(checkpoint.owner_aid, checkpoint.checkpoint_id, "failed", reason=reset.stderr[:500])
+        ignored = await self._git(self._worktree_dir, "ls-files", "--others", "--ignored", "--exclude-standard", "-z")
+        if ignored.returncode != 0:
+            return RestoreResult(checkpoint.owner_aid, checkpoint.checkpoint_id, "failed", reason=ignored.stderr[:500])
+        baseline_paths = self._baseline.by_path()
+        paths = [
+            path
+            for path in ignored.stdout.split("\0")
+            if path and path not in baseline_paths and path != ".opencollab" and not path.startswith(".opencollab/")
+        ]
+        if paths:
+            cleaned = await self._git(self._worktree_dir, "clean", "-fd", "--", *paths)
+            if cleaned.returncode != 0:
+                return RestoreResult(
+                    checkpoint.owner_aid,
+                    checkpoint.checkpoint_id,
+                    "failed",
+                    reason=cleaned.stderr[:500],
+                )
         self._scope.replace(checkpoint.environment)
         return RestoreResult(checkpoint.owner_aid, checkpoint.checkpoint_id, "restored")
 
@@ -344,15 +469,22 @@ class ContainerWorktreeEnvironment(DockerEnvironment):
         if added.returncode != 0:
             raise RuntimeError(f"container git worktree add failed: {added.stderr.strip()}")
         self._worktree_registered = True
+        await self.seed_workspace_baseline(self._baseline)
 
     async def get_diff(self) -> str:
         """This worktree's changes since the point its current work started from."""
         self._ensure_active()
         if self._base_commit is None:
             raise RuntimeError("container worktree base commit is unavailable")
+        await self._validate_baseline()
         self._diff_base = await self._resolve_diff_base()
         await self._resolve_own_commits(self._diff_base)
-        result = await self.exec_cmd(guarded_staged_diff_command(base_revision=self._diff_base))
+        result = await self.exec_cmd(
+            guarded_staged_diff_command(
+                base_revision=self._diff_base,
+                baseline_paths=tuple(self._baseline.by_path()),
+            )
+        )
         if result.stdout_truncated or result.stderr_truncated:
             raise RuntimeError(f"container worktree diff exceeded capture limit at {self._worktree_dir}")
         if result.returncode != 0:
@@ -390,6 +522,11 @@ class ContainerWorktreeEnvironment(DockerEnvironment):
         that is about to be removed costs nothing, while a raising cleanup would
         turn a finished run into a failed one.
         """
+        if any(state in {"collected", "delivered"} for state in self._workspace_effects.values()):
+            raise RuntimeError(
+                "refusing to clean undelivered container workspace Effects; "
+                f"worktree retained at {self._worktree_dir}"
+            )
         if self._worktree_registered:
             try:
                 await self.discard_scope_checkpoints()

@@ -10,7 +10,6 @@ from __future__ import annotations
 import logging
 import uuid
 
-from opencollab.adapters._env_scope import _ScopeState
 from opencollab.adapters.env import (
     ContainerWorktreeEnvironment,
     DockerEnvironment,
@@ -78,9 +77,13 @@ class WorktreePool:
         base = self._base_environment
         if self._rollback_enabled and not self._use_worktrees:
             raise RuntimeError("rollback-enabled Team mode requires isolated Git worktrees")
+        baseline = None
         seed = None
         if parent_environment is not None:
-            seed = _ScopeState(parent_environment.snapshot_environment().as_dict())
+            capture_baseline = getattr(parent_environment, "capture_workspace_baseline", None)
+            if callable(capture_baseline):
+                baseline = await capture_baseline()
+            seed = parent_environment.snapshot_environment()
         if not self._use_worktrees:
             # Without isolation every agent works where the run works, which is
             # the supplied environment when there is one and the host workspace
@@ -89,7 +92,9 @@ class WorktreePool:
             if base is not None:
                 return base
             try:
-                env = LocalEnvironment(self._workspace, _scope=seed)
+                env = LocalEnvironment(self._workspace)
+                if seed is not None:
+                    env.replace_environment(seed)
             except TypeError as exc:
                 if "_scope" not in str(exc):
                     raise
@@ -101,17 +106,21 @@ class WorktreePool:
         env = self._build_worktree(
             branch,
             base,
-            scope=seed,
+            baseline=baseline,
             base_revision=(parent_workspace_revision.revision if parent_workspace_revision is not None else None),
         )
         try:
             await env.setup()
+            seed_baseline = getattr(env, "seed_workspace_baseline", None)
+            if baseline is not None and callable(seed_baseline) and not getattr(env, "_baseline_supplied", False):
+                await seed_baseline(baseline)
+            seed = parent_environment.snapshot_environment() if parent_environment is not None else None
             if seed is not None:
                 # Container setup captures its native environment. A child
                 # Scope is nevertheless forked from its parent, so restore the
                 # captured seed after setup while retaining the child PWD.
                 previous_pwd = env.environment_view().get("PWD")
-                env._scope.replace(seed.snapshot())
+                env.replace_environment(seed)
                 if previous_pwd is not None:
                     env.bind_workspace(previous_pwd)
         except BaseException as original:
@@ -133,7 +142,7 @@ class WorktreePool:
         branch: str,
         base: Environment | None,
         *,
-        scope: _ScopeState | None = None,
+        baseline=None,
         base_revision: str | None = None,
     ) -> Environment:
         """An isolated view of wherever the run's repository actually is."""
@@ -142,8 +151,8 @@ class WorktreePool:
                 self._workspace,
                 branch_name=branch,
                 require_git=self._rollback_enabled,
-                _scope=scope,
                 base_revision=base_revision,
+                baseline=baseline,
             )
         if isinstance(base, DockerEnvironment) and base.container_reference is not None:
             return ContainerWorktreeEnvironment(
@@ -152,16 +161,16 @@ class WorktreePool:
                 worktree_root=CONTAINER_WORKTREE_ROOT,
                 branch_name=branch,
                 command_prefix=base.command_prefix,
-                _scope=scope,
                 base_revision=base_revision,
+                baseline=baseline,
             )
         if getattr(base, "local_filesystem", False):
             return WorktreeEnvironment(
                 base.workspace,
                 branch_name=branch,
                 require_git=self._rollback_enabled,
-                _scope=scope,
                 base_revision=base_revision,
+                baseline=baseline,
             )
         raise TypeError(f"worktree isolation is not available for this environment: {type(base).__name__}")
 

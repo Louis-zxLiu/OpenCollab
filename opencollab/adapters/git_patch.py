@@ -10,6 +10,7 @@ def guarded_staged_diff_command(
     *,
     base_revision: str = "HEAD",
     exclude_paths: Sequence[str] = (),
+    baseline_paths: Sequence[str] = (),
 ) -> str:
     """Stage through a temporary index without repository-local diff hooks.
 
@@ -109,9 +110,15 @@ def guarded_staged_diff_command(
         f'{git_index_command} ls-files --others --ignored '
         '--exclude-per-directory=.gitignore -z > "$ignored" && '
         'if [ -s "$ignored" ]; then '
-        "echo 'ignored untracked files cannot be included in patch evidence' >&2; "
-        "exit 125; fi; "
+        f'{git_index_command} add -f --pathspec-from-file="$ignored" --pathspec-file-nul; fi && '
     )
+    baseline_resets = ""
+    for path in tuple(baseline_paths) + (".opencollab",):
+        if str(path).strip():
+            baseline_resets += (
+                f'{git_index_command} rm -r -q --cached --ignore-unmatch -- '
+                f"{shlex.quote(str(path))} && "
+            )
     reserved_guard = (
         f'if {git_index_command} diff --no-ext-diff --no-textconv --cached --quiet '
         f"{shlex.quote(base_revision)} -- "
@@ -135,6 +142,7 @@ def guarded_staged_diff_command(
         f"{ignored_guard}"
         f"{stage_untracked}"
         f"{resets}"
+        f"{baseline_resets}"
         f"{reserved_guard}"
         f'{git_index_command} diff --no-ext-diff --no-textconv --cached --binary '
         f"{shlex.quote(base_revision)}"

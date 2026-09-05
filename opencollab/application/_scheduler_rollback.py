@@ -19,10 +19,24 @@ class SchedulerRollbackMixin:
         """Attach the producer Scope's immutable file revision to an Effect."""
         session = self._sessions.get(producer_aid)
         environment = getattr(session, "env", None) if session is not None else None
-        capture = getattr(environment, "capture_workspace_revision", None)
+        capture = getattr(environment, "collect_workspace_effect", None)
+        if not callable(capture):
+            capture = getattr(environment, "capture_workspace_revision", None)
         if not callable(capture):
             raise RuntimeError(f"Agent {producer_aid} has no revision-capable isolated Scope")
-        revision = await capture(effect.effect_id, owner_aid=producer_aid)
+        try:
+            revision = await capture(effect.effect_id, owner_aid=producer_aid)
+        except Exception as exc:
+            self._trace_rollback(
+                "workspace_effect_capture_failed",
+                {
+                    "effect_id": effect.effect_id,
+                    "producer_aid": producer_aid,
+                    "workspace": getattr(environment, "workspace", None),
+                    "error": str(exc),
+                },
+            )
+            raise
         if not revision.changed:
             return effect
         attached = self._lineage.attach_workspace_revision(effect.effect_id, revision)
@@ -111,6 +125,8 @@ class SchedulerRollbackMixin:
                 error=error,
                 lineage_effect=lineage_effect,
             )
+            if lineage_effect is not None:
+                await self._mark_effect_delivered(child_aid, lineage_effect.effect_id)
         except PendingRowError as exc:
             retry_tool_call_id = await self._recover_delivery_route(
                 child_aid,
@@ -128,6 +144,8 @@ class SchedulerRollbackMixin:
                         error=error,
                         lineage_effect=lineage_effect,
                     )
+                    if lineage_effect is not None:
+                        await self._mark_effect_delivered(child_aid, lineage_effect.effect_id)
                     return
                 except PendingRowError as retry_exc:
                     exc = retry_exc
@@ -216,6 +234,23 @@ class SchedulerRollbackMixin:
             return "Error: this Agent has not received the requested Effect."
         revision = self._lineage.workspace_revision(effect_id)
         if revision is None:
+            producer = self._sessions.get(effect.producer_aid)
+            producer_env = getattr(producer, "env", None) if producer is not None else None
+            acknowledge = getattr(producer_env, "acknowledge_workspace_effect", None)
+            if callable(acknowledge):
+                try:
+                    await acknowledge(effect_id)
+                except Exception as exc:
+                    self._trace_rollback(
+                        "workspace_effect_acknowledge_failed",
+                        {
+                            "effect_id": effect_id,
+                            "producer_aid": effect.producer_aid,
+                            "workspace": getattr(producer_env, "workspace", None),
+                            "error": str(exc),
+                        },
+                    )
+                    return f"Error: workspace Effect acknowledgement failed: {exc}"
             return f"Effect {effect_id} has no workspace changes to adopt."
         session = self._sessions.get(consumer_aid)
         environment = getattr(session, "env", None) if session is not None else None
@@ -225,7 +260,34 @@ class SchedulerRollbackMixin:
         outcome = await adopt(revision)
         if outcome.status != "adopted":
             reason = outcome.reason or outcome.status
+            self._trace_rollback(
+                "workspace_effect_adoption_failed",
+                {
+                    "effect_id": effect_id,
+                    "producer_aid": effect.producer_aid,
+                    "consumer_aid": consumer_aid,
+                    "workspace": getattr(environment, "workspace", None),
+                    "reason": reason,
+                },
+            )
             return f"Error: Effect adoption {outcome.status}: {reason}"
+        producer = self._sessions.get(effect.producer_aid)
+        producer_env = getattr(producer, "env", None) if producer is not None else None
+        acknowledge = getattr(producer_env, "acknowledge_workspace_effect", None)
+        if callable(acknowledge):
+            try:
+                await acknowledge(effect_id)
+            except Exception as exc:
+                self._trace_rollback(
+                    "workspace_effect_acknowledge_failed",
+                    {
+                        "effect_id": effect_id,
+                        "producer_aid": effect.producer_aid,
+                        "workspace": getattr(producer_env, "workspace", None),
+                        "error": str(exc),
+                    },
+                )
+                return f"Error: workspace Effect acknowledgement failed: {exc}"
         self._trace_rollback(
             "workspace_effect_adopted",
             {
@@ -236,6 +298,13 @@ class SchedulerRollbackMixin:
             },
         )
         return f"Adopted Effect {effect_id} into this Agent Scope."
+
+    async def _mark_effect_delivered(self, producer_aid: int, effect_id: str) -> None:
+        session = self._sessions.get(producer_aid)
+        environment = getattr(session, "env", None) if session is not None else None
+        marker = getattr(environment, "mark_workspace_effect_delivered", None)
+        if callable(marker):
+            await marker(effect_id)
 
     async def _checkpoint_after_spawn(self, aid: int, task: str) -> None:
         if self._lineage is None or not self._rollback_enabled:

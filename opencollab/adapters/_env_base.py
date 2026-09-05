@@ -71,6 +71,10 @@ class Environment:
     def environment_view(self) -> Mapping[str, str]:
         return self._scope.view()
 
+    def replace_environment(self, snapshot: EnvironmentSnapshot) -> None:
+        """Replace this Scope environment without touching process globals."""
+        self._scope.replace(snapshot)
+
     @property
     def revoked(self) -> bool:
         return self._aborted
