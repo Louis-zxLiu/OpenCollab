@@ -6,7 +6,7 @@ import asyncio
 import os
 import re
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import TypeVar
 
 from opencollab.adapters._env_base import (
@@ -53,12 +53,20 @@ class LocalEnvironment(Environment):
     local_filesystem = True
     process_isolated = False
 
-    def __init__(self, workspace: str = ".", *, _scope: _ScopeState | None = None) -> None:
+    def __init__(
+        self,
+        workspace: str = ".",
+        *,
+        _scope: _ScopeState | None = None,
+        process_sandbox_prefix: Sequence[str] | None = None,
+    ) -> None:
         super().__init__(_scope=_scope)
         self.workspace = os.path.realpath(os.path.abspath(workspace))
         self.bind_workspace(self.workspace)
         if not os.path.isdir(self.workspace):
             raise NotADirectoryError(self.workspace)
+        self._process_sandbox_prefix = tuple(process_sandbox_prefix or ())
+        self.process_isolated = bool(self._process_sandbox_prefix)
         self._workspace_fd: int | None = open_directory_anchor(self.workspace)
         self.host_workspace = self.workspace
         self.source_workspace = self.workspace
@@ -95,12 +103,22 @@ class LocalEnvironment(Environment):
         self._ensure_active()
         async with self._scope.command_lock:
             try:
+                command: str | tuple[str, ...]
+                input_bytes = None
+                shell = True
+                if self._process_sandbox_prefix:
+                    command = self._process_sandbox_prefix
+                    input_bytes = cmd.encode("utf-8")
+                    shell = False
+                else:
+                    command = cmd
                 result = await run_process(
-                    cmd,
-                    shell=True,
+                    command,
+                    shell=shell,
                     cwd=self.workspace,
                     timeout=timeout,
                     registry=self._processes,
+                    input_bytes=input_bytes,
                     output_limit=PROCESS_OUTPUT_CAPTURE_BYTES,
                     env=self._scope.process_environment(),
                 )

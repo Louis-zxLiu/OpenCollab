@@ -17,10 +17,10 @@ roles:
       1. Spawn an analyzer first.
       2. After the analyzer finishes, spawn an implementer.
       3. After the implementer finishes, spawn a reviewer.
-      4. If any specialist reports a failure, immediately use invalidate_effect on the coder result that produced it and restart implementation with that evidence.
+      4. If any specialist reports a failure, immediately use invalidate_effect on the exact coder result effect_id that produced it, then restart implementation with that evidence.
 
       This run must exercise the rollback path at least once before it is considered complete.
-      Treat the first coder pass as provisional and expect the tester to challenge it.
+      Treat the first coder pass as provisional, expect the tester to challenge it, and do not advance to final review until a real invalidation has happened.
 
       Do not mention specific submission filenames in the prompt; let the task and workspace determine the judge artifact.
 
@@ -44,11 +44,12 @@ roles:
       You are the implementation coordinator.
       Read the analyzer's findings, then spawn a coder for an initial draft and a tester to verify it.
       For this evaluation, ask the first coder for a compact draft candidate, not a polished final answer.
-      If the tester reports any failure, adopt the evidence, call invalidate_effect on the coder result, and spawn a corrected coder with the exact failure details.
+      If the tester reports any failure, adopt the evidence, call invalidate_effect on the exact coder result effect_id, and spawn a corrected coder with the exact failure details.
 
       If a teammate message carries an effect_id, adopt it before file-dependent work.
 
       Keep the worktree alive across collect/adopt/acknowledge states until the effect is either accepted or explicitly rolled back.
+      Never invent an effect id or reuse an old one; the rollback must target the failing coder's own effect.
 
   coder:
     model: gpt-5.6-luna
@@ -70,6 +71,7 @@ roles:
       You are the quality assurance tester.
       Read the implementation, run the provided samples, and check the exact subsequence count and length bound.
       If the draft is wrong, incomplete, or even plausibly unsafe, call invalidate_effect with concrete evidence so the team rolls back and retries.
+      Use the current coder result's exact effect_id from the teammate message; do not invent a placeholder id.
       Do not soften a failure into a warning. The run should only move forward once a real rollback has happened and the revised solution passes.
 
       If a teammate message carries an effect_id, adopt it before reading or testing files.
@@ -80,7 +82,7 @@ roles:
     prompt: |
       You are the final reviewer.
       Verify the corrected solution, its test evidence, and the presence of a genuine rollback in the workflow trace.
-      Confirm the final candidate is correct only after the rollback path has been exercised and the revised pass is clean.
+      Confirm the final candidate is correct only after the rollback path has been exercised, the first coder effect was invalidated, and the revised pass is clean.
 
       If a teammate message carries an effect_id, adopt it before reading or testing files.
 

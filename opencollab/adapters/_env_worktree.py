@@ -10,6 +10,7 @@ import tempfile
 import uuid
 
 from opencollab.adapters._env_base import Environment, ExecResult, TextFileRange
+from opencollab.adapters._env_host_sandbox import host_process_sandbox_prefix
 from opencollab.adapters._env_local import LocalEnvironment
 from opencollab.adapters._env_process import run_process
 from opencollab.adapters._env_scope import _HostGitCheckpoints, _ScopeState
@@ -96,6 +97,8 @@ class WorktreeEnvironment(Environment):
         self._scope_checkpoints: _HostGitCheckpoints | None = None
         self._baseline = baseline or WorkspaceBaseline()
         self._baseline_supplied = baseline is not None
+        self._process_sandbox_prefix = host_process_sandbox_prefix()
+        self.process_isolated = self._process_sandbox_prefix is not None
         # The revision the last ``get_diff`` measured against. Read by the
         # scheduler's ``worktree_changes`` record so a row states its own
         # baseline; ``None`` until a diff has been taken, and on the non-Git
@@ -178,7 +181,11 @@ class WorktreeEnvironment(Environment):
         self.workspace = exposed_workspace
         self.host_workspace = exposed_workspace
         self.bind_workspace(exposed_workspace)
-        self._local_env = LocalEnvironment(exposed_workspace, _scope=self._scope)
+        self._local_env = LocalEnvironment(
+            exposed_workspace,
+            _scope=self._scope,
+            process_sandbox_prefix=self._process_sandbox_prefix,
+        )
         self._scope_checkpoints = _HostGitCheckpoints(self._scope, exposed_workspace, self._baseline)
         return exposed_workspace
 

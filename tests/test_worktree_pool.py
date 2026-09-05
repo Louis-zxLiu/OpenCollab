@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from opencollab.adapters import _env_host_sandbox as host_sandbox_module
 from opencollab.adapters import _env_worktree as worktree_module
 from opencollab.adapters import worktree_pool as pool_module
 from opencollab.adapters.env import (
@@ -124,6 +125,40 @@ async def test_non_git_source_uses_independent_directory_copy(tmp_path) -> None:
     assert await env.read_file("note.txt") == "child"
     assert "child" in await env.get_diff()
     await env.cleanup()
+    assert not os.path.exists(workspace)
+
+
+async def test_worktree_uses_configured_host_process_sandbox(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    if os.name != "posix":
+        pytest.skip("host process sandboxing is POSIX-only")
+    source = _repo(tmp_path / "repo")
+    monkeypatch.setenv("OPENCOLLAB_HOST_PROCESS_SANDBOX", "firejail")
+    monkeypatch.setattr(
+        host_sandbox_module.shutil,
+        "which",
+        lambda name: "/usr/bin/firejail" if name == "firejail" else None,
+    )
+    env = WorktreeEnvironment(str(source), branch_name="sandboxed-worktree")
+
+    workspace = await env.setup()
+
+    try:
+        assert env.process_isolated
+        assert env._local_env is not None
+        assert env._local_env.process_isolated
+        assert env._local_env._process_sandbox_prefix == (
+            "/usr/bin/firejail",
+            "--quiet",
+            "--noprofile",
+            "--",
+            "/bin/sh",
+            "-s",
+        )
+    finally:
+        await env.cleanup()
     assert not os.path.exists(workspace)
 
 
