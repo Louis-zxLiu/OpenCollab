@@ -106,11 +106,31 @@ def guarded_staged_diff_command(
         f'{git_index_command} add -f --pathspec-from-file="$untracked" '
         '--pathspec-file-nul; fi && '
     )
+    ignored_python_args = " ".join(shlex.quote(path) for path in baseline_paths)
     ignored_guard = (
         f'{git_index_command} ls-files --others --ignored '
         '--exclude-per-directory=.gitignore -z > "$ignored" && '
         'if [ -s "$ignored" ]; then '
-        f'{git_index_command} add -f --pathspec-from-file="$ignored" --pathspec-file-nul; fi && '
+        'if python3 - "$ignored" '
+        f"{ignored_python_args} <<'PY'\n"
+        "import pathlib\n"
+        "import sys\n"
+        "\n"
+        "ignored = pathlib.Path(sys.argv[1]).read_bytes().split(b'\\0')\n"
+        "baseline = set(sys.argv[2:])\n"
+        "for raw in ignored:\n"
+        "    if not raw:\n"
+        "        continue\n"
+        "    path = raw.decode()\n"
+        "    if path == '.opencollab' or path.startswith('.opencollab/'):\n"
+        "        continue\n"
+        "    if path in baseline:\n"
+        "        continue\n"
+        "    print('ignored untracked files cannot be staged safely', file=sys.stderr)\n"
+        "    raise SystemExit(125)\n"
+        "PY\n"
+        'then :; else exit $?; fi; '
+        'fi && '
     )
     baseline_resets = ""
     for path in tuple(baseline_paths) + (".opencollab",):
