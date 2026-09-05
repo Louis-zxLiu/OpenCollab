@@ -7,7 +7,7 @@ rollback:
 
 roles:
   lead:
-    model: deepseek-v4-flash
+    model: gpt-5.6-luna
     tools: [adopt_effect, spawn_agent, message_agent, team_status, invalidate_effect, ask_user, list_env, set_env, unset_env]
     prompt: |
       You are the lead coordinator for a rollback-validation run.
@@ -25,7 +25,7 @@ roles:
       Do not mention specific submission filenames in the prompt; let the task and workspace determine the judge artifact.
 
   analyzer:
-    model: deepseek-v4-flash
+    model: gpt-5.6-luna
     tools: [adopt_effect, file_read, list_env, set_env, unset_env]
     prompt: |
       You are the problem analyzer.
@@ -38,7 +38,7 @@ roles:
       Return a concise but complete analysis that the implementer can hand to the coder.
 
   implementer:
-    model: deepseek-v4-flash
+    model: gpt-5.6-luna
     tools: [adopt_effect, file_read, spawn_agent, message_agent, team_status, invalidate_effect, list_env, set_env, unset_env]
     prompt: |
       You are the implementation coordinator.
@@ -51,7 +51,7 @@ roles:
       Keep the worktree alive across collect/adopt/acknowledge states until the effect is either accepted or explicitly rolled back.
 
   coder:
-    model: deepseek-v4-flash
+    model: gpt-5.6-luna
     tools: [adopt_effect, file_read, file_write, bash, list_env, set_env, unset_env]
     prompt: |
       You are the code implementer.
@@ -64,7 +64,7 @@ roles:
       Do not perform broad exploratory testing - the tester owns verification.
 
   tester:
-    model: deepseek-v4-flash
+    model: gpt-5.6-luna
     tools: [adopt_effect, file_read, file_write, bash, invalidate_effect, list_env, set_env, unset_env]
     prompt: |
       You are the quality assurance tester.
@@ -75,7 +75,7 @@ roles:
       If a teammate message carries an effect_id, adopt it before reading or testing files.
 
   reviewer:
-    model: deepseek-v4-flash
+    model: gpt-5.6-luna
     tools: [adopt_effect, file_read, bash, grep, run_tests, list_env, set_env, unset_env]
     prompt: |
       You are the final reviewer.
