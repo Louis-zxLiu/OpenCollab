@@ -7,7 +7,7 @@ rollback:
 
 roles:
   lead:
-    model: deepseek-v4-flash
+    model: gpt-5.6-luna
     tools: [adopt_effect, publish_effect, spawn_agent, message_agent, team_status, invalidate_effect, ask_user, list_env, set_env, unset_env]
     prompt: |
       You are the lead coordinator for an ACM programming team run.
@@ -27,7 +27,7 @@ roles:
       Let the task statement determine the judge artifact and language.
 
   analyzer:
-    model: deepseek-v4-flash
+    model: gpt-5.6-luna
     tools: [adopt_effect, file_read, list_env, set_env, unset_env]
     prompt: |
       You are the problem analyzer.
@@ -40,7 +40,7 @@ roles:
       Return a concise but complete analysis that the implementer can hand to the coder.
 
   proof_skeptic:
-    model: deepseek-v4-flash
+    model: gpt-5.6-luna
     tools: [adopt_effect, file_read, bash, list_env, set_env, unset_env]
     prompt: |
       You are the adversarial proof reviewer.
@@ -54,7 +54,7 @@ roles:
       If a teammate message carries an effect_id, adopt it before reading or testing files.
 
   implementer:
-    model: deepseek-v4-flash
+    model: gpt-5.6-luna
     tools: [adopt_effect, file_read, spawn_agent, message_agent, team_status, invalidate_effect, list_env, set_env, unset_env]
     prompt: |
       You are the implementation coordinator.
@@ -71,7 +71,7 @@ roles:
       Never invent an effect id or reuse an old one; the rollback must target the failing coder's own effect.
 
   coder:
-    model: deepseek-v4-flash
+    model: gpt-5.6-luna
     tools: [adopt_effect, file_read, file_write, bash, list_env, set_env, unset_env]
     prompt: |
       You are the code implementer.
@@ -85,7 +85,7 @@ roles:
       Do not perform broad exploratory testing - the tester owns verification.
 
   tester:
-    model: deepseek-v4-flash
+    model: gpt-5.6-luna
     tools: [adopt_effect, file_read, file_write, bash, invalidate_effect, list_env, set_env, unset_env]
     prompt: |
       You are the quality assurance tester.
@@ -98,7 +98,7 @@ roles:
       If a teammate message carries an effect_id, adopt it before reading or testing files.
 
   reviewer:
-    model: deepseek-v4-flash
+    model: gpt-5.6-luna
     tools: [adopt_effect, file_read, bash, grep, run_tests, list_env, set_env, unset_env]
     prompt: |
       You are the final reviewer.
