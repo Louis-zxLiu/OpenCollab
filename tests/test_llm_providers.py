@@ -133,6 +133,18 @@ def test_openai_usage_none_yields_nonzero_estimate():
     assert result.usage.input_tokens == estimate_messages_tokens(messages)
 
 
+def test_openai_string_response_falls_back_to_content_and_estimate():
+    messages = [{"role": "user", "content": "say hello"}]
+
+    result = parse_openai_response("plain text reply", messages)
+
+    assert result.content == "plain text reply"
+    assert result.tool_calls == []
+    assert result.finish_reason == "stop"
+    assert result.usage.input_tokens == estimate_messages_tokens(messages)
+    assert result.usage.output_tokens > 0
+
+
 def test_openai_usage_zero_counts_fall_back_to_estimate():
     """A present usage block reporting zeros still estimates (non-zero)."""
     usage = SimpleNamespace(prompt_tokens=0, completion_tokens=0)

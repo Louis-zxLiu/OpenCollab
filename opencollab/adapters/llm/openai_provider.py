@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+from types import SimpleNamespace
 from typing import Any
 
 from opencollab.adapters.llm.retry import RetryTimeBudget, with_retry
@@ -246,6 +247,15 @@ def _normalize_tool_arguments(arguments: str | None) -> str:
 def _parse_response(
     resp: Any, request_messages: list[dict], tools: list[dict] | None = None
 ) -> LLMResponse:
+    if isinstance(resp, str):
+        message = SimpleNamespace(content=resp, tool_calls=None)
+        usage = _parse_usage(resp, request_messages, message, tools)
+        return LLMResponse(
+            content=resp,
+            tool_calls=[],
+            usage=usage,
+            finish_reason="stop",
+        )
     choice = resp.choices[0]
     message = choice.message
 
