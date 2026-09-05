@@ -8,9 +8,9 @@ was rebuilt from upstream `main` at commit
 The previous Fork-specific baseline, workspace-effect adoption, publish path,
 and coordination protocol were not carried into this implementation.
 
-The implementation commit is recorded separately after the final verification
-run. No credentials, private network details, usernames, or infrastructure
-paths are included in this report.
+The final implementation commit is `66fc53e8f0f21388a61b009a737e05507b759fbf`.
+No credentials, private network details, usernames, or infrastructure paths
+are included in this report.
 
 ## 2. Architecture
 
@@ -85,17 +85,17 @@ environment through command-line arguments.
 ## 5. Verification Evidence
 
 All functional and static commands below were executed on the remote Linux
-runner against the final implementation commit. The final full suite result
-was:
+runner against the final implementation commit
+`66fc53e8f0f21388a61b009a737e05507b759fbf`. The final full suite result was:
 
 ```text
-2611 passed, 2 skipped in 62.23s
+2611 passed, 2 skipped in 62.60s
 ```
 
-The focused rollback suite result was:
+The focused rollback and container adapter suite result was:
 
 ```text
-7 passed in 0.31s
+19 passed in 1.67s
 ```
 
 Static verification results:
@@ -119,15 +119,15 @@ universal performance guarantees.
 
 | Scenario | Inputs | Operation | Median | P95 | Samples |
 | --- | --- | --- | ---: | ---: | ---: |
-| Small | graph 32, files 8, env 16 | graph plan | 0.205 | 0.257 | 20 |
-| Small | graph 32, files 8, env 16 | environment restore | 0.013 | 0.025 | 20 |
-| Small | graph 32, files 8, env 16 | filesystem restore | 17.269 | 22.081 | 20 |
-| Default | graph 128, files 32, env 64 | graph plan | 0.634 | 1.824 | 20 |
-| Default | graph 128, files 32, env 64 | environment restore | 0.018 | 0.022 | 20 |
-| Default | graph 128, files 32, env 64 | filesystem restore | 14.839 | 23.333 | 20 |
-| Large | graph 512, files 64, env 128 | graph plan | 9.694 | 15.456 | 20 |
-| Large | graph 512, files 64, env 128 | environment restore | 0.036 | 0.043 | 20 |
-| Large | graph 512, files 64, env 128 | filesystem restore | 24.317 | 30.008 | 20 |
+| Small | graph 32, files 8, env 16 | graph plan | 0.078 | 0.087 | 20 |
+| Small | graph 32, files 8, env 16 | environment restore | 0.005 | 0.007 | 20 |
+| Small | graph 32, files 8, env 16 | filesystem restore | 15.786 | 17.647 | 20 |
+| Default | graph 128, files 32, env 64 | graph plan | 0.806 | 1.171 | 20 |
+| Default | graph 128, files 32, env 64 | environment restore | 0.014 | 0.017 | 20 |
+| Default | graph 128, files 32, env 64 | filesystem restore | 18.543 | 25.930 | 20 |
+| Large | graph 512, files 64, env 128 | graph plan | 6.493 | 9.532 | 20 |
+| Large | graph 512, files 64, env 128 | environment restore | 0.025 | 0.028 | 20 |
+| Large | graph 512, files 64, env 128 | filesystem restore | 21.143 | 26.885 | 20 |
 
 The benchmark reports only counts, timings, and digests. It does not emit
 environment variable values.
@@ -148,13 +148,16 @@ environment variable values.
 ## 8. Publication and Identity
 
 The code and tests described in this report were verified at implementation
-commit `741e21a0982791c9bc2026d238704c88df7e7c85`.
+commit `66fc53e8f0f21388a61b009a737e05507b759fbf`.
 
 The Fork's protected `main` branch rejected the requested non-fast-forward
-update. No force bypass was attempted. The verified commit was published to
-the GitHub branch `feat/explicit-effect-rollback-v1`; the existing history was
-also preserved by the backup tag
+update. No force bypass was attempted. The earlier verified commit was
+published to the GitHub branch `feat/explicit-effect-rollback-v1`; the existing
+history was also preserved by the backup tag
 `backup/pre-thin-rollback-v1-20260905-234251`.
+
+The final container adapter commit is published to the same feature branch
+after this report update.
 
 The final local checkout, the published feature branch, and the remote Linux
 checkout were compared by commit ID and Git tree ID. The remote workspace used
