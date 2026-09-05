@@ -57,6 +57,7 @@ class LocalEnvironment(Environment):
         self.workspace = os.path.realpath(os.path.abspath(workspace))
         if not os.path.isdir(self.workspace):
             raise NotADirectoryError(self.workspace)
+        self.bind_workspace(self.workspace)
         self._workspace_fd: int | None = open_directory_anchor(self.workspace)
         self.host_workspace = self.workspace
         self.source_workspace = self.workspace
@@ -64,6 +65,25 @@ class LocalEnvironment(Environment):
         self._temporary_files: set[str] = set()
         self._file_io_semaphore = asyncio.Semaphore(_FILE_IO_CONCURRENCY)
         self._file_operations: set[asyncio.Task] = set()
+        self._checkpoint_adapter = None
+
+    async def checkpoint_scope(self, boundary, *, owner_aid: int, causal_frontier):
+        if self._checkpoint_adapter is None:
+            from opencollab.adapters.git_checkpoints import GitCheckpointAdapter
+
+            self._checkpoint_adapter = GitCheckpointAdapter(self)
+        return await self._checkpoint_adapter.checkpoint_scope(
+            boundary,
+            owner_aid=owner_aid,
+            causal_frontier=causal_frontier,
+        )
+
+    async def restore_scope(self, checkpoint):
+        if self._checkpoint_adapter is None:
+            from opencollab.adapters.git_checkpoints import GitCheckpointAdapter
+
+            self._checkpoint_adapter = GitCheckpointAdapter(self)
+        return await self._checkpoint_adapter.restore_scope(checkpoint)
 
     def _relative_path(self, path: str) -> str:
         if not isinstance(path, str) or not path or "\0" in path:
@@ -99,6 +119,7 @@ class LocalEnvironment(Environment):
                 timeout=timeout,
                 registry=self._processes,
                 output_limit=PROCESS_OUTPUT_CAPTURE_BYTES,
+                env=self.process_environment(),
             )
         except asyncio.TimeoutError as exc:
             return timed_out_result(exc, -1, timeout)

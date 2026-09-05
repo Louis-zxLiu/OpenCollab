@@ -4,6 +4,12 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Protocol, runtime_checkable
 
 from opencollab.domain.hooks import HookOutcome
+from opencollab.domain.rollback import (
+    CheckpointBoundary,
+    EnvironmentSnapshot,
+    RestoreResult,
+    ScopeCheckpoint,
+)
 from opencollab.domain.skill import SkillManifest
 
 if TYPE_CHECKING:
@@ -92,6 +98,31 @@ class WorkingTreeProbe(Protocol):
 
     async def diff(self) -> str:
         """Complete current-tree evidence, or raise when it cannot be proven."""
+        ...
+
+
+@runtime_checkable
+class CheckpointableEnvironmentPort(Protocol):
+    """Application-facing Scope checkpoint and restore contract."""
+
+    workspace: str
+
+    def snapshot_environment(self) -> EnvironmentSnapshot:
+        ...
+
+    def replace_environment(self, snapshot: EnvironmentSnapshot) -> None:
+        ...
+
+    async def checkpoint_scope(
+        self,
+        boundary: CheckpointBoundary,
+        *,
+        owner_aid: int,
+        causal_frontier: frozenset[str],
+    ) -> ScopeCheckpoint:
+        ...
+
+    async def restore_scope(self, checkpoint: ScopeCheckpoint) -> RestoreResult:
         ...
 
 

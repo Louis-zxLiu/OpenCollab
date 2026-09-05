@@ -184,6 +184,7 @@ class DockerEnvironment(Environment):
             raise ValueError("timeout_returncode must be a non-zero integer")
         self._image = _validate_image(image)
         self.workspace = workspace
+        self.bind_workspace(workspace)
         self._attached = container_id is not None
         self._attached_reference = (
             _validate_container_reference(container_id) if container_id is not None else None

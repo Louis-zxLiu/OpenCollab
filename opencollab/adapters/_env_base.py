@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import os
+from collections.abc import Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
+
+from opencollab.domain.rollback import EnvironmentSnapshot
 
 ENV_FILE_WRITE_LIMIT_BYTES = 4 * 1024 * 1024
 
@@ -38,6 +43,37 @@ class Environment:
 
     def __init__(self) -> None:
         self._aborted = False
+        self._scope_values = os.environ.copy()
+
+    def bind_workspace(self, workspace: str) -> None:
+        """Bind the Scope PWD to the workspace used by the environment."""
+        self._scope_values["PWD"] = os.fspath(workspace)
+
+    def snapshot_environment(self) -> EnvironmentSnapshot:
+        return EnvironmentSnapshot.from_mapping(self._scope_values)
+
+    def replace_environment(self, snapshot: EnvironmentSnapshot) -> None:
+        """Replace Scope state without modifying the host process environment."""
+        self._scope_values = snapshot.as_dict()
+
+    def set_environment_variable(self, name: str, value: str) -> None:
+        if not isinstance(name, str) or not name or "\0" in name:
+            raise ValueError("environment variable name is invalid")
+        if not isinstance(value, str) or "\0" in value:
+            raise ValueError("environment variable value is invalid")
+        self._scope_values[name] = value
+
+    def unset_environment_variable(self, name: str) -> None:
+        if not isinstance(name, str) or not name or "\0" in name:
+            raise ValueError("environment variable name is invalid")
+        self._scope_values.pop(name, None)
+
+    def environment_view(self) -> Mapping[str, str]:
+        return MappingProxyType(dict(self._scope_values))
+
+    def process_environment(self) -> dict[str, str]:
+        """Return the environment inherited by newly started commands."""
+        return dict(self._scope_values)
 
     @property
     def revoked(self) -> bool:

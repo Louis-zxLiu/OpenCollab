@@ -161,8 +161,46 @@ class WorktreeEnvironment(Environment):
             raise
         self.workspace = exposed_workspace
         self.host_workspace = exposed_workspace
+        self.bind_workspace(exposed_workspace)
         self._local_env = LocalEnvironment(exposed_workspace)
+        self._local_env.replace_environment(self.snapshot_environment())
         return exposed_workspace
+
+    def snapshot_environment(self):
+        if self._local_env is not None:
+            return self._local_env.snapshot_environment()
+        return super().snapshot_environment()
+
+    def replace_environment(self, snapshot) -> None:
+        super().replace_environment(snapshot)
+        if self._local_env is not None:
+            self._local_env.replace_environment(snapshot)
+
+    def set_environment_variable(self, name: str, value: str) -> None:
+        super().set_environment_variable(name, value)
+        if self._local_env is not None:
+            self._local_env.set_environment_variable(name, value)
+
+    def unset_environment_variable(self, name: str) -> None:
+        super().unset_environment_variable(name)
+        if self._local_env is not None:
+            self._local_env.unset_environment_variable(name)
+
+    async def checkpoint_scope(self, boundary, *, owner_aid: int, causal_frontier):
+        if self._local_env is None:
+            await self.setup()
+        assert self._local_env is not None
+        return await self._local_env.checkpoint_scope(
+            boundary,
+            owner_aid=owner_aid,
+            causal_frontier=causal_frontier,
+        )
+
+    async def restore_scope(self, checkpoint):
+        if self._local_env is None:
+            await self.setup()
+        assert self._local_env is not None
+        return await self._local_env.restore_scope(checkpoint)
 
     async def _setup_git_worktree(self) -> None:
         status = await self._git(

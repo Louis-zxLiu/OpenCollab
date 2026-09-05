@@ -24,6 +24,7 @@ from typing import Any, Callable
 from opencollab.application._scheduler_cleanup import SchedulerCleanupMixin
 from opencollab.application._scheduler_persistence import SchedulerPersistenceMixin
 from opencollab.application._scheduler_review import SchedulerReviewMixin
+from opencollab.application._scheduler_rollback import SchedulerRollbackMixin
 from opencollab.application._scheduler_run import SchedulerRunMixin
 from opencollab.application._scheduler_team import SchedulerTeamMixin
 from opencollab.application.autosave import AutoSaveSubscriber
@@ -57,6 +58,7 @@ class Scheduler(
     SchedulerRunMixin,
     SchedulerCleanupMixin,
     SchedulerReviewMixin,
+    SchedulerRollbackMixin,
     LifecycleMixin,
     MessagingMixin,
     InflightDedupMixin,
@@ -223,6 +225,7 @@ class Scheduler(
         self._review_parent_lease_tracker: contextvars.ContextVar[
             tuple[int, dict[str, int]] | None
         ] = contextvars.ContextVar("review_parent_lease_tracker", default=None)
+        self._init_rollback()
 
     def register_lifecycle_resource(
         self,
