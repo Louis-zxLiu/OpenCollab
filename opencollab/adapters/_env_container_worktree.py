@@ -88,6 +88,7 @@ class ContainerWorktreeEnvironment(DockerEnvironment):
         self._head_commit: str | None = None
         self._own_commits: tuple[str, ...] = ()
         self._own_commit_count: int | None = None
+        self._checkpoint_adapter = None
 
     @property
     def diff_base(self) -> str | None:
@@ -138,7 +139,26 @@ class ContainerWorktreeEnvironment(DockerEnvironment):
         await super().setup(mount_dir)
         self._ensure_active()
         await self._create_worktree()
+        self.bind_workspace(self._worktree_dir)
         return self._worktree_dir
+
+    async def checkpoint_scope(self, boundary, *, owner_aid: int, causal_frontier):
+        if self._checkpoint_adapter is None:
+            from opencollab.adapters.container_checkpoints import ContainerGitCheckpointAdapter
+
+            self._checkpoint_adapter = ContainerGitCheckpointAdapter(self)
+        return await self._checkpoint_adapter.checkpoint_scope(
+            boundary,
+            owner_aid=owner_aid,
+            causal_frontier=causal_frontier,
+        )
+
+    async def restore_scope(self, checkpoint):
+        if self._checkpoint_adapter is None:
+            from opencollab.adapters.container_checkpoints import ContainerGitCheckpointAdapter
+
+            self._checkpoint_adapter = ContainerGitCheckpointAdapter(self)
+        return await self._checkpoint_adapter.restore_scope(checkpoint)
 
     async def _create_worktree(self) -> None:
         made = await self._docker(
