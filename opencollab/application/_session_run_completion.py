@@ -165,11 +165,24 @@ class _SessionRunCompletionMixin:
             self.state.append_message({"role": "assistant", "content": submitted})
         await self.finish_step(latency)
         self.clear_pending_step()
+
+        # A control-plane tool such as ``invalidate_effect`` may advance the
+        # Agent epoch. Its result must already be part of the persisted
+        # assistant/tool pair before the scheduler restores the Scope. The
+        # callback may move the state back to IDLE; in that case the run loop
+        # will re-enter through the normal PRECHECK path.
+        if self._post_tool_commit_callback is not None:
+            await self._post_tool_commit_callback()
+            if self._epoch_provider is not None:
+                self._epoch_at_turn = self._epoch_provider()
+
         if submitted is not None:
             self._submitted_summary = None
-            self.state.transition_to(SessionPhase.DONE, reason="submitted")
+            if self.state.phase is SessionPhase.AUTOSAVING:
+                self.state.transition_to(SessionPhase.DONE, reason="submitted")
             return
-        self.state.transition_to(SessionPhase.PRECHECK)
+        if self.state.phase is SessionPhase.AUTOSAVING:
+            self.state.transition_to(SessionPhase.PRECHECK)
 
     def clear_pending_step(self) -> None:
         self._pending = None

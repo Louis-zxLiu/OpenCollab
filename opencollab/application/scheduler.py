@@ -225,6 +225,10 @@ class Scheduler(
         # restore and epoch increment have completed.
         self._rollback_pending: set[int] = set()
         self._rollback_barriers: dict[int, asyncio.Event] = {}
+        # A reporter may invalidate an effect while its own control tool is
+        # still executing. Hold that self-rollback until the control result has
+        # been committed by the Session runner.
+        self._deferred_tool_rollbacks: dict[int, set[str]] = {}
         self._scheduler_persistence_errors: list[Exception] = []
         # Bootstrap-owned resources whose process/persistence state must be
         # proven quiescent before scheduler cleanup may release worktrees.

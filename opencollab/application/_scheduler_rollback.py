@@ -420,8 +420,33 @@ class SchedulerRollbackMixin:
             self._rollback_pending.add(aid)
             self._rollback_barriers.setdefault(aid, asyncio.Event()).clear()
         for aid in affected_agents:
+            # Affected agents may already be executing a tool batch when the
+            # invalidation arrives. Let that batch append its complete tool
+            # result block before restoring its epoch; otherwise the provider
+            # would see an assistant tool call without a matching tool output.
+            if self._agent_is_executing_tools(aid):
+                self._deferred_tool_rollbacks.setdefault(aid, set()).update(affected)
+                continue
             await self._rollback_agent(aid, affected)
         return affected
+
+    def _agent_is_executing_tools(self, aid: int) -> bool:
+        session = self._sessions.get(aid)
+        state = getattr(session, "state", None) if session is not None else None
+        return getattr(state, "phase", None) is SessionPhase.EXECUTING_TOOLS
+
+    async def _flush_deferred_tool_rollback(self, aid: int) -> None:
+        invalidated = self._deferred_tool_rollbacks.pop(aid, None)
+        if not invalidated:
+            return
+        await self._rollback_agent(aid, invalidated)
+        # The rollback changes epoch/frontier after the normal step-end save
+        # was queued. Persist the restored control-plane state as well.
+        autosave = getattr(self, "_autosave_session", None)
+        if callable(autosave):
+            owner = autosave(aid)
+            if owner is not None:
+                await owner
 
     async def _rollback_agent(self, aid: int, quarantined_effects: set[str]) -> None:
         if self._lineage is None or not self._rollback_enabled or self._sessions.get(aid) is None:

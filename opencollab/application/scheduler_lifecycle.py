@@ -329,6 +329,13 @@ class LifecycleMixin:
                 )
 
             checkpoint_setter(checkpoint)
+        post_commit_setter = getattr(runner, "set_post_tool_commit_callback", None)
+        if callable(post_commit_setter) and self._lineage is not None and self._rollback_enabled:
+
+            async def post_tool_commit(aid: int = aid) -> None:
+                await self._flush_deferred_tool_rollback(aid)
+
+            post_commit_setter(post_tool_commit)
         barrier = self._rollback_barriers.setdefault(aid, asyncio.Event())
         if aid not in self._rollback_pending:
             barrier.set()

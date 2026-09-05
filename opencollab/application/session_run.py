@@ -202,6 +202,10 @@ class SessionRunUseCase(_SessionRunCompletionMixin):
         self._epoch_provider = epoch_provider
         self._epoch_at_turn: int | None = None
         self._checkpoint_callback: Callable[[str], Awaitable[None]] | None = None
+        # Causal invalidation is committed as a control-tool result first. The
+        # scheduler uses this hook to finish a deferred self-rollback after the
+        # step has been autosaved, so the provider never sees an orphaned call.
+        self._post_tool_commit_callback: Callable[[], Awaitable[None]] | None = None
 
     def set_epoch_provider(self, provider: Callable[[], int] | None) -> None:
         """Bind the scheduler's per-Agent epoch fence after construction."""
@@ -212,6 +216,12 @@ class SessionRunUseCase(_SessionRunCompletionMixin):
     ) -> None:
         """Bind an optional scheduler checkpoint hook for ordinary tool batches."""
         self._checkpoint_callback = callback
+
+    def set_post_tool_commit_callback(
+        self, callback: Callable[[], Awaitable[None]] | None
+    ) -> None:
+        """Bind a callback run after tool results have been autosaved."""
+        self._post_tool_commit_callback = callback
 
     def _assert_epoch(self) -> None:
         if self._epoch_provider is None or self._epoch_at_turn is None:
