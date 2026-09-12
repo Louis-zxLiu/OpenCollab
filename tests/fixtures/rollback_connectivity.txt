@@ -1,0 +1,19 @@
+Implement incremental undirected graph connectivity in C++17 using disjoint-set union.
+Input starts with t. Each case contains n q followed by q operations k u v.
+Vertices are 1-based. Operation 1 u v adds an undirected edge; 2 u v asks if u and v are connected.
+Initially there are n isolated vertices. Self edges, repeated edges, and q=0 are allowed.
+Output YES or NO on a separate line for each query. Sum of n + q across cases is at most 200000.
+Use path compression and union by size/rank, O((n+q) alpha(n)) time and O(n) storage.
+Produce solution.cpp, a correctness argument, complexity, and executable boundary/random tests.
+Sample input:
+1
+4 5
+2 1 2
+1 1 2
+1 2 3
+2 1 3
+2 1 4
+Sample output:
+NO
+YES
+NO

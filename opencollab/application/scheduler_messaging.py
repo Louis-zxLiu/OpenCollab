@@ -1,30 +1,6 @@
-"""Inter-agent (teammate) messaging for the Scheduler.
+"""Validated, auditable teammate messages through scheduler-owned inboxes.
 
-A teammate message is queued for async delivery and surfaces to the recipient
-as a normal user turn wrapped in an XML envelope. If the recipient is idle it is
-scheduled in the background; if it is running or awaiting delegated work the
-message stays in an out-of-history inbox until the session can safely accept
-another user turn.
-
-Every decision ``send_message`` takes is recorded: ``message_refused`` for each
-rule that stops a message, ``message_sent`` for one that is queued. Together
-they are the only place a run says how much traffic each declared topology edge
-actually carried, and how much was attempted and stopped.
-
-A message is checked twice, and both gates write the same row. The rules run
-once at send time against the roster the sender sees, and again when the inbox
-drains against whatever roster is live then — a route legal when it was queued
-can be forbidden by the topology a reload rebuilt. The second gate wrote only a
-scheduler event, which lands in ``events.jsonl`` and therefore only in a run
-that opted into one, so by default the message was dropped and the trajectory
-recorded nothing. Both now write ``message_refused``; ``restored`` says which
-gate, so the rows add up on the edge while still separating "the model reached
-for an edge it does not have" from "the reload could no longer route this".
-
-``MessagingMixin`` is composed into ``Scheduler`` and relies on the
-``_sessions`` / ``_tasks`` / ``_locks`` / ``_message_inbox`` maps and the
-``_role_of`` / ``_autosave_session`` / ``emit_scheduler_event`` / ``_drive_agent``
-helpers defined on ``Scheduler``.
+Queued messages become XML-wrapped user turns and retain epoch guards.
 """
 
 from __future__ import annotations
@@ -34,6 +10,7 @@ import logging
 import re
 import uuid
 import xml.etree.ElementTree as ET
+from contextlib import contextmanager
 from typing import Any
 from xml.sax.saxutils import escape, quoteattr
 
@@ -126,6 +103,11 @@ class MessagingMixin:
             return refuse(
                 "scheduler_shutting_down", "Error: scheduler is shutting down."
             )
+        try:
+            self._assert_agent_active(from_aid)
+            self._assert_agent_active(to_aid)
+        except RuntimeError as exc:
+            return refuse("stale_or_fenced", f"Error: message refused: {exc}")
         if self._sessions.get(from_aid) is None or self.table.get(from_aid) is None:
             return refuse(
                 "unknown_sender", f"Error: no sending agent with aid {from_aid}."
@@ -141,12 +123,19 @@ class MessagingMixin:
             )
 
         lock = self._locks.setdefault(to_aid, asyncio.Lock())
+        from_epoch = self.current_effect_epoch(from_aid)
+        to_epoch = self.current_effect_epoch(to_aid)
         delivered_events = []
         async with lock:
             if self._shutting_down:
                 return refuse(
                     "scheduler_shutting_down", "Error: scheduler is shutting down."
                 )
+            try:
+                self._assert_agent_active(from_aid, epoch=from_epoch)
+                self._assert_agent_active(to_aid, epoch=to_epoch)
+            except RuntimeError as exc:
+                return refuse("stale_or_fenced", f"Error: message refused: {exc}")
             message_id = uuid.uuid4().hex
             from_role = self._role_of(from_aid)
             to_role = self._role_of(to_aid)
@@ -187,34 +176,46 @@ class MessagingMixin:
                     f"{MAX_TEAMMATE_INBOX_BYTES}-byte limit (backpressure).",
                     **observed,
                 )
-            target.state.queue_pending_user_message(
-                {
-                    "role": "user",
-                    "content": xml,
-                    "message_content": content,
-                    "from_aid": from_aid,
-                    "to_aid": to_aid,
-                    "from_role": from_role,
-                    "to_role": to_role,
-                    "summary": summary,
-                    "message_id": message_id,
-                    "delivery_status": "pending",
-                }
-            )
-            sent_at = str(target.state.pending_user_messages[-1]["timestamp"])
-            message = QueuedTeammateMessage(
-                from_aid=from_aid,
-                to_aid=to_aid,
-                summary=summary,
-                content=content,
-                xml=xml,
-                sent_at=sent_at,
-                message_id=message_id,
-                from_role=from_role,
-                to_role=to_role,
-            )
-            inbox.append(message)
-            self._message_inbox[to_aid] = inbox
+            with self._message_enqueue_transaction(to_aid, target.state):
+                if self._has_effect_scopes(from_aid, to_aid):
+                    self._record_lifecycle_effect(
+                        producer_aid=from_aid,
+                        kind="message",
+                        content=content,
+                        consumer_aid=to_aid,
+                    )
+                target.state.queue_pending_user_message(
+                    {
+                        "role": "user",
+                        "content": xml,
+                        "message_content": content,
+                        "from_aid": from_aid,
+                        "to_aid": to_aid,
+                        "from_role": from_role,
+                        "to_role": to_role,
+                        "summary": summary,
+                        "message_id": message_id,
+                        "delivery_status": "pending",
+                        "from_epoch": self.current_effect_epoch(from_aid),
+                        "to_epoch": self.current_effect_epoch(to_aid),
+                    }
+                )
+                sent_at = str(target.state.pending_user_messages[-1]["timestamp"])
+                message = QueuedTeammateMessage(
+                    from_aid=from_aid,
+                    to_aid=to_aid,
+                    summary=summary,
+                    content=content,
+                    xml=xml,
+                    sent_at=sent_at,
+                    message_id=message_id,
+                    from_role=from_role,
+                    to_role=to_role,
+                    from_epoch=self.current_effect_epoch(from_aid),
+                    to_epoch=self.current_effect_epoch(to_aid),
+                )
+                inbox.append(message)
+                self._message_inbox[to_aid] = inbox
             self._trace_message_decision(
                 "message_sent",
                 from_aid=from_aid,
@@ -236,6 +237,23 @@ class MessagingMixin:
         for event in delivered_events:
             await self._safe_emit_scheduler_event(event)
         return f"Message queued to aid {to_aid}."
+
+    @contextmanager
+    def _message_enqueue_transaction(self, aid: int, state: Any):
+        """Roll back only the synchronous enqueue, not a committed delivery retry."""
+        pending = list(state.pending_user_messages)
+        inbox = list(self._message_inbox.get(aid, ()))
+        had_inbox = aid in self._message_inbox
+        with self._rollback_service.effect_transaction(), self._history.transaction():
+            try:
+                yield
+            except BaseException:
+                state.pending_user_messages[:] = pending
+                if had_inbox:
+                    self._message_inbox[aid] = inbox
+                else:
+                    self._message_inbox.pop(aid, None)
+                raise
 
     def _traced_role(self, aid: int) -> str | None:
         """The agent's role for a trace record, or ``None`` when no agent exists.
@@ -316,7 +334,10 @@ class MessagingMixin:
             return
         try:
             inbox = self._message_inbox.get(to_aid, [])
-            refs = _commit_refs(summary, content)
+            rollback_refusal = reason in {
+                "stale_or_fenced", "rollback_epoch_invalidated", "sender_epoch_stale", "target_epoch_stale",
+            }
+            refs = [] if rollback_refusal else _commit_refs(summary, content)
             payload: dict[str, Any] = {"reason": reason} if reason is not None else {}
             payload.update(
                 {
@@ -324,7 +345,7 @@ class MessagingMixin:
                     "from_role": self._traced_role(from_aid),
                     "to_aid": to_aid,
                     "to_role": self._traced_role(to_aid),
-                    "summary": str(summary)[:MESSAGE_TRACE_SUMMARY_CHARS],
+                    "summary": "" if rollback_refusal else str(summary)[:MESSAGE_TRACE_SUMMARY_CHARS],
                     "summary_chars": len(summary or ""),
                     "content_chars": len(content or ""),
                     "content_bytes": self._encoded_size(content or ""),
@@ -375,11 +396,12 @@ class MessagingMixin:
         checkpoint = session.state.checkpoint_user_turn()
         try:
             await session.add_user_message(message)
+            self._assert_agent_active(aid)
         except BaseException:
             session.state.restore_user_turn(checkpoint)
             self._autosave_session(aid)
             self._release_turn_lease(aid)
-            if not self._shutting_down:
+            if not self._shutting_down and aid not in self._rollback_fenced:
                 self._restore_turn_lease(aid, prior_lease)
             raise
         finally:
@@ -420,6 +442,8 @@ class MessagingMixin:
                     from_role=str(item.get("from_role") or ""),
                     to_role=str(item.get("to_role") or ""),
                     restored=True,
+                    from_epoch=self._restored_epoch(item.get("from_epoch")),
+                    to_epoch=self._restored_epoch(item.get("to_epoch")),
                 )
             )
         if restored:
@@ -431,6 +455,14 @@ class MessagingMixin:
             return int(value)
         except (TypeError, ValueError, OverflowError):
             return default
+
+    @staticmethod
+    def _restored_epoch(value: object) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError, OverflowError):
+            return 0
+        return parsed if parsed >= 0 else 0
 
     @staticmethod
     def _message_content_from_xml(xml: str) -> str:
@@ -562,6 +594,8 @@ class MessagingMixin:
         scb = self.table.get(aid)
         if session is None or scb is None:
             return []
+        if aid in self._rollback_fenced:
+            return []
         events = []
         retained = []
         rejected = False
@@ -639,6 +673,7 @@ class MessagingMixin:
             self._release_turn_lease(aid)
             return events
 
+        await self._autosave_history(aid, "message_accepted")
         self._start_agent_task(aid, session)
         return events + [
             (
@@ -670,6 +705,18 @@ class MessagingMixin:
             return (
                 "restored_target_changed",
                 f"restored target aid changed from {message.to_aid} to {aid}",
+            )
+        if message.from_aid in self._rollback_fenced or aid in self._rollback_fenced:
+            return ("rollback_epoch_invalidated", "message participant is fenced")
+        if message.from_epoch != self.current_effect_epoch(message.from_aid):
+            return (
+                "sender_epoch_stale",
+                "message sender epoch is stale",
+            )
+        if message.to_epoch != self.current_effect_epoch(aid):
+            return (
+                "target_epoch_stale",
+                "message target epoch is stale",
             )
         if message.from_aid == aid:
             return (

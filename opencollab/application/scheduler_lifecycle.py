@@ -1,15 +1,4 @@
-"""Agent lifecycle for the Scheduler: register, spawn, drive, wake, deliver.
-
-This is the heart of the passive scheduler — the non-blocking spawn, the
-per-agent run/finalize loop, and the wake path that routes a finished child's
-result back into the pending row that suspended its parent.
-
-``LifecycleMixin`` is composed into ``Scheduler`` and relies on the maps and
-helpers created in ``Scheduler.__init__`` (``table``, ``_sessions``,
-``_tasks``, ``_locks``, ``_spawn_origin``, ``_session_factory``,
-``_worktree_pool``, ``_tracer``, and the dedup / messaging / event / topology
-helpers).
-"""
+"""Scheduler agent registration, spawning, driver finalization and pending-row delivery."""
 
 from __future__ import annotations
 
@@ -32,12 +21,7 @@ class LifecycleMixin:
     """Spawn, drive, finalize, and wake agents in the delegation tree."""
 
     def register_lead(self, session: Any) -> int:
-        """Register an already-built session as agent 0 (aid=0).
-
-        Low-level primitive: assigns aid, schedules a fresh IDLE session, adds
-        the SCB, and stores the lead handle. A restored durable phase is kept so
-        AWAITING_EVENTS rows can drain before the next user turn.
-        """
+        """Register agent zero, preserving a restored phase for pending-row settlement."""
         session.agent.name = validate_role_identity(session.agent.name)
         aid = self.table.allocate_aid()  # = 0
         session.state.aid = aid
@@ -50,6 +34,9 @@ class LifecycleMixin:
         self.table.add(scb)
         self._sessions[aid] = session
         self._lead_session = session
+        environment = getattr(session, "env", None)
+        if environment is not None:
+            self.register_effect_environment(aid, environment)
         self._restore_message_inbox(aid, session.state)
         # Book agent 0's own share of the pool so the first child is granted
         # from what is left after it.
@@ -58,18 +45,7 @@ class LifecycleMixin:
         return aid
 
     def create_init_process(self, launch: LaunchSpec) -> int:
-        """Create and register agent 0 — the init process (aid=0).
-
-        The factory owns construction (env, tools, prompt, store); the
-        scheduler owns the launch lifecycle: build via the factory, apply the
-        launch spec (resume or seed), then register. The root-process mirror of
-        ``spawn``.
-
-        The budget handed to the factory is what agent 0 may actually spend, not
-        the team total — under a declared roster its ``per_agent_cap``. The
-        session turns that number into the ``[Budget: ...]`` line the model reads
-        every turn, so the two must be the same number.
-        """
+        """Create and register agent 0 — the init process (aid=0)."""
         session = self._session_factory.create_lead_session(
             scheduler=self,
             launch=launch,
@@ -86,24 +62,10 @@ class LifecycleMixin:
         context: str = "",
         tool_call_id: str | None = None,
     ) -> int:
-        """Non-blocking spawn. Creates SCB, builds session, starts task. Returns aid.
-
-        When ``tool_call_id`` is given (a deferred ``spawn_agent`` tool call),
-        the (parent, tool_call_id) origin is recorded so the child's completion
-        fills the parent's pending row and re-activates it. Without it the spawn
-        is fire-and-forget (the result lives only in the child's SCB).
-
-        Raises ``PermissionError`` if the team topology forbids ``parent_aid``'s
-        role from spawning ``role``; the tool executor turns that into a tool
-        result so the parent's run loop continues uninterrupted.
-
-        Raises ``TeamPrebuiltError`` when the scheduler runs a prebuilt team: the
-        roster is then an input to the run, not an outcome of it, so no agent may
-        be added to it. The attempt itself is recorded before the refusal is
-        raised — see ``_refuse_spawn_when_prebuilt``.
-        """
+        """Non-blocking spawn. Creates SCB, builds session, starts task. Returns aid."""
         if self._shutting_down:
             raise RuntimeError("Cannot spawn agent: scheduler is shutting down.")
+        self._assert_agent_active(parent_aid)
         if self.table.get(parent_aid) is None or parent_aid not in self._sessions:
             raise ValueError(f"Cannot spawn agent: no parent with aid {parent_aid}.")
         role = validate_role_identity(role)
@@ -162,7 +124,18 @@ class LifecycleMixin:
                 )
 
             # Build environment
+            parent_session = self._sessions.get(parent_aid)
+            parent_environment = getattr(parent_session, "env", None)
+            parent_snapshot = (
+                parent_environment.snapshot_environment()
+                if parent_environment is not None
+                else None
+            )
             env = await self._worktree_pool.acquire(role)
+            self._assert_agent_active(parent_aid)
+            if parent_snapshot is not None:
+                env.replace_environment(parent_snapshot)
+                env.bind_workspace(env.workspace)
             self._startup_envs[aid] = env
             if self._shutting_down:
                 raise RuntimeError("Cannot spawn agent: scheduler is shutting down.")
@@ -180,6 +153,7 @@ class LifecycleMixin:
                 context=context,
             )
             session.agent.name = role
+            self.register_effect_environment(aid, env)
 
             # Create SCB
             scb = SessionControlBlock(
@@ -190,6 +164,11 @@ class LifecycleMixin:
             )
             self.table.add(scb)
             self._sessions[aid] = session
+            # A live checkpointed Team must snapshot dynamic children before
+            # their first driver can mutate the newly inherited Scope.
+            if parent_aid in self._rollback_checkpointed_scopes:
+                await self.create_checkpoint(aid, "initial")
+                self._assert_agent_active(parent_aid)
             if tool_call_id is not None:
                 self._spawn_origin[aid] = (parent_aid, tool_call_id)
                 self._startup_origin.pop(aid, None)
@@ -200,10 +179,15 @@ class LifecycleMixin:
             )
             if self._shutting_down:
                 raise RuntimeError("Cannot spawn agent: scheduler is shutting down.")
+            self._assert_agent_active(parent_aid)
 
             # Start async task. Once this succeeds, _drive_agent owns the
             # reservation release — must be the last statement that can hand off
             # ownership, so the except below never double-releases on success.
+            if self._history_scope(parent_aid) and self._history_scope(aid):
+                self._record_lifecycle_effect(
+                    producer_aid=parent_aid, kind="spawn", content="", consumer_aid=aid,
+                )
             self._start_agent_task(aid, session)
             self._startup_tasks.pop(aid, None)
             self._startup_envs.pop(aid, None)
@@ -247,6 +231,7 @@ class LifecycleMixin:
         self._locks.pop(aid, None)
         self._run_locks.pop(aid, None)
         self._message_inbox.pop(aid, None)
+        self._rollback_checkpointed_scopes.discard(aid)
 
         if env is None:
             return
@@ -277,18 +262,18 @@ class LifecycleMixin:
             )
 
     def _release_leases(self, aid: int) -> None:
-        """Release a terminal child's single-flight and budget leases.
-
-        Both are held from spawn until the child reaches a terminal phase; this
-        frees them together so a later spawn can reuse the (role, task) key and
-        the unspent budget headroom. Idempotent at each site.
-        """
+        """Release a terminal child's single-flight and budget leases."""
         self._clear_inflight(aid)
         self._release_turn_lease(aid)
 
     def _start_agent_task(self, aid: int, session: Any) -> asyncio.Task[None]:
         """Start and track one driver, reaping its references when it settles."""
-        task = asyncio.create_task(self._drive_agent(aid, session))
+        self._assert_agent_active(aid)
+        token = self._rollback_turn_epoch.set((aid, self.current_effect_epoch(aid)))
+        try:
+            task = asyncio.create_task(self._drive_agent(aid, session))
+        finally:
+            self._rollback_turn_epoch.reset(token)
         self._tasks[aid] = task
         task.add_done_callback(
             lambda finished, owned_aid=aid: self._agent_task_done(
@@ -302,9 +287,7 @@ class LifecycleMixin:
         """Consume a finished driver and release only its own registry entry."""
         if self._tasks.get(aid) is task:
             self._tasks.pop(aid, None)
-        # During cleanup the committed-delivery marker must survive until
-        # _finalize_cleanup_failure has observed it. Normal completion has no
-        # later writer that can overwrite the already-filled parent row.
+        # Cleanup retains committed-delivery markers until its finalizer observes them.
         if not self._shutting_down:
             self._delivery_committed.discard(aid)
         scb = self.table.get(aid)
@@ -320,21 +303,7 @@ class LifecycleMixin:
             logger.error("background task for aid %s failed: %s", aid, exc)
 
     def _turn_gate(self) -> Any:
-        """The team-wide turn gate every driver runs its loop inside.
-
-        Under ``serialize_turns`` this is one lock shared by every agent, so
-        exactly one turn is in flight at a time. Off, it is a no-op and
-        independent aids proceed concurrently, which is what ``_run_locks``
-        (one per aid) has always allowed.
-
-        Holding it across ``run_loop`` cannot deadlock, and not because of any
-        one team's configuration: ``run_loop`` *returns* when a session suspends
-        on ``AWAITING_EVENTS`` instead of blocking on its children, so the gate
-        is released at every suspension point and no driver ever holds it while
-        waiting for another agent to finish.
-
-        Created on first use: ``__init__`` may run without a running loop.
-        """
+        """Optionally serialize drivers; deferred suspension releases the gate."""
         if not self._serialize_turns:
             return contextlib.nullcontext()
         if self._turn_gate_lock is None:
@@ -342,30 +311,34 @@ class LifecycleMixin:
         return self._turn_gate_lock
 
     async def _drive_agent(self, aid: int, session: Any) -> None:
-        """Run a session's loop once and finalize.
-
-        The loop returns either suspended on ``AWAITING_EVENTS`` (the session
-        spawned its own children — leave it; a child wake re-enters here later)
-        or terminal. A DONE terminal emits ``agent_completed``; STOPPED/ERROR
-        terminals emit ``agent_failed``. If the session was itself a deferred
-        child, its outcome fills the parent's pending row and re-activates the
-        parent. Used for both the initial run and every event-driven resume, at
-        any depth of the delegation tree.
-        """
+        """Drive once, retaining suspended turns or delivering a terminal child result."""
         scb = self.table.get(aid)
         if scb is None:
             return
 
         start = self._turn_started_at.setdefault(aid, time.monotonic())
+        drive_epoch = self.current_effect_epoch(aid)
 
         try:
             cancel_event = self._turn_cancel_events.get(aid)
-            async with self._turn_gate():
-                result = (
-                    await session.run_loop(cancel_event)
-                    if cancel_event is not None
-                    else await session.run_loop()
-                )
+            epoch_token = self._rollback_turn_epoch.set(
+                (aid, self.current_effect_epoch(aid))
+            )
+            try:
+                async with self._turn_gate():
+                    self._begin_history_turn(aid)
+                    if self._history_scope(aid) and aid not in self._rollback_checkpointed_scopes:
+                        await self.create_checkpoint(aid, "initial")
+                    runner = getattr(session, "runner", None)
+                    if runner is not None:
+                        runner.tool_effect_transaction = lambda messages: self._tool_history_transaction(aid, messages)
+                    result = (
+                        await session.run_loop(cancel_event)
+                        if cancel_event is not None
+                        else await session.run_loop()
+                    )
+            finally:
+                self._rollback_turn_epoch.reset(epoch_token)
         except asyncio.CancelledError:
             self._release_leases(aid)
             scb.state.cancel()
@@ -410,6 +383,12 @@ class LifecycleMixin:
         # overwrite that state or publish a successful completion.
         if self._shutting_down:
             self._finalize_cleanup_failure(aid)
+            return
+
+        try:
+            self._assert_agent_active(aid, epoch=drive_epoch)
+        except RuntimeError:
+            logger.info("discarding stale or fenced driver result for aid %s", aid)
             return
 
         scb.result = result
@@ -501,29 +480,26 @@ class LifecycleMixin:
             self._finalize_cleanup_failure(aid)
             return
 
-        await self._deliver_to_parent(aid, result, RowStatus.DONE)
+        if not await self._complete_history_turn(aid, result):
+            scb.state.fail("effect_registration_failed")
+            return
+        try:
+            await self._deliver_to_parent(aid, result, RowStatus.DONE)
+        except Exception:
+            scb.state.fail("effect_registration_failed")
+            origin = self._spawn_origin.get(aid)
+            if origin is not None:
+                parent_aid, _ = origin
+                await self._recover_delivery_route(aid, parent_aid, PendingRowError("effect_registration_failed"))
+            return
         await self._drain_message_inbox(aid, allow_current_task=True)
         if not self._shutting_down:
             await self._drain_ready_message_inboxes()
 
     async def _trace_worktree_evidence(self, aid: int, scb: Any, session: Any) -> None:
-        """Record what an agent left in its worktree, whatever ended the agent.
+        """Record worktree evidence on every terminal path, including failure.
 
-        The completion path already writes this row. Every other terminal path
-        returned before reaching it, so an agent that spent its whole budget
-        writing code wrote no row at all -- and neither does an agent that
-        changed nothing, which is the reading ``_trace_worktree_changes``
-        exists to rule out. The two are opposite outcomes and they looked
-        identical on disk.
-
-        That matters beyond tidiness because per-agent adherence is scored off
-        these rows: a run whose coder was stopped at its cap after committing
-        scores as a coder that never touched a file, so the collaboration it
-        did do is counted as collaboration that did not happen.
-
-        Observational, like the call it mirrors: ``_trace_worktree_changes``
-        guards every read and swallows its own failures, so a diff that cannot
-        be taken here leaves the terminal path exactly as it was.
+        The delegated tracer is observational and cannot change the outcome.
         """
         env = getattr(session, "env", None)
         if env is None:
@@ -547,13 +523,18 @@ class LifecycleMixin:
         *,
         error: str | None = None,
     ) -> None:
-        """Route a finished child's result to the pending row that suspended its
-        parent, then re-activate the parent. No-op for fire-and-forget spawns.
-        """
+        """Route a finished child's result to the pending row that suspended its."""
         origin = self._spawn_origin.get(child_aid)
         if origin is None:
             return
         parent_aid, tool_call_id = origin
+        if child_aid in self._rollback_fenced or parent_aid in self._rollback_fenced:
+            logger.info(
+                "discarding late child result from aid %s to aid %s after rollback fence",
+                child_aid,
+                parent_aid,
+            )
+            return
         try:
             await self._wake(
                 parent_aid,
@@ -597,14 +578,7 @@ class LifecycleMixin:
         parent_aid: int,
         cause: PendingRowError,
     ) -> str | None:
-        """Route a unique child row or close the parent batch explicitly.
-
-        A pending row is identified only by its ``ref`` pointing to the child;
-        this never writes the child's result into an unrelated tool row.  The
-        only safe recovery is a single such row.  Any other shape is terminal:
-        atomically fail the parent's open batch so it cannot remain suspended
-        waiting for a child whose completion no longer has a valid route.
-        """
+        """Retry a unique child-ref row; otherwise explicitly fail the parent's batch."""
         parent_scb = self.table.get(parent_aid)
         parent_session = self._sessions.get(parent_aid)
         if parent_scb is None or parent_session is None:
@@ -614,6 +588,8 @@ class LifecycleMixin:
         lock = self._locks.setdefault(parent_aid, asyncio.Lock())
         should_resume = False
         async with lock:
+            if parent_aid in self._rollback_fenced or child_aid in self._rollback_fenced:
+                return None
             table = parent_scb.state.pending_events
             child_rows = [
                 tool_call_id
@@ -679,12 +655,7 @@ class LifecycleMixin:
         child_aid: int | None = None,
         error: str | None = None,
     ) -> None:
-        """Fill the parent's pending row and, if that completes the batch while
-        the parent is suspended, create a resume task. Fill + completeness check
-        + task creation run under one per-parent lock so concurrent child
-        completions can never double-wake the parent. Raises ``PendingRowError``
-        on an unknown/already-filled tool_call_id.
-        """
+        """Fill the parent's pending row and, if that completes the batch while."""
         parent_scb = self.table.get(parent_aid)
         parent_session = self._sessions.get(parent_aid)
         if parent_scb is None or parent_session is None:
@@ -694,6 +665,16 @@ class LifecycleMixin:
 
         lock = self._locks.setdefault(parent_aid, asyncio.Lock())
         async with lock:
+            if parent_aid in self._rollback_fenced or (
+                child_aid is not None and child_aid in self._rollback_fenced
+            ):
+                if child_aid is not None:
+                    self._spawn_origin.pop(child_aid, None)
+                logger.info(
+                    "discarding late delivery to aid %s after rollback fence",
+                    parent_aid,
+                )
+                return
             table = parent_scb.state.pending_events
             cleanup_forced = False
             fill_error = error
@@ -707,12 +688,25 @@ class LifecycleMixin:
                     if child_scb is not None:
                         child_scb.state.cancel(result)
                         child_scb.result = result
-            table.fill(
-                tool_call_id,
-                result=result,
-                status=status,
-                error=fill_error,
-            )
+            if child_aid is not None and not cleanup_forced:
+                try:
+                    self._assert_agent_active(child_aid)
+                    self._assert_agent_active(parent_aid)
+                except RuntimeError:
+                    logger.info("discarding stale or unregistered child delivery to aid %s", parent_aid)
+                    return
+            previous_rows = table.rows.copy()
+            with self._rollback_service.effect_transaction(), self._history.transaction():
+                try:
+                    table.fill(tool_call_id, result=result, status=status, error=fill_error)
+                    if (status is RowStatus.DONE and child_aid is not None and not cleanup_forced
+                            and self._has_effect_scopes(child_aid, parent_aid)):
+                        self._record_child_effect(child_aid, parent_aid, result)
+                except BaseException:
+                    table.rows = previous_rows
+                    raise
+            if child_aid is not None and status is RowStatus.DONE and not cleanup_forced:
+                await self._autosave_history(parent_aid, "child_result_accepted")
             if child_aid is not None:
                 self._spawn_origin.pop(child_aid, None)
                 if not cleanup_forced:
@@ -720,6 +714,7 @@ class LifecycleMixin:
             in_flight = self._tasks.get(parent_aid)
             should_resume = (
                 not self._shutting_down
+                and parent_aid not in self._rollback_fenced
                 and
                 parent_scb.state.phase is SessionPhase.AWAITING_EVENTS
                 and table.is_complete()
@@ -730,6 +725,7 @@ class LifecycleMixin:
                 self._start_agent_task(parent_aid, parent_session)
             elif (
                 not self._shutting_down
+                and parent_aid not in self._rollback_fenced
                 and
                 parent_scb.state.phase is SessionPhase.AWAITING_EVENTS
                 and table.is_complete()
@@ -770,6 +766,7 @@ class LifecycleMixin:
             )
             if (
                 not self._shutting_down
+                and parent_aid not in self._rollback_fenced
                 and
                 no_active_replacement
                 and parent_scb.state.phase is SessionPhase.AWAITING_EVENTS

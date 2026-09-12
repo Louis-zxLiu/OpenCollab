@@ -23,7 +23,18 @@ from opencollab.workflows import WorkflowContext
 
 
 def test_root_and_sdk_export_one_small_surface() -> None:
-    expected = ["OpenCollab", "RunError", "RunResult", "workflow"]
+    expected = [
+        "CheckpointResult",
+        "OpenCollab",
+        "RestoreResult",
+        "RollbackClient",
+        "RollbackPlan",
+        "RollbackResult",
+        "RunError",
+        "RunResult",
+        "TeamHandle",
+        "workflow",
+    ]
     assert opencollab.__version__ == "0.6.0"
     assert opencollab.__all__ == expected
     assert sdk.__all__ == expected
@@ -88,6 +99,21 @@ def test_public_class_and_method_shapes_stay_lean() -> None:
             # question about the run, not about any one agent, which is why it
             # belongs beside the two conditions above rather than in the team
             # config: the config says who is seated and who may address whom.
+            "serialize_turns",
+        ),
+        sdk.OpenCollab.start_team: (
+            "self",
+            "prompt",
+            "config",
+            "budget",
+            "timeout",
+            "cleanup_timeout",
+            "artifacts",
+            "trace",
+            "use_worktrees",
+            "prebuild_team",
+            "allow_unisolated_shell",
+            "max_steps",
             "serialize_turns",
         ),
         sdk.OpenCollab.workflow: (

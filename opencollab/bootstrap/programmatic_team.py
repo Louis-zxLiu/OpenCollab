@@ -28,6 +28,100 @@ from opencollab.bootstrap.team_config import load_team_config
 from opencollab.domain.session import SessionPhase
 
 
+async def prepare_team(
+    *,
+    prompt: str,
+    config: Mapping[str, Any],
+    workspace: str,
+    team_config_path: str | os.PathLike[str] | None,
+    max_tokens: int,
+    artifacts: Path | None,
+    trace: bool,
+    use_worktrees: bool,
+    prebuild_team: bool = False,
+    allow_unisolated_shell: bool | None = None,
+    max_steps: int = SESSION_MAX_STEPS,
+    serialize_turns: bool = False,
+    environment: Environment | None = None,
+) -> tuple[Any, Any]:
+    """Compose a checkpointed live Team without starting its first turn."""
+    run_config = dict(config)
+    run_config["budget"] = max_tokens
+    context = build_runtime_context(workspace, run_config, trace=False)
+    team_config = load_team_config(workspace, path=team_config_path)
+    _programmatic._claim_artifacts(artifacts)
+    if artifacts is not None and trace:
+        context.tracer = Tracer(
+            run_id="team",
+            output_dir=str(artifacts),
+            filename="trajectory.jsonl",
+        )
+    try:
+        scheduler = _programmatic.build_scheduler(
+            context,
+            use_worktrees=use_worktrees,
+            interactive=False,
+            allow_unisolated_shell=allow_unisolated_shell,
+            auto_save=artifacts is not None,
+            team_config_path=team_config_path,
+            resolved_team_config=team_config,
+            save_dir=artifacts,
+            prebuild_team=prebuild_team,
+            max_steps=max_steps,
+            serialize_turns=serialize_turns,
+            environment=environment,
+        )
+        await scheduler.ensure_team_prebuilt()
+        for aid in sorted(scheduler.table.entries):
+            await scheduler.create_checkpoint(aid, "initial")
+    except BaseException as exc:
+        cleanup_failure: BaseException | None = None
+        if "scheduler" in locals():
+            try:
+                await scheduler.cleanup()
+            except BaseException as cleanup_exc:
+                cleanup_failure = cleanup_exc
+                add_exception_note(
+                    exc,
+                    "live Team preparation cleanup also failed: "
+                    f"{type(cleanup_exc).__name__}: {cleanup_exc}",
+                )
+        tracer_failure = _programmatic._close_tracer(context.tracer)
+        if tracer_failure is not None:
+            add_exception_note(
+                exc,
+                "team tracer close also failed: "
+                f"{type(tracer_failure).__name__}: {tracer_failure}",
+            )
+        if cleanup_failure is not None:
+            raise ProgrammaticLifecycleError(
+                "live Team checkpoint preparation and cleanup failed"
+            ) from exc
+        raise
+    return scheduler, context
+
+
+async def close_team_runtime(scheduler: Any, context: Any, cleanup_timeout: float) -> None:
+    """Clean a prepared live Team and surface cleanup or trace failures."""
+    cleanup_failure: BaseException | None = None
+    try:
+        await scheduler.cleanup(cleanup_timeout=cleanup_timeout)
+    except BaseException as exc:
+        cleanup_failure = exc
+    tracer_failure = _programmatic._close_tracer(context.tracer)
+    lifecycle_failure = cleanup_failure or tracer_failure
+    if lifecycle_failure is not None:
+        if cleanup_failure is not None and tracer_failure is not None:
+            add_exception_note(
+                cleanup_failure,
+                "team trace also failed: "
+                f"{type(tracer_failure).__name__}: {tracer_failure}",
+            )
+        raise ProgrammaticLifecycleError(
+            "team cleanup or trajectory persistence failed"
+        ) from lifecycle_failure
+
+
 async def run_team(
     *,
     prompt: str,

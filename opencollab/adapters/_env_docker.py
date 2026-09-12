@@ -9,6 +9,7 @@ import posixpath
 import re
 import shlex
 import uuid
+import weakref
 from collections.abc import Callable
 from typing import NoReturn
 
@@ -35,25 +36,10 @@ DOCKER_WRITE_TIMEOUT_SECONDS = 120.0
 _IMAGE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/@:+-]{0,511}$")
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$")
 _FULL_ID_RE = re.compile(r"^[0-9a-fA-F]{64}$")
-_WRITE_LOCKS: dict[str, asyncio.Lock] = {}
+_WRITE_LOCKS: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
+_QUIESCE_FAILURE_MARKER = "opencollab:quiesce-failed"
 
-# Git refuses to commit without an author, and a benchmark image is not
-# configured with one: ``git commit`` inside the container fails with "Please
-# tell me who you are" before it writes anything. That is fatal to a team whose
-# handoff payload is a commit sha -- the agent doing the work has nothing to
-# hand over, and the failure surfaces as a shell error inside one turn rather
-# than as anything the run records.
-#
-# Passed per exec rather than written into the repository's config, because the
-# repository the agent works in is evidence: the evaluation harness rebuilds it
-# as a single anonymous commit and reads it back afterwards, so a key this
-# process added to ``.git/config`` would be a difference between the workspace
-# it prepared and the one it verifies. An environment variable leaves the
-# workspace byte-identical.
-#
-# The identity is deliberately not a person and its address is unroutable: the
-# commits never leave the container, and ``worktree_changes`` already attributes
-# each sha to an agent, so nothing reads this back.
+# Supply a per-command identity without changing repository configuration.
 _GIT_IDENTITY_ENV: tuple[tuple[str, str], ...] = (
     ("GIT_AUTHOR_NAME", "OpenCollab Agent"),
     ("GIT_AUTHOR_EMAIL", "agent@opencollab.invalid"),
@@ -65,6 +51,7 @@ _EXEC_WRAPPER = r"""
 pidfile=$1
 shellflag=$2
 command=$3
+failure_marker="opencollab:quiesce-failed:${pidfile##*/}"
 cleanup() { rm -f -- "$pidfile"; }
 group_alive() {
     [ -n "$child" ] && kill -0 -- "-$child" 2>/dev/null
@@ -94,6 +81,7 @@ cancel_and_exit() {
         cleanup
         exit 143
     fi
+    printf '%s\n' "$failure_marker" >&2
     exit 125
 }
 child=
@@ -101,10 +89,14 @@ trap cancel_and_exit TERM INT HUP
 set -m
 bash "$shellflag" "$command" &
 child=$!
-printf '%s\n' "$child" > "$pidfile" || { terminate || true; cleanup; exit 125; }
+printf '%s\n' "$child" > "$pidfile" || {
+    terminate || printf '%s\n' "$failure_marker" >&2
+    cleanup; exit 125
+}
 wait "$child"
 status=$?
 if group_alive && ! terminate; then
+    printf '%s\n' "$failure_marker" >&2
     exit 125
 fi
 cleanup
@@ -133,10 +125,12 @@ kill -TERM -- "-$child" 2>/dev/null || true
 if ! wait_for_group_exit; then
     kill -KILL -- "-$child" 2>/dev/null || true
     if ! wait_for_group_exit; then
+        printf '%s\n' 'opencollab:quiesce-failed' >&2
         exit 125
     fi
 fi
 rm -f -- "$pidfile" && exit 0
+printf '%s\n' 'opencollab:quiesce-failed' >&2
 exit 125
 """.strip()
 
@@ -174,6 +168,8 @@ class DockerEnvironment(Environment):
         backing_environment: Environment | None = None,
     ) -> None:
         super().__init__()
+        # Inherit only explicit Scope values; supply PWD through docker exec -w.
+        self._scope_values = {}
         if container_id is not None and backing_environment is not None:
             raise ValueError("an attached Docker environment cannot own a backing environment")
         if (
@@ -184,6 +180,7 @@ class DockerEnvironment(Environment):
             raise ValueError("timeout_returncode must be a non-zero integer")
         self._image = _validate_image(image)
         self.workspace = workspace
+        self.bind_workspace(workspace)
         self._attached = container_id is not None
         self._attached_reference = (
             _validate_container_reference(container_id) if container_id is not None else None
@@ -206,21 +203,12 @@ class DockerEnvironment(Environment):
 
     @property
     def container_reference(self) -> str | None:
-        """The container this was attached to, or ``None`` when it owns one.
-
-        Read by whatever needs to open a second view onto the same container --
-        a per-agent worktree, say -- without reaching into how attaching works.
-        """
+        """The caller-owned container reference, or None for an owned container."""
         return self._attached_reference
 
     @property
     def command_prefix(self) -> Callable[[str], str] | str | None:
-        """What an agent's commands here are wrapped with, if anything.
-
-        A container built for a benchmark usually needs its interpreter
-        activated first, and a second view onto the same container has to run
-        commands the same way for its results to mean the same thing.
-        """
+        """Command wrapper inherited by child container Scopes."""
         return self._command_prefix
 
     async def _docker(
@@ -294,6 +282,7 @@ class DockerEnvironment(Environment):
             "run",
             "-d",
             "--rm",
+            "--init",
             "--network",
             "none",
             "--name",
@@ -302,6 +291,10 @@ class DockerEnvironment(Environment):
             f"{DOCKER_OWNER_LABEL}={self._owner_token}",
         ]
         if host_mount is not None:
+            getuid = getattr(os, "getuid", None)
+            getgid = getattr(os, "getgid", None)
+            if callable(getuid) and callable(getgid):
+                args.extend(("--user", f"{getuid()}:{getgid()}"))
             args.extend(("-v", f"{host_mount}:{self.workspace}"))
         args.extend(("-w", self.workspace, self._image, "sleep", "infinity"))
         try:
@@ -382,17 +375,24 @@ class DockerEnvironment(Environment):
             return self._command_prefix(cmd)
         return f"{self._command_prefix}\n{cmd}"
 
-    def _exec_argv(self, cmd: str, token: str, *, interactive: bool = False) -> tuple[str, ...]:
+    def _exec_argv(
+        self, cmd: str, token: str, *, interactive: bool = False,
+        workdir: str | None = None, environment: dict[str, str] | None = None, raw: bool = False,
+    ) -> tuple[str, ...]:
         assert self._container_id is not None
         pidfile = f"/tmp/.opencollab-exec-{token}.pid"
         args = ["exec"]
         if interactive:
             args.append("-i")
-        if self._exec_workdir:
-            args.extend(("-w", self._exec_workdir))
+        if workdir or self._exec_workdir:
+            args.extend(("-w", workdir or self._exec_workdir))
+        for name, value in sorted((self.process_environment() if environment is None else environment).items()):
+            if name == "PWD":
+                continue
+            args.extend(("-e", f"{name}={value}"))
         for name, value in _GIT_IDENTITY_ENV:
             args.extend(("-e", f"{name}={value}"))
-        shell_flag = "-lc" if self._command_prefix is not None else "-c"
+        shell_flag = "-lc" if self._command_prefix is not None and not raw else "-c"
         args.extend(
             (
                 "--",
@@ -403,7 +403,7 @@ class DockerEnvironment(Environment):
                 "opencollab-exec",
                 pidfile,
                 shell_flag,
-                self._wrap_command(cmd),
+                cmd if raw else self._wrap_command(cmd),
             )
         )
         return tuple(args)
@@ -430,13 +430,11 @@ class DockerEnvironment(Environment):
     async def _recover_inner(self, token: str) -> bool:
         if await self._cancel_inner(token):
             return True
-        if self._attached:
-            self.revoke()
-            return False
-        removed = await self._remove_container_if_owned()
-        if not removed:
-            self.revoke()
-        return removed
+        # Removing a container cannot make its lost Scope usable for restore.
+        self.revoke()
+        if not self._attached:
+            await self._remove_container_if_owned()
+        return False
 
     async def _exec(
         self,
@@ -444,18 +442,27 @@ class DockerEnvironment(Environment):
         *,
         timeout: float,
         input_bytes: bytes | None = None,
+        workdir: str | None = None,
+        environment: dict[str, str] | None = None,
+        raw: bool = False,
+        allow_revoked: bool = False,
     ) -> ExecResult:
-        self._ensure_active()
+        if not allow_revoked:
+            self._ensure_active()
         await self._bind_attached()
         if self._container_id is None:
             raise RuntimeError("Container not started. Call setup() first.")
         token = uuid.uuid4().hex
         async with self._active_exec_lock:
-            self._ensure_active()
+            if not allow_revoked:
+                self._ensure_active()
             self._active_execs[token] = asyncio.current_task()
         try:
             result = await self._docker(
-                *self._exec_argv(cmd, token, interactive=input_bytes is not None),
+                *self._exec_argv(
+                    cmd, token, interactive=input_bytes is not None,
+                    workdir=workdir, environment=environment, raw=raw,
+                ),
                 timeout=timeout,
                 input_bytes=input_bytes,
             )
@@ -465,10 +472,7 @@ class DockerEnvironment(Environment):
                 propagate_cancellation=True,
             ):
                 raise ProcessCleanupError("timed out container command did not quiesce")
-            # Everything the command printed before the deadline goes back with
-            # the timeout. A test run that hung after reporting nine failures
-            # and one that hung immediately used to be the same empty result,
-            # and the only move left was to run it again.
+            # Preserve captured output so timeout evidence is not lost.
             return timed_out_result(exc, self._timeout_returncode, timeout)
         except asyncio.CancelledError as exc:
             if not await await_owned_operation(self._recover_inner(token)):
@@ -477,13 +481,40 @@ class DockerEnvironment(Environment):
         finally:
             async with self._active_exec_lock:
                 self._active_execs.pop(token, None)
+        marker = f"{_QUIESCE_FAILURE_MARKER}:.opencollab-exec-{token}.pid"
+        if result.returncode == 125 and marker in result.stderr.decode(
+            "utf-8", errors="replace"
+        ):
+            self.revoke()
+            raise ProcessCleanupError("container command did not quiesce")
         return result.to_exec_result()
 
     async def exec_cmd(self, cmd: str, timeout: float = 120.0) -> ExecResult:
         return await self._exec(cmd, timeout=timeout)
 
+    async def quiesce(self) -> None:
+        """Cancel active docker execs and wait until their groups are gone."""
+        current = asyncio.current_task()
+        async with self._active_exec_lock:
+            tasks = {
+                task
+                for task in self._active_execs.values()
+                if task is not None and task is not current and not task.done()
+            }
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        if self.revoked:
+            raise ProcessCleanupError(
+                "Docker Scope was revoked because an active command did not quiesce"
+            )
+
     async def read_file(self, path: str) -> str:
-        result = await self.exec_cmd(f"cat -- {shlex.quote(path)}")
+        path = self._normalize_container_path(path)
+        result = await self.exec_cmd(self._file_path_guard(path) + 'cat -- "$target"')
+        if result.returncode == 73:
+            raise ValueError("container file path escapes workspace")
         if result.returncode != 0:
             raise FileNotFoundError(result.stderr)
         if result.stdout_truncated:
@@ -512,14 +543,18 @@ class DockerEnvironment(Environment):
             raise ValueError("offset, limit, and max_chars must be positive integers")
         final_line = offset + limit
         byte_cap = max_chars * 4 + limit + 1
-        quoted_path = shlex.quote(path)
+        path = self._normalize_container_path(path)
+        quoted_path = '"$target"'
         command = (
+            self._file_path_guard(path) +
             f"[ -f {quoted_path} ] && [ -r {quoted_path} ] || exit 66; "
             "command -v sed >/dev/null && command -v head >/dev/null || exit 127; "
             f"sed -n '{offset},{final_line}p;{final_line}q' < {quoted_path} "
             f"| head -c {byte_cap}"
         )
         result = await self.exec_cmd(command)
+        if result.returncode == 73:
+            raise ValueError("container file path escapes workspace")
         if result.returncode != 0:
             raise FileNotFoundError(result.stderr)
         lines = result.stdout.splitlines()
@@ -550,14 +585,27 @@ class DockerEnvironment(Environment):
             self._ensure_active()
             await self._write_file_atomic(target, content)
 
-    @staticmethod
-    def _normalize_container_path(path: str) -> str:
+    def _normalize_container_path(self, path: str) -> str:
         if not isinstance(path, str) or not path or "\0" in path:
             raise ValueError("container file path must be non-empty text without NUL bytes")
-        normalized = posixpath.normpath(path)
-        if normalized in (".", "/") or posixpath.basename(normalized) in (".", ".."):
+        if ".." in path.split("/"):
+            raise ValueError("container file path escapes workspace")
+        root = posixpath.normpath(self.workspace)
+        normalized = posixpath.normpath(posixpath.join(root, path))
+        if normalized == root or not normalized.startswith(root.rstrip("/") + "/"):
+            raise ValueError("container file path escapes workspace")
+        if normalized in (".", "/"):
             raise ValueError("container file path must name a file")
         return normalized
+
+    def _file_path_guard(self, target: str) -> str:
+        # Resolve in the container, in the same command as the file operation.
+        # Shell execution remains a trusted capability, not a hostile-code sandbox.
+        return (
+            f"root=$(realpath -e -- {shlex.quote(self.workspace)}) || exit 73; "
+            f"target=$(realpath -m -- {shlex.quote(target)}) || exit 73; "
+            'case "$target" in "$root"/*) ;; *) exit 73 ;; esac; '
+        )
 
     async def _write_file_atomic(self, target: str, content: str) -> None:
         payload = content.encode("utf-8")
@@ -573,6 +621,7 @@ class DockerEnvironment(Environment):
         )
         command = (
             'target=$1; temporary=$2; expected_bytes=$3; expected_digest=$4; '
+            + self._file_path_guard(target) +
             'cleanup() { rm -f -- "$temporary"; }; trap cleanup EXIT HUP INT TERM; '
             'mkdir -p -- "$(dirname -- "$target")" && '
             '(umask 077; set -C; : > "$temporary") && '
@@ -599,6 +648,9 @@ class DockerEnvironment(Environment):
                 input_bytes=payload,
             )
             expected = f"{len(payload)}\t{digest}"
+            if result.returncode == 73:
+                committed = True  # The guard failed before any temporary file was created.
+                raise ValueError("container file path escapes workspace")
             if result.returncode != 0 or result.stdout.strip() != expected:
                 raise OSError(f"docker write verification failed for {target}")
             committed = True
@@ -635,7 +687,7 @@ class DockerEnvironment(Environment):
     ) -> str:
         if any(character in prefix + suffix for character in ("/", "\0")):
             raise ValueError("temporary file prefix and suffix must be path components")
-        path = f"/tmp/{prefix}{uuid.uuid4().hex}{suffix}"
+        path = posixpath.join(self.workspace, ".opencollab", f"{prefix}{uuid.uuid4().hex}{suffix}")
         await self.write_file(path, content)
         self._temporary_files.add(path)
         return path

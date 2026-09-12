@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import hashlib
 import math
@@ -21,9 +22,11 @@ from opencollab.bootstrap.programmatic import (
     run_team,
     run_workflow,
 )
+from opencollab.bootstrap.programmatic_team import prepare_team
 from opencollab.bootstrap.session_factory import SESSION_MAX_STEPS
 
 from .result import RunError, RunResult
+from .team import TeamHandle
 
 
 def _positive_int(value: object, name: str) -> int:
@@ -306,6 +309,72 @@ class OpenCollab:
         except ProgrammaticLifecycleError as exc:
             raise RunError(str(exc)) from exc
         return _public_result(result)
+
+    async def start_team(
+        self,
+        prompt: str,
+        *,
+        config: str | os.PathLike[str] | None = None,
+        budget: int | None = None,
+        timeout: float | None = None,
+        cleanup_timeout: float = DEFAULT_TEAM_CLEANUP_TIMEOUT_SECONDS,
+        artifacts: str | os.PathLike[str] | None = None,
+        trace: bool = True,
+        use_worktrees: bool = True,
+        prebuild_team: bool = False,
+        allow_unisolated_shell: bool | None = None,
+        max_steps: int = SESSION_MAX_STEPS,
+        serialize_turns: bool = False,
+    ) -> TeamHandle:
+        """Start a checkpointed, controllable Team without automatic cleanup."""
+        _non_empty(prompt, "prompt")
+        if not isinstance(trace, bool) or not isinstance(use_worktrees, bool):
+            raise ValueError("trace and use_worktrees must be booleans")
+        if not isinstance(prebuild_team, bool):
+            raise ValueError("prebuild_team must be a boolean")
+        if not isinstance(serialize_turns, bool):
+            raise ValueError("serialize_turns must be a boolean")
+        if allow_unisolated_shell is not None and not isinstance(allow_unisolated_shell, bool):
+            raise ValueError("allow_unisolated_shell must be a boolean or None")
+        team_path = _path(config, "config")
+        resolved_max_steps = _positive_int(max_steps, "max_steps")
+        resolved_timeout = _positive_timeout(timeout, "timeout")
+        resolved_cleanup_timeout = _required_positive_timeout(
+            cleanup_timeout,
+            "cleanup_timeout",
+        )
+        artifacts_path = _path(artifacts, "artifacts")
+        scheduler, context = await prepare_team(
+            prompt=prompt,
+            config=self._config,
+            workspace=self._workspace,
+            team_config_path=team_path,
+            max_tokens=_positive_int(
+                self._config["budget"] if budget is None else budget,
+                "budget",
+            ),
+            artifacts=artifacts_path,
+            trace=trace,
+            use_worktrees=use_worktrees,
+            prebuild_team=prebuild_team,
+            allow_unisolated_shell=allow_unisolated_shell,
+            max_steps=resolved_max_steps,
+            serialize_turns=serialize_turns,
+            environment=self._environment,
+        )
+
+        async def run_live() -> str:
+            if resolved_timeout is None:
+                return await scheduler.run(prompt)
+            return await asyncio.wait_for(scheduler.run(prompt), timeout=resolved_timeout)
+
+        return TeamHandle(
+            scheduler,
+            context,
+            asyncio.create_task(run_live()),
+            cleanup_timeout=resolved_cleanup_timeout,
+            artifacts=artifacts_path,
+        )
 
     async def workflow(
         self,

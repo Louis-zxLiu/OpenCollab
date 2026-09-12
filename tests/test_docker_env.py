@@ -98,6 +98,7 @@ async def test_owned_setup_is_network_isolated_and_cleanup_uses_full_id(monkeypa
     assert await env.setup() == CONTAINER_ID
     run_command = fake.calls[0][0]
     assert run_command[:2] == ("docker", "run")
+    assert "--init" in run_command
     assert run_command[run_command.index("--network") + 1] == "none"
     assert "opencollab.owner=" in " ".join(run_command)
     await env.cleanup()
@@ -273,7 +274,7 @@ async def test_exec_preserves_bounded_output_metadata(monkeypatch) -> None:
 
 
 async def test_docker_text_range_requests_only_window_plus_probe(monkeypatch) -> None:
-    env = DockerEnvironment(container_id=CONTAINER_ID)
+    env = DockerEnvironment(container_id=CONTAINER_ID, workspace="/repo")
     commands: list[str] = []
 
     async def fake_exec(command, timeout=120.0):
@@ -373,6 +374,68 @@ async def test_attached_timeout_revokes_when_inner_cancel_fails(monkeypatch) -> 
         await env.exec_cmd("sleep 20", timeout=0.01)
     assert env.revoked
     assert all(call[0][1] != "rm" for call in fake.calls)
+
+
+async def test_user_exit_125_is_not_quiescence_failure(monkeypatch) -> None:
+    fake = FakeDocker(lambda _command, _kwargs: _result(returncode=125, stderr=b"user error"))
+    _patch(monkeypatch, fake)
+    env = DockerEnvironment(container_id=CONTAINER_ID)
+    env._attached_bound = True
+
+    result = await env.exec_cmd("exit 125")
+
+    assert result.returncode == 125
+    assert not env.revoked
+
+
+async def test_internal_quiescence_marker_revokes_scope(monkeypatch) -> None:
+    def failed_quiesce(command, _kwargs):
+        pidfile = command[-3]
+        marker = f"{docker_module._QUIESCE_FAILURE_MARKER}:{pidfile.rsplit('/', 1)[-1]}"
+        return _result(returncode=125, stderr=f"{marker}\n".encode())
+
+    fake = FakeDocker(failed_quiesce)
+    _patch(monkeypatch, fake)
+    env = DockerEnvironment(container_id=CONTAINER_ID)
+    env._attached_bound = True
+
+    with pytest.raises(ProcessCleanupError, match="did not quiesce"):
+        await env.exec_cmd("command")
+
+    assert env.revoked
+
+
+async def test_failed_recovery_revokes_owned_scope_even_when_container_cleanup_succeeds(
+    monkeypatch,
+) -> None:
+    env = DockerEnvironment(container_id=CONTAINER_ID)
+    env._attached_bound = True
+
+    async def cancel(_token: str) -> bool:
+        return False
+
+    monkeypatch.setattr(env, "_cancel_inner", cancel)
+
+    async def remove_owned_container() -> bool:
+        return True
+
+    monkeypatch.setattr(env, "_remove_container_if_owned", remove_owned_container)
+
+    assert await env._recover_inner("token") is False
+    assert env.revoked
+
+
+async def test_successful_recovery_keeps_scope_active(monkeypatch) -> None:
+    env = DockerEnvironment(container_id=CONTAINER_ID)
+    env._attached_bound = True
+
+    async def cancel(_token: str) -> bool:
+        return True
+
+    monkeypatch.setattr(env, "_cancel_inner", cancel)
+
+    assert await env._recover_inner("token") is True
+    assert not env.revoked
 
 
 async def test_attached_abort_cancels_and_waits_for_all_active_execs(monkeypatch) -> None:
@@ -585,7 +648,7 @@ async def test_write_half_input_failure_keeps_old_target_and_cleans_temp(monkeyp
             return _result()
         raise AssertionError(args)
 
-    env = DockerEnvironment(container_id=CONTAINER_ID)
+    env = DockerEnvironment(container_id=CONTAINER_ID, workspace="/repo")
     env._attached_bound = True
     monkeypatch.setattr(env, "_docker", fake_docker)
 
@@ -616,7 +679,7 @@ async def test_write_timeout_keeps_old_target_and_cleans_temp(monkeypatch) -> No
             return _result()
         raise AssertionError(args)
 
-    env = DockerEnvironment(container_id=CONTAINER_ID)
+    env = DockerEnvironment(container_id=CONTAINER_ID, workspace="/repo")
     env._attached_bound = True
     monkeypatch.setattr(env, "_docker", fake_docker)
 
@@ -648,7 +711,7 @@ async def test_cancelled_write_keeps_old_target_and_cleans_temp(monkeypatch) -> 
             return _result()
         raise AssertionError(args)
 
-    env = DockerEnvironment(container_id=CONTAINER_ID)
+    env = DockerEnvironment(container_id=CONTAINER_ID, workspace="/repo")
     env._attached_bound = True
     monkeypatch.setattr(env, "_docker", fake_docker)
     owner = asyncio.create_task(env.write_file("/repo/result.txt", "new content"))
@@ -685,8 +748,8 @@ async def test_concurrent_same_container_path_writes_are_serialized(monkeypatch)
         digest = __import__("hashlib").sha256(input_bytes).hexdigest()
         return _result(stdout=f"{len(input_bytes)}\t{digest}\n".encode())
 
-    first = DockerEnvironment(container_id=CONTAINER_ID)
-    second = DockerEnvironment(container_id=CONTAINER_ID)
+    first = DockerEnvironment(container_id=CONTAINER_ID, workspace="/repo")
+    second = DockerEnvironment(container_id=CONTAINER_ID, workspace="/repo")
     first._attached_bound = True
     second._attached_bound = True
     monkeypatch.setattr(first, "_docker", fake_docker)
@@ -715,7 +778,7 @@ async def test_docker_writes_reject_oversize_utf8_before_transport(
         calls += 1
         return _result()
 
-    env = DockerEnvironment(container_id=CONTAINER_ID)
+    env = DockerEnvironment(container_id=CONTAINER_ID, workspace="/repo")
     env._attached_bound = True
     monkeypatch.setattr(env, "_docker", fake_docker)
     content = "é" * (LOCAL_FILE_WRITE_LIMIT_BYTES // 2 + 1)

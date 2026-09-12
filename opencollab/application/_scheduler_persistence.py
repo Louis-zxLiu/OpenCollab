@@ -328,6 +328,33 @@ class SchedulerPersistenceMixin:
         self._set_session_budget_limit(aid, baseline + grant)
         return grant
 
+    def reserve_continuation_budget(self, aid: int, budget_tokens: int) -> int:
+        """Reserve an explicit budget for a post-rollback continuation turn."""
+        if isinstance(budget_tokens, bool) or not isinstance(budget_tokens, int):
+            raise TypeError("continuation budget must be an integer")
+        if budget_tokens < 1:
+            raise ValueError("continuation budget must be positive")
+        if aid not in self._sessions:
+            raise ValueError(f"unknown agent aid: {aid}")
+        previous_lease = self._current_turn_lease(aid)
+        self._release_turn_lease(aid)
+        baseline = self._session_used_tokens(aid)
+        available = max(0, self._max_budget_tokens - self._budget_committed())
+        grant = min(budget_tokens, available)
+        cap = self._per_agent_cap()
+        if cap is not None:
+            grant = min(grant, max(0, cap - baseline))
+        if grant < budget_tokens:
+            self._restore_turn_lease(aid, previous_lease)
+            raise RuntimeError(
+                "budget_exhausted: continuation budget unavailable: "
+                f"requested={budget_tokens}, available={grant}"
+            )
+        self._turn_lease[aid] = grant
+        self._lease_baseline[aid] = baseline
+        self._set_session_budget_limit(aid, baseline + grant)
+        return grant
+
     def _set_session_budget_limit(self, aid: int, limit: int) -> None:
         session = self._sessions.get(aid)
         if session is None:

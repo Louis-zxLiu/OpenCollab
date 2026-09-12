@@ -57,13 +57,39 @@ class LocalEnvironment(Environment):
         self.workspace = os.path.realpath(os.path.abspath(workspace))
         if not os.path.isdir(self.workspace):
             raise NotADirectoryError(self.workspace)
+        self.bind_workspace(self.workspace)
         self._workspace_fd: int | None = open_directory_anchor(self.workspace)
         self.host_workspace = self.workspace
         self.source_workspace = self.workspace
         self._processes = ProcessRegistry()
+        self._command_operations: set[asyncio.Task] = set()
         self._temporary_files: set[str] = set()
         self._file_io_semaphore = asyncio.Semaphore(_FILE_IO_CONCURRENCY)
         self._file_operations: set[asyncio.Task] = set()
+        self._checkpoint_adapter = None
+
+    async def checkpoint_scope(self, boundary, *, owner_aid: int, causal_frontier):
+        if self._checkpoint_adapter is None:
+            from opencollab.adapters.git_checkpoints import GitCheckpointAdapter
+
+            self._checkpoint_adapter = GitCheckpointAdapter(self)
+        return await self._checkpoint_adapter.checkpoint_scope(
+            boundary,
+            owner_aid=owner_aid,
+            causal_frontier=causal_frontier,
+        )
+
+    async def restore_scope(self, checkpoint):
+        if self._checkpoint_adapter is None:
+            from opencollab.adapters.git_checkpoints import GitCheckpointAdapter
+
+            self._checkpoint_adapter = GitCheckpointAdapter(self)
+        return await self._checkpoint_adapter.restore_scope(checkpoint)
+
+    async def validate_checkpoint_scope(self, checkpoint) -> None:
+        from opencollab.adapters.git_checkpoints import GitCheckpointAdapter
+
+        await GitCheckpointAdapter(self).validate_checkpoint_scope(checkpoint)
 
     def _relative_path(self, path: str) -> str:
         if not isinstance(path, str) or not path or "\0" in path:
@@ -91,6 +117,8 @@ class LocalEnvironment(Environment):
 
     async def exec_cmd(self, cmd: str, timeout: float = 120.0) -> ExecResult:
         self._ensure_active()
+        owner = asyncio.current_task()
+        self._command_operations.add(owner)
         try:
             result = await run_process(
                 cmd,
@@ -99,12 +127,15 @@ class LocalEnvironment(Environment):
                 timeout=timeout,
                 registry=self._processes,
                 output_limit=PROCESS_OUTPUT_CAPTURE_BYTES,
+                env=self.process_environment(),
             )
         except asyncio.TimeoutError as exc:
             return timed_out_result(exc, -1, timeout)
         except ProcessCleanupError:
             self.revoke()
             raise
+        finally:
+            self._command_operations.discard(owner)
         return result.to_exec_result()
 
     async def _execute_file_operation(
@@ -130,6 +161,17 @@ class LocalEnvironment(Environment):
         owner.add_done_callback(self._file_operations.discard)
         owner.add_done_callback(consume_task_result)
         return await asyncio.shield(owner)
+
+    async def _quiesce_file_operations(self) -> None:
+        while self._file_operations:
+            pending = tuple(self._file_operations)
+            # Cancelling the waiter cannot stop to_thread: keep its owner tracked.
+            results = await asyncio.gather(
+                *(asyncio.shield(task) for task in pending), return_exceptions=True
+            )
+            failures = [result for result in results if isinstance(result, BaseException)]
+            if failures:
+                raise RuntimeError("local file operation did not complete cleanly") from failures[0]
 
     async def read_file(self, path: str) -> str:
         payload = await self._run_file_operation(
@@ -212,9 +254,7 @@ class LocalEnvironment(Environment):
         self._temporary_files.discard(target)
 
     async def _cleanup_files(self) -> None:
-        while self._file_operations:
-            pending = tuple(self._file_operations)
-            await asyncio.gather(*pending, return_exceptions=True)
+        await self._quiesce_file_operations()
         failures: list[OSError] = []
         for path in tuple(self._temporary_files):
             try:
@@ -271,6 +311,16 @@ class LocalEnvironment(Environment):
         except BaseException as exc:
             file_failure = exc
 
+        checkpoint_failure: BaseException | None = None
+        adapter = self._checkpoint_adapter
+        if adapter is not None:
+            try:
+                await adapter.discard()
+            except BaseException as exc:
+                checkpoint_failure = exc
+            else:
+                self._checkpoint_adapter = None
+
         cancellation = next(
             (
                 failure
@@ -299,9 +349,35 @@ class LocalEnvironment(Environment):
                     f"{type(file_failure).__name__}: {file_failure}",
                 )
                 raise process_failure from file_failure
+            if checkpoint_failure is not None:
+                add_exception_note(
+                    process_failure,
+                    "checkpoint cleanup also failed: "
+                    f"{type(checkpoint_failure).__name__}: {checkpoint_failure}",
+                )
             raise process_failure
         if file_failure is not None:
+            if checkpoint_failure is not None:
+                add_exception_note(
+                    file_failure,
+                    "checkpoint cleanup also failed: "
+                    f"{type(checkpoint_failure).__name__}: {checkpoint_failure}",
+                )
             raise file_failure
+        if checkpoint_failure is not None:
+            raise checkpoint_failure
+
+    async def quiesce(self) -> None:
+        """Wait for both subprocesses and descriptor-relative file operations."""
+        self._ensure_active()
+        current = asyncio.current_task()
+        tasks = tuple(task for task in self._command_operations if task is not current)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*(asyncio.shield(task) for task in tasks), return_exceptions=True)
+        await self._quiesce_file_operations()
+        self._ensure_active()
 
 
 __all__ = ["LocalEnvironment"]

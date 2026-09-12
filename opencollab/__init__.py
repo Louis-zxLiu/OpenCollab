@@ -6,15 +6,43 @@ from importlib import import_module
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from opencollab.sdk import OpenCollab, RunError, RunResult, workflow
+    from opencollab.sdk import (
+        CheckpointResult,
+        OpenCollab,
+        RestoreResult,
+        RollbackClient,
+        RollbackPlan,
+        RollbackResult,
+        RunError,
+        RunResult,
+        TeamHandle,
+        workflow,
+    )
 
 __version__ = "0.6.0"
 
-__all__ = ["OpenCollab", "RunError", "RunResult", "workflow"]
+__all__ = [
+    "CheckpointResult",
+    "OpenCollab",
+    "RestoreResult",
+    "RollbackClient",
+    "RollbackPlan",
+    "RollbackResult",
+    "RunError",
+    "RunResult",
+    "TeamHandle",
+    "workflow",
+]
 _PUBLIC_MODULES = {
+    "CheckpointResult": "opencollab.sdk.result",
     "OpenCollab": "opencollab.sdk.client",
+    "RestoreResult": "opencollab.sdk.result",
+    "RollbackClient": "opencollab.sdk.team",
+    "RollbackPlan": "opencollab.sdk.result",
+    "RollbackResult": "opencollab.sdk.result",
     "RunError": "opencollab.sdk.result",
     "RunResult": "opencollab.sdk.result",
+    "TeamHandle": "opencollab.sdk.team",
     "workflow": "opencollab.workflows",
 }
 

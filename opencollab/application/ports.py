@@ -4,6 +4,14 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Protocol, runtime_checkable
 
 from opencollab.domain.hooks import HookOutcome
+from opencollab.domain.rollback import (
+    CheckpointBoundary,
+    EnvironmentSnapshot,
+    RestoreResult,
+    RollbackPlan,
+    RollbackResult,
+    ScopeCheckpoint,
+)
 from opencollab.domain.skill import SkillManifest
 
 if TYPE_CHECKING:
@@ -53,6 +61,10 @@ class EnvironmentPort(Protocol):
         """Revoke future side effects and stop owned environment resources."""
         ...
 
+    async def quiesce(self) -> None:
+        """Stop active commands while keeping the Scope available for restore."""
+        ...
+
     async def cleanup(self) -> None:
         ...
 
@@ -92,6 +104,73 @@ class WorkingTreeProbe(Protocol):
 
     async def diff(self) -> str:
         """Complete current-tree evidence, or raise when it cannot be proven."""
+        ...
+
+
+@runtime_checkable
+class CheckpointableEnvironmentPort(Protocol):
+    """Application-facing Scope checkpoint and restore contract."""
+
+    workspace: str
+
+    def snapshot_environment(self) -> EnvironmentSnapshot:
+        ...
+
+    def replace_environment(self, snapshot: EnvironmentSnapshot) -> None:
+        ...
+
+    async def checkpoint_scope(
+        self,
+        boundary: CheckpointBoundary,
+        *,
+        owner_aid: int,
+        causal_frontier: frozenset[str],
+    ) -> ScopeCheckpoint:
+        ...
+
+    async def restore_scope(self, checkpoint: ScopeCheckpoint) -> RestoreResult:
+        ...
+
+    async def validate_checkpoint_scope(self, checkpoint: ScopeCheckpoint) -> None:
+        """Verify identity and checkpoint content without mutating the Scope."""
+        ...
+
+
+class ExplicitRollbackPort(Protocol):
+    """Thin application contract for operator-controlled rollback."""
+
+    def preview_rollback(self, effect_ids: set[str]) -> RollbackPlan:
+        ...
+
+    async def create_checkpoint(
+        self,
+        aid: int,
+        boundary: CheckpointBoundary = "initial",
+        causal_frontier: frozenset[str] | None = None,
+    ) -> ScopeCheckpoint:
+        ...
+
+    async def rollback_effect(
+        self,
+        effect_ids: set[str],
+        *,
+        expected_plan_digest: str,
+    ) -> RollbackResult:
+        ...
+
+    async def rollback_to_checkpoint(self, aid: int, checkpoint_id: str) -> RestoreResult:
+        ...
+
+    def resume_after_rollback(self, aids: set[int]) -> None:
+        ...
+
+    async def continue_team_turn(
+        self,
+        aid: int,
+        message: str,
+        *,
+        budget_tokens: int | None = None,
+    ) -> str:
         ...
 
 
@@ -292,7 +371,7 @@ class WorkflowSessionFactoryPort(Protocol):
         ...
 
 
-class SchedulerPort(Protocol):
+class SchedulerPort(ExplicitRollbackPort, Protocol):
     """Port for the scheduler — called by tools to spawn agents."""
 
     async def spawn(

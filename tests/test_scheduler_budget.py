@@ -546,3 +546,14 @@ def test_cancelled_agent_retries_other_messages_waiting_for_budget():
         await asyncio.gather(*sched._tasks.values(), return_exceptions=True)
 
     run(scenario())
+
+
+def test_explicit_continuation_budget_is_reserved_and_rejects_overcommit():
+    sched = _scheduler(RecordingFactory(asyncio.Event()), max_budget_tokens=400_000)
+
+    assert sched.reserve_continuation_budget(0, 50_000) == 50_000
+    assert sched._turn_lease[0] == 50_000
+
+    with pytest.raises(RuntimeError, match="continuation budget unavailable"):
+        sched.reserve_continuation_budget(0, 400_001)
+    assert sched._turn_lease[0] == 50_000

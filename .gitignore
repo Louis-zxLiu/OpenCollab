@@ -81,3 +81,18 @@ docs/**/*.pdf
 
 # Internal working drafts — keep local, do not publish
 docs/2026-07-12-oc-module-refactor-report.md
+
+# Personal presentations and experiment reports remain outside public releases.
+/docs/archive/rollback/
+/docs/evidence/
+/docs/development-report.md
+/docs/history-replay-report.html
+/docs/history-replay-report.md
+/docs/history-replay-technical-report.md
+/docs/manual-team-rollback-report.md
+/docs/rollback-audit-campaign.md
+/docs/rollback-long-trajectory-report.md
+/docs/rollback-symbol-inventory.md
+/docs/rollback-v1-report.md
+/docs/submission-audit-report.md
+/docs/testing-report.md

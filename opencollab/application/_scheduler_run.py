@@ -54,6 +54,8 @@ class SchedulerRunMixin:
                     if self._turn_cancel_events.get(aid) is cancel_event:
                         self._turn_cancel_events.pop(aid, None)
         except asyncio.CancelledError:
+            if aid in self._rollback_interrupted:
+                raise SchedulerTurnError(aid, SessionPhase.STOPPED, "rollback_interrupted", None) from None
             # The public caller owns the whole team turn. Do not leave its target
             # driver and descendants running after that owner is cancelled.
             if not self._shutting_down:
@@ -83,6 +85,7 @@ class SchedulerRunMixin:
             raise ValueError(f"Cannot run user turn: no agent with aid {aid}.")
         if self._shutting_down:
             raise RuntimeError("Cannot run scheduler: scheduler is shutting down.")
+        self._assert_agent_active(aid)
 
         task = self._tasks.get(aid)
         if task is not None and not task.done():
@@ -117,7 +120,9 @@ class SchedulerRunMixin:
             raise RuntimeError("Cannot run scheduler: scheduler is shutting down.")
         turn_start = len(session.state.messages)
         prior_lease = self._current_turn_lease(aid)
-        if self._entry_agent_takes_the_pool(aid):
+        if self._continuation_aid.get() == aid:
+            pass  # The explicit continuation already reserved its initial grant.
+        elif self._entry_agent_takes_the_pool(aid):
             self._reserve_turn_lease(aid)
         elif not self._reserve_message_budget(aid):
             raise RuntimeError(
@@ -160,7 +165,7 @@ class SchedulerRunMixin:
                 if cancel_waiter is not None and cancel_waiter.done():
                     cancellation_requested = True
                     cancel_waiter = None
-                if cancellation_requested:
+                if cancellation_requested and aid not in self._rollback_interrupted:
                     await self._settle_cancelled_suspended_turn(aid)
                 pending = self._active_scheduler_tasks()
                 if not pending:
@@ -190,6 +195,15 @@ class SchedulerRunMixin:
             if message.get("role") == "assistant" and message.get("content"):
                 partial_answer = message["content"]
                 break
+        if aid in self._rollback_interrupted:
+            self._rollback_interrupted.discard(aid)
+            raise SchedulerTurnError(
+                aid,
+                SessionPhase.STOPPED,
+                "interrupted by explicit rollback",
+                partial_answer or None,
+            )
+        await self._autosave_history(aid, "terminal")
         phase = scb.state.phase
         if phase in {SessionPhase.ERROR, SessionPhase.STOPPED}:
             raise SchedulerTurnError(
@@ -232,15 +246,25 @@ class SchedulerRunMixin:
                     changed = True
         return descendants
 
-    async def _settle_cancelled_suspended_turn(self, aid: int) -> None:
+    async def _settle_cancelled_suspended_turn(
+        self,
+        aid: int,
+        *,
+        reason: str = "interrupted by user",
+        affected_aids: set[int] | None = None,
+    ) -> None:
         """Cancel one suspended turn subtree without shutting down the team."""
         target = self.table.get(aid)
-        if target is None or target.state.phase is not SessionPhase.AWAITING_EVENTS:
+        if target is None or (
+            target.state.phase is not SessionPhase.AWAITING_EVENTS
+            and target.state.pending_events.is_empty()
+        ):
             return
 
-        reason = "interrupted by user"
         failure = f"Error: {reason}"
         descendants = self._turn_descendant_aids(aid)
+        if affected_aids is not None:
+            descendants.intersection_update(affected_aids)
         # Close every wake gate in the subtree before cancelling any producer.
         # A leaf cancellation is delivered to its immediate parent first; if
         # only the public target were terminal, that delivery could resume an
@@ -290,7 +314,7 @@ class SchedulerRunMixin:
                 scb.state.cancel(
                     reason
                     if child_aid == aid
-                    else "parent turn interrupted by user"
+                    else f"parent turn {reason}"
                 )
             if child_aid == aid:
                 scb.state.terminal_reason = reason

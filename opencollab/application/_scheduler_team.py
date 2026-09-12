@@ -339,6 +339,7 @@ class SchedulerTeamMixin:
                 )
             )
             self._sessions[aid] = session
+            self.register_effect_environment(aid, env)
             await self.emit_scheduler_event(
                 self._events.agent_spawned(aid, 0, role, "")
             )

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import logging
+import asyncio
 import posixpath
+import shlex
 import uuid
 from collections.abc import Callable
 
@@ -16,8 +17,6 @@ from opencollab.adapters.git_worktree_evidence import (
     select_diff_base,
     validate_worktree_branch,
 )
-
-logger = logging.getLogger(__name__)
 
 CONTAINER_GIT_TIMEOUT_SECONDS = 60.0
 
@@ -88,6 +87,33 @@ class ContainerWorktreeEnvironment(DockerEnvironment):
         self._head_commit: str | None = None
         self._own_commits: tuple[str, ...] = ()
         self._own_commit_count: int | None = None
+        self._checkpoint_adapter = None
+        self._git_home = f"/tmp/.opencollab-git-{uuid.uuid4().hex}"
+        self._git_home_created = False
+        self._cleanup_task: asyncio.Task | None = None
+
+    async def checkpoint_scope(self, boundary, *, owner_aid: int, causal_frontier):
+        if self._checkpoint_adapter is None:
+            from opencollab.adapters.git_checkpoints import GitCheckpointAdapter
+
+            self._checkpoint_adapter = GitCheckpointAdapter(self)
+        return await self._checkpoint_adapter.checkpoint_scope(
+            boundary,
+            owner_aid=owner_aid,
+            causal_frontier=causal_frontier,
+        )
+
+    async def restore_scope(self, checkpoint):
+        if self._checkpoint_adapter is None:
+            from opencollab.adapters.git_checkpoints import GitCheckpointAdapter
+
+            self._checkpoint_adapter = GitCheckpointAdapter(self)
+        return await self._checkpoint_adapter.restore_scope(checkpoint)
+
+    async def validate_checkpoint_scope(self, checkpoint) -> None:
+        from opencollab.adapters.git_checkpoints import GitCheckpointAdapter
+
+        await GitCheckpointAdapter(self).validate_checkpoint_scope(checkpoint)
 
     @property
     def diff_base(self) -> str | None:
@@ -109,36 +135,131 @@ class ContainerWorktreeEnvironment(DockerEnvironment):
         """How many commits ``own_commits`` was cut from, or ``None``."""
         return self._own_commit_count
 
-    async def _git(self, workdir: str, *args: str) -> ExecResult:
+    async def _git(
+        self,
+        workdir: str,
+        *args: str,
+        env: dict[str, str] | None = None,
+    ) -> ExecResult:
         """Run one Git command in the container, outside the agent's shell.
 
         Not ``exec_cmd``: that runs what the agent's session runs, through the
         image's login shell and whatever command prefix the harness set. The
         worktree's own bookkeeping has to be argv-exact and independent of that.
         """
+        git_environment = dict(env or {})
+        git_environment["HOME"] = self._git_home
+        return await self._exec(
+            shlex.join(("git", *args)),
+            timeout=CONTAINER_GIT_TIMEOUT_SECONDS,
+            workdir=workdir,
+            environment=git_environment,
+            raw=True,
+            allow_revoked=asyncio.current_task() is self._cleanup_task,
+        )
+
+    async def _checkpoint_git(self, *args: str, env: dict[str, str] | None = None) -> str:
+        result = await self._git(self._worktree_dir, *args, env=env)
+        if result.returncode != 0 or result.stdout_truncated or result.stderr_truncated:
+            detail = result.stderr.strip() or f"git exited with status {result.returncode}"
+            raise RuntimeError(detail)
+        return result.stdout.rstrip("\r\n")
+
+    async def checkpoint_workspace_identity(self) -> str:
+        result = await self._docker(
+            "exec",
+            "-w",
+            self._worktree_dir,
+            "--",
+            self._container_id or "",
+            "pwd",
+            "-P",
+            timeout=CONTAINER_GIT_TIMEOUT_SECONDS,
+        )
+        if result.returncode != 0:
+            raise RuntimeError("cannot verify container workspace identity")
+        identity = result.stdout.decode("utf-8", errors="strict").strip()
+        if identity != self._worktree_dir:
+            raise RuntimeError("container workspace identity changed")
+        return identity
+
+    async def _checkpoint_temp_path(self, prefix: str) -> str:
+        await self._bind_attached()
+        result = await self._docker(
+            "exec",
+            "--",
+            self._container_id or "",
+            "mktemp",
+            f"/tmp/{prefix}XXXXXX",
+            timeout=CONTAINER_GIT_TIMEOUT_SECONDS,
+        )
+        if result.returncode != 0:
+            raise RuntimeError("cannot create container checkpoint index")
+        path = result.stdout.decode("utf-8", errors="strict").strip()
+        await self._remove_checkpoint_temp_path(path)
+        return path
+
+    async def _remove_checkpoint_temp_path(self, path: str) -> None:
+        if self._container_id is None:
+            return
+        await self._docker(
+            "exec",
+            "--",
+            self._container_id,
+            "rm",
+            "-f",
+            "--",
+            path,
+            timeout=CONTAINER_GIT_TIMEOUT_SECONDS,
+        )
+
+    async def setup(self, mount_dir: str | None = None, *, parent_environment=None) -> str:
+        await super().setup(mount_dir)
+        self._ensure_active()
+        await self._configure_git_safety()
+        await self._create_worktree()
+        if parent_environment is not None:
+            self.replace_environment(parent_environment)
+        self.bind_workspace(self._worktree_dir)
+        return self._worktree_dir
+
+    async def _configure_git_safety(self) -> None:
+        """Trust only this adapter's repository paths in an isolated Git home."""
         await self._bind_attached()
         container_id = self._container_id
         if container_id is None:
             raise RuntimeError("container worktree is not attached to a container")
-        result = await self._docker(
+        made = await self._docker(
             "exec",
-            "-w",
-            workdir,
             "--",
             container_id,
-            "git",
-            "-c",
-            f"safe.directory={workdir}",
-            *args,
+            "mkdir",
+            "-m",
+            "700",
+            "--",
+            self._git_home,
             timeout=CONTAINER_GIT_TIMEOUT_SECONDS,
         )
-        return result.to_exec_result()
-
-    async def setup(self, mount_dir: str | None = None) -> str:
-        await super().setup(mount_dir)
-        self._ensure_active()
-        await self._create_worktree()
-        return self._worktree_dir
+        if made.returncode != 0:
+            raise RuntimeError("cannot create isolated container Git configuration")
+        self._git_home_created = True
+        for path in (self._repository_root, self._worktree_dir):
+            configured = await self._docker(
+                "exec",
+                "-e",
+                f"HOME={self._git_home}",
+                "--",
+                container_id,
+                "git",
+                "config",
+                "--global",
+                "--add",
+                "safe.directory",
+                path,
+                timeout=CONTAINER_GIT_TIMEOUT_SECONDS,
+            )
+            if configured.returncode != 0:
+                raise RuntimeError("cannot configure container Git repository ownership")
 
     async def _create_worktree(self) -> None:
         made = await self._docker(
@@ -231,42 +352,43 @@ class ContainerWorktreeEnvironment(DockerEnvironment):
         self._own_commits, self._own_commit_count = parse_own_commits(listed.stdout)
 
     async def cleanup(self) -> None:
-        """Remove the worktree and release its branch lease, then detach.
-
-        Every step is best effort and reported rather than raised: the container
-        is the harness's to tear down, and a worktree left behind inside one
-        that is about to be removed costs nothing, while a raising cleanup would
-        turn a finished run into a failed one.
-        """
-        if self._worktree_registered:
-            removed = await self._git(
-                self._repository_root, "worktree", "remove", "--force", self._worktree_dir
-            )
-            if removed.returncode != 0:
-                logger.warning(
-                    "container worktree not removed at %s: %s",
-                    self._worktree_dir,
-                    removed.stderr.strip(),
-                )
-            else:
-                self._worktree_registered = False
-        if self._branch_owned and self._base_commit is not None:
-            # Delete only a lease that still stands where it was claimed, so a
-            # branch something else advanced is left for its owner to explain.
-            released = await self._git(
-                self._repository_root,
-                "update-ref",
-                "-d",
-                f"refs/heads/{self._branch}",
-                self._base_commit,
-            )
-            if released.returncode == 0:
-                self._branch_owned = False
-            else:
-                logger.warning(
-                    "container worktree branch lease retained: %s", released.stderr.strip()
-                )
-        await super().cleanup()
+        """Release owned resources after quiescence; failed steps stay retryable."""
+        async with self._lifecycle_lock:
+            await self._abort_resources_locked()
+            self._cleanup_task = asyncio.current_task()
+            try:
+                if self._checkpoint_adapter is not None:
+                    await self._checkpoint_adapter.discard()
+                    self._checkpoint_adapter = None
+                if self._worktree_registered:
+                    removed = await self._git(
+                        self._repository_root, "worktree", "remove", "--force", self._worktree_dir
+                    )
+                    if removed.returncode != 0:
+                        raise RuntimeError("owned container worktree could not be removed")
+                    self._worktree_registered = False
+                if self._branch_owned and self._base_commit is not None:
+                    ref = f"refs/heads/{self._branch}"
+                    released = await self._git(
+                        self._repository_root, "update-ref", "-d", ref, self._base_commit
+                    )
+                    if released.returncode != 0:
+                        current = await self._git(self._repository_root, "for-each-ref", "--format=%(objectname)", ref)
+                        if current.returncode != 0 or current.stdout.strip() == self._base_commit:
+                            raise RuntimeError("owned container branch lease could not be released")
+                        # An externally advanced ref is no longer ours to delete.
+                    self._branch_owned = False
+                if self._git_home_created and self._container_id is not None:
+                    removed_config = await self._docker(
+                        "exec", "--", self._container_id, "rm", "-rf", "--", self._git_home,
+                        timeout=CONTAINER_GIT_TIMEOUT_SECONDS,
+                    )
+                    if removed_config.returncode != 0:
+                        raise RuntimeError("owned container Git configuration could not be removed")
+                    self._git_home_created = False
+                await self._cleanup_attached_resources()
+            finally:
+                self._cleanup_task = None
 
 
 def _absolute_container_path(path: str, label: str) -> str:

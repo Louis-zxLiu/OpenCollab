@@ -48,6 +48,9 @@ class WorktreePool:
     its result out of a bounded container archive is precisely one that cannot
     allow a mount. Either way the agents get the same isolation and report the
     same evidence; only the side of the wall changes.
+
+    ``owned_environments`` transfers existing Scope owners from the composition
+    root into this pool's retryable teardown. A borrowed base is not an owner.
     """
 
     def __init__(
@@ -56,11 +59,12 @@ class WorktreePool:
         *,
         use_worktrees: bool,
         base_environment: Environment | None = None,
+        owned_environments: tuple[Environment, ...] = (),
     ):
         self._workspace = workspace
         self._use_worktrees = use_worktrees
         self._base_environment = base_environment
-        self._envs: list[Environment] = []
+        self._envs: list[Environment] = list(owned_environments)
 
     async def acquire(self, role: str) -> Environment:
         """Create (and remember) an isolated env for a spawned agent of this role."""

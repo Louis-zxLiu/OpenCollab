@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+from contextlib import nullcontext
 from dataclasses import replace
 from typing import Any
 
@@ -290,7 +291,9 @@ class _SessionRunCompletionMixin:
                 result.messages_to_append,
                 blocked_messages,
             )
-            result.apply_to(self.state)
+            transaction = getattr(self, "tool_effect_transaction", None)
+            with transaction(result.messages_to_append) if transaction else nullcontext():
+                result.apply_to(self.state)
             self._record_submission(result)
             self._pending_tool_allowlist = None
             self._pending_tool_gate_label = None
@@ -331,7 +334,14 @@ class _SessionRunCompletionMixin:
 
         observations.apply_read_write_counter_to(self.state)
         observations.apply_evidence_counter_to(self.state)
-        self._buffer_completed_rows(table, order, completed_messages)
+        transaction = getattr(self, "tool_effect_transaction", None)
+        previous_rows = table.rows.copy()
+        with transaction(completed_messages) if transaction else nullcontext():
+            try:
+                self._buffer_completed_rows(table, order, completed_messages)
+            except BaseException:
+                table.rows = previous_rows
+                raise
 
         self._pending_tool_allowlist = None
         self._pending_tool_gate_label = None
@@ -368,20 +378,7 @@ class _SessionRunCompletionMixin:
             )
 
     async def call_llm(self, tools: list[dict] | None) -> CompletionResponse:
-        """Complete against the shaped view of history.
-
-        The shaper reshapes a copy for the model's view only;
-        ``state.messages`` stays the complete, persisted history.
-
-        Context-overflow safety net: the normal shaped call uses the estimate-
-        gated reactive layers, which can under-count dense content (code / JSON /
-        CJK) and let a prompt overflow the real window. If the provider rejects
-        the call as a context overflow, run a FORCED maximal compaction pass
-        (compact every sheddable source unconditionally toward target,
-        regardless of the estimate) and retry ONCE. If that *still* overflows —
-        e.g. the pinned identity/team/task seed alone exceeds the window — raise
-        ``_ContextOverflowStop`` so the caller stops the session gracefully.
-        """
+        """Complete against the shaped view of history."""
         # Closed-loop steering: build a fresh per-turn block from the live
         # counters. When history ends on a USER turn (the start of a turn) the
         # block is folded into that message IN PLACE — no new message, so indices

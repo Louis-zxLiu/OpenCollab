@@ -72,3 +72,4 @@ asyncio_mode = "auto"
 pythonpath = ["."]
 testpaths = ["tests", "examples/mini-edict/tests"]
 norecursedirs = [".git", ".venv", "__pycache__"]
+markers = ["docker: requires a real Docker daemon and configured benchmark image"]

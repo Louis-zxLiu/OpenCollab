@@ -95,11 +95,16 @@ class WorktreeEnvironment(Environment):
         )
         return result.to_exec_result()
 
-    async def setup(self, mount_dir: str | None = None) -> str:
+    async def setup(
+        self,
+        mount_dir: str | None = None,
+        *,
+        parent_environment=None,
+    ) -> str:
         async with self._lifecycle_lock:
-            return await self._setup_locked(mount_dir)
+            return await self._setup_locked(mount_dir, parent_environment)
 
-    async def _setup_locked(self, mount_dir: str | None) -> str:
+    async def _setup_locked(self, mount_dir: str | None, parent_environment) -> str:
         self._ensure_active()
         if mount_dir is not None:
             raise ValueError("mount_dir is supported only by container environments")
@@ -133,9 +138,11 @@ class WorktreeEnvironment(Environment):
             else:
                 await self._setup_directory_copy()
             assert self._worktree_dir is not None
-            exposed_workspace = os.path.join(
-                self._worktree_dir,
-                self._source_subdir,
+            exposed_workspace = os.path.realpath(
+                os.path.join(
+                    self._worktree_dir,
+                    self._source_subdir,
+                )
             )
             if not os.path.isdir(exposed_workspace):
                 raise RuntimeError("source subdirectory is absent from the worktree")
@@ -159,10 +166,60 @@ class WorktreeEnvironment(Environment):
                     f"{type(cleanup_error).__name__}: {cleanup_error}"
                 )
             raise
+        inherited_environment = (
+            parent_environment
+            if parent_environment is not None
+            else self.snapshot_environment()
+        )
         self.workspace = exposed_workspace
         self.host_workspace = exposed_workspace
+        self.bind_workspace(exposed_workspace)
         self._local_env = LocalEnvironment(exposed_workspace)
+        self.replace_environment(inherited_environment)
+        self.bind_workspace(exposed_workspace)
+        self._local_env.bind_workspace(exposed_workspace)
         return exposed_workspace
+
+    def snapshot_environment(self):
+        if self._local_env is not None:
+            return self._local_env.snapshot_environment()
+        return super().snapshot_environment()
+
+    def replace_environment(self, snapshot) -> None:
+        super().replace_environment(snapshot)
+        if self._local_env is not None:
+            self._local_env.replace_environment(snapshot)
+
+    def set_environment_variable(self, name: str, value: str) -> None:
+        super().set_environment_variable(name, value)
+        if self._local_env is not None:
+            self._local_env.set_environment_variable(name, value)
+
+    def unset_environment_variable(self, name: str) -> None:
+        super().unset_environment_variable(name)
+        if self._local_env is not None:
+            self._local_env.unset_environment_variable(name)
+
+    async def checkpoint_scope(self, boundary, *, owner_aid: int, causal_frontier):
+        if self._local_env is None:
+            await self.setup()
+        assert self._local_env is not None
+        return await self._local_env.checkpoint_scope(
+            boundary,
+            owner_aid=owner_aid,
+            causal_frontier=causal_frontier,
+        )
+
+    async def validate_checkpoint_scope(self, checkpoint) -> None:
+        if self._local_env is None:
+            raise RuntimeError("Worktree is not ready for checkpoint validation")
+        await self._local_env.validate_checkpoint_scope(checkpoint)
+
+    async def restore_scope(self, checkpoint):
+        if self._local_env is None:
+            await self.setup()
+        assert self._local_env is not None
+        return await self._local_env.restore_scope(checkpoint)
 
     async def _setup_git_worktree(self) -> None:
         status = await self._git(
@@ -605,6 +662,10 @@ class WorktreeEnvironment(Environment):
             await self.setup()
         assert self._local_env is not None
         return await self._local_env.exec_cmd(cmd, timeout)
+
+    async def quiesce(self) -> None:
+        if self._local_env is not None:
+            await self._local_env.quiesce()
 
     async def read_file(self, path: str) -> str:
         self._ensure_active()

@@ -43,4 +43,64 @@ class RunResult(Generic[T]):
         return self
 
 
-__all__ = ["RunError", "RunResult"]
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RollbackPlan:
+    """Secret-free rollback preview returned by the public SDK."""
+
+    target_effect_ids: frozenset[str]
+    invalidated_effect_ids: frozenset[str]
+    affected_agent_ids: frozenset[int]
+    checkpoint_by_agent: dict[int, str | None]
+    digest: str
+    checkpoint_filesystem_digests: dict[int, str | None] = field(default_factory=dict)
+    checkpoint_environment_digests: dict[int, str | None] = field(default_factory=dict)
+    checkpoint_identity_digests: dict[int, str | None] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RestoreResult:
+    """Secret-free Scope restore outcome."""
+
+    agent_id: int
+    checkpoint_id: str | None
+    status: Literal["restored", "failed", "skipped"]
+    filesystem_digest: str | None = None
+    environment_digest: str | None = None
+    reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CheckpointResult:
+    """Secret-free checkpoint metadata returned by the public SDK."""
+
+    checkpoint_id: str
+    filesystem_digest: str
+    environment_digest: str
+    workspace_identity_digest: str
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RollbackResult:
+    """Secret-free result of an explicit rollback operation."""
+
+    plan: RollbackPlan
+    restores: tuple[RestoreResult, ...]
+    invalidated: bool
+
+    @property
+    def affected_agent_ids(self) -> frozenset[int]:
+        return self.plan.affected_agent_ids
+
+    @property
+    def invalidated_effect_ids(self) -> frozenset[str]:
+        return self.plan.invalidated_effect_ids
+
+
+__all__ = [
+    "CheckpointResult",
+    "RestoreResult",
+    "RollbackPlan",
+    "RollbackResult",
+    "RunError",
+    "RunResult",
+]

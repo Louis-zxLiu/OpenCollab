@@ -24,6 +24,7 @@ from typing import Any, Callable
 from opencollab.application._scheduler_cleanup import SchedulerCleanupMixin
 from opencollab.application._scheduler_persistence import SchedulerPersistenceMixin
 from opencollab.application._scheduler_review import SchedulerReviewMixin
+from opencollab.application._scheduler_rollback import SchedulerRollbackMixin
 from opencollab.application._scheduler_run import SchedulerRunMixin
 from opencollab.application._scheduler_team import SchedulerTeamMixin
 from opencollab.application.autosave import AutoSaveSubscriber
@@ -38,6 +39,7 @@ from opencollab.application.ports import (
     TracePort,
     WorktreePoolPort,
 )
+from opencollab.application.replay import SchedulerHistoryMixin
 from opencollab.application.scheduler_dedup import InflightDedupMixin
 from opencollab.application.scheduler_lifecycle import LifecycleMixin
 from opencollab.application.scheduler_messaging import MessagingMixin
@@ -57,6 +59,8 @@ class Scheduler(
     SchedulerRunMixin,
     SchedulerCleanupMixin,
     SchedulerReviewMixin,
+    SchedulerHistoryMixin,
+    SchedulerRollbackMixin,
     LifecycleMixin,
     MessagingMixin,
     InflightDedupMixin,
@@ -111,6 +115,7 @@ class Scheduler(
         event_factory: SchedulerEventFactory | None = None,
         prebuild_team: bool = False,
         serialize_turns: bool = False,
+        history_enabled: bool = False,
     ):
         self._session_factory = session_factory
         self._worktree_pool = worktree_pool
@@ -223,6 +228,8 @@ class Scheduler(
         self._review_parent_lease_tracker: contextvars.ContextVar[
             tuple[int, dict[str, int]] | None
         ] = contextvars.ContextVar("review_parent_lease_tracker", default=None)
+        self._init_rollback()
+        self._history_enabled = history_enabled
 
     def register_lifecycle_resource(
         self,

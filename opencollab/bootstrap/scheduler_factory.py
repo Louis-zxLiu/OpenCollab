@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from opencollab.adapters.env import Environment
+from opencollab.adapters.env import Environment, LocalEnvironment
 from opencollab.adapters.hooks import ShellHookRunner
 from opencollab.adapters.storage import SessionStore
 from opencollab.adapters.worktree_pool import WorktreePool
@@ -202,6 +202,9 @@ def build_scheduler(
         )
     lead_save_path = agent_save_path(run_dir, 0, team_cfg.entry) if run_dir else None
 
+    # The composition root owns a default lead Scope; borrowed Scopes stay
+    # with their caller. Both lead and child owners use the existing pool teardown.
+    lead_environment = environment if environment is not None else LocalEnvironment(ctx.workspace)
     session_factory = DefaultSessionFactory(
         SpawnConfig(
             model=cfg["model"],
@@ -232,7 +235,7 @@ def build_scheduler(
         ),
         team_cfg=team_cfg,
         lead_workspace=ctx.workspace,
-        lead_environment=environment,
+        lead_environment=lead_environment,
         interactive=interactive,
         save_dir=run_dir,
         allow_unisolated_child_tests=allow_unisolated_child_tests,
@@ -247,9 +250,11 @@ def build_scheduler(
         ctx.workspace,
         use_worktrees=use_worktrees,
         base_environment=environment,
+        owned_environments=(lead_environment,) if environment is None else (),
     )
 
     scheduler = Scheduler(
+        history_enabled=True,
         session_factory=session_factory,
         worktree_pool=worktree_pool,
         event_sink=event_bus,
